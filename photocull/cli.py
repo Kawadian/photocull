@@ -4,7 +4,9 @@ import argparse
 import json
 import sys
 from dataclasses import asdict
+from sqlite3 import OperationalError
 
+from photocull.archive_cli import add_command, print_result
 from photocull.config import load_settings
 from photocull.db import connect, initialize
 from photocull.db.jobs import progress, request_scan
@@ -29,6 +31,7 @@ def main() -> None:
     mode = xmp.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="preview changes (default)")
     mode.add_argument("--write", action="store_true", help="write confirmed by the operator")
+    add_command(commands)
     args = parser.parse_args()
     settings = load_settings()
     if args.command == "libraries":
@@ -73,6 +76,12 @@ def main() -> None:
     if args.library not in settings.libraries:
         parser.error(f"Unknown library: {args.library}")
     path = settings.library_state(args.library) / "index.db"
+    if args.command == "archive":
+        try:
+            print_result(args, settings, path)
+        except (LookupError, OSError, ValueError, OperationalError) as error:
+            parser.exit(1, f"{error}\n")
+        return
     initialize(path)
     if args.command == "xmp":
         failed = False

@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 
+from photocull.api.archive import mount_archive
 from photocull.api.insights import mount_insights
 from photocull.config import MLSettings, Settings, Stage, load_settings
 from photocull.db import connect, initialize
@@ -569,6 +570,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
     mount_insights(app, settings, library_path)
+    mount_archive(app, settings, library_path)
     if (settings.static_dir / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=settings.static_dir / "assets"), name="frontend")
     return app
