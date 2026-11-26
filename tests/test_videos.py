@@ -86,3 +86,45 @@ def test_webvtt_preserves_timing_and_escapes_transcript_markup():
     assert "00:01:01.250 --> 00:01:04.800" in content
     assert "A &amp; B &lt;c&gt;caption" in content
     assert "zero-length" not in content
+
+
+def test_very_short_clip_without_audio_or_transcript_model(tmp_path):
+    settings = make_settings(tmp_path, video=True, transcript=True, offline=True)
+    clip = settings.libraries["test"].root / "短い映像.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=96x64:r=16",
+            "-frames:v",
+            "2",
+            "-c:v",
+            "mpeg4",
+            str(clip),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    with TestClient(create_app(settings)) as client, start_worker(settings):
+        scan(client)
+        (asset,) = get(client, f"{BASE}/assets?kind=video")["items"]
+        url = f"{URL}/assets/{asset['id']}/video"
+
+        def done():
+            result = get(client, url)
+            for key in ("video", "transcript"):
+                assert result[key]["status"] != "error", result
+            return (
+                result
+                if all(result[key]["status"] == "done" for key in ("video", "transcript"))
+                else None
+            )
+
+        result = wait_for(done)
+        assert result["video"]["data"]["reasons"] == ["very_short"]
+        assert result["video"]["data"]["preview"]
+        assert result["transcript"]["data"] == {"segments": [], "has_audio": False}

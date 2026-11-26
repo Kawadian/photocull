@@ -251,6 +251,8 @@ def test_day_stories_report_and_keeper_outputs(tmp_path):
         download = client.get(f"{URL}/transfers/{job}/download")
         download.raise_for_status()
         assert download.headers["content-type"] == "application/zip"
+        prefix = client.get(f"{URL}/transfers/{job}/download", headers={"Range": "bytes=0-3"})
+        assert prefix.status_code == 206 and prefix.content == b"PK\x03\x04"
         with ZipFile(BytesIO(download.content)) as archive:
             assert any(name.endswith(".xmp") for name in archive.namelist())
             assert {archive.read(name) for name in archive.namelist()} == {
