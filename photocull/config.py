@@ -82,6 +82,7 @@ class BurstSettings(BaseModel):
     window_seconds: float = Field(default=2, gt=0, allow_inf_nan=False)
     max_hamming_distance: int = Field(default=8, ge=0, le=64)
     min_cosine: Ratio = 0.88
+    aesthetic_weight: Ratio = 0.25
 
 
 class MLSettings(BaseModel):
@@ -135,6 +136,41 @@ class MLSettings(BaseModel):
         return _fingerprint((self.model_key, self.vocabulary, self.tag_top_k, 1))
 
 
+class InsightSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    aesthetic: bool = False
+    taste: bool = False
+    faces: bool = False
+    story: bool = False
+    video: bool = False
+    transcript: bool = False
+    watch: bool = False
+    export: bool = False
+    report: bool = False
+    offline: bool = False
+    threads: int = Field(default=2, ge=1, le=8)
+    face_revision: str = Field(
+        default="48b10fa505aeb51fbd127fc60a5c660040e823b7", pattern=r"^[a-f0-9]{40}$"
+    )
+    face_threshold: Ratio = 0.45
+    taste_min_per_class: int = Field(default=8, ge=2, le=1000)
+    story_gap_minutes: int = Field(default=90, ge=1, le=1440)
+    story_distance_km: float = Field(default=15, gt=0, le=1000)
+    story_geonames: Path | None = None
+    transcript_model: str = Field(
+        default="Systran/faster-whisper-base",
+        pattern=r"^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+$",
+    )
+    transcript_revision: str = Field(
+        default="ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66", pattern=r"^[a-f0-9]{40}$"
+    )
+    watch_mode: Literal["auto", "poll"] = "auto"
+    watch_interval: float = Field(default=60, ge=1, le=86400)
+    watch_debounce: float = Field(default=3, ge=0.1, le=300)
+    export_roots: dict[LibraryName, Path] = Field(default_factory=dict)
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -149,6 +185,7 @@ class Settings(BaseModel):
     scoring: ScoringSettings = Field(default_factory=ScoringSettings)
     burst: BurstSettings = Field(default_factory=BurstSettings)
     ml: MLSettings = Field(default_factory=MLSettings)
+    insights: InsightSettings = Field(default_factory=InsightSettings)
 
     @model_validator(mode="after")
     def validate_state(self) -> Settings:
@@ -156,6 +193,14 @@ class Settings(BaseModel):
         for name, library in self.libraries.items():
             if any(root.resolve().is_relative_to(state) for root in library.roots):
                 raise ValueError(f"library {name} has a media root inside the state directory")
+        for name, destination in self.insights.export_roots.items():
+            target = destination.resolve()
+            for area in (
+                state,
+                *(root.resolve() for lib in self.libraries.values() for root in lib.roots),
+            ):
+                if target.is_relative_to(area) or area.is_relative_to(target):
+                    raise ValueError(f"export root {name} overlaps a media or state directory")
         return self
 
     def library_state(self, name: str) -> Path:
@@ -191,6 +236,13 @@ def load_settings() -> Settings:
                 (config.parent / Path(root).expanduser()).absolute()
                 for root in library["allowed_roots"]
             ]
+
+    insights = values.setdefault("insights", {})
+    _paths(insights, ("story_geonames",), config.parent)
+    if places := env.get("PHOTOCULL_INSIGHTS_STORY_GEONAMES"):
+        insights["story_geonames"] = (cwd / Path(places).expanduser()).absolute()
+    if roots := insights.get("export_roots"):
+        _paths(roots, tuple(roots), config.parent)
 
     env_values = {
         field: env[key]
@@ -232,9 +284,14 @@ def load_settings() -> Settings:
         ("scoring", ScoringSettings),
         ("burst", BurstSettings),
         ("ml", MLSettings),
+        ("insights", InsightSettings),
     ):
         settings = values.setdefault(section, {})
-        for field in model.model_fields.keys() - {"tag_vocabulary"}:
+        for field in model.model_fields.keys() - {
+            "tag_vocabulary",
+            "story_geonames",
+            "export_roots",
+        }:
             if (value := env.get(f"PHOTOCULL_{section.upper()}_{field.upper()}")) is not None:
                 settings[field] = value
 

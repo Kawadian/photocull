@@ -89,6 +89,12 @@ def asset_page_query(
     similar_group_id: int | None = None,
     tag: str | None = None,
     tag_key: str | None = None,
+    person_id: int | None = None,
+    face_key: str | None = None,
+    kind: str | None = None,
+    aesthetic_key: str | None = None,
+    min_aesthetic: float | None = None,
+    sort_score: tuple[str, str, float | None] | None = None,
 ) -> tuple[str, tuple]:
     clauses, score_params = scores.clauses()
     # Order burst members through the membership index. All SQL fragments are
@@ -105,6 +111,7 @@ def asset_page_query(
         ("a.day = ?", day),
         ("m.burst_id = ?", burst_id),
         ("sm.group_id = ?", similar_group_id),
+        ("a.kind = ?", kind),
     ):
         if value is not None:
             filters.append(condition)
@@ -112,9 +119,32 @@ def asset_page_query(
     if tag is not None:
         joins += """ JOIN asset_tags AS t ON t.asset_id = a.id
                      JOIN asset_embeddings AS te ON te.asset_id = a.id"""
-        filters.extend(("t.tag = ?", "te.tag_key = ?", "t.asset_id > ?"))
-        params.extend((tag, tag_key or "", cursor))
+        filters.extend(("t.tag = ?", "te.tag_key = ?"))
+        params.extend((tag, tag_key or ""))
+        if not sort_score:
+            filters.append("t.asset_id > ?")
+            params.append(cursor)
         order = "t.asset_id"
+    if person_id is not None:
+        filters.append("""EXISTS (SELECT 1 FROM faces AS f WHERE f.person_id = ?
+            AND f.key = ? AND f.asset_id = a.id)""")
+        params.extend((person_id, face_key or ""))
+    if min_aesthetic is not None:
+        filters.append("""EXISTS (SELECT 1 FROM insight_results AS i WHERE i.stage = 'aesthetic'
+            AND i.asset_id = a.id AND i.key = ? AND i.score >= ?)""")
+        params.extend((aesthetic_key or "", min_aesthetic))
+    if sort_score:
+        stage, key, previous = sort_score
+        # Starting from the score index permits keyset pagination on large catalogs.
+        joins += " JOIN insight_results AS ranked ON ranked.asset_id = a.id"
+        filters.pop(1)
+        params.pop(0)
+        filters.extend(("ranked.stage = ?", "ranked.key = ?", "ranked.score IS NOT NULL"))
+        params.extend((stage, key))
+        if previous is not None:
+            filters.append("ranked.score <= ? AND (ranked.score < ? OR ranked.asset_id > ?)")
+            params.extend((previous, previous, cursor))
+        order = "ranked.score DESC, ranked.asset_id"
     return (
         f"""SELECT {ASSET_COLUMNS} {joins}
             WHERE {" AND ".join(filters)} ORDER BY {order} LIMIT ?""",
