@@ -13,5 +13,14 @@ worker:
   memory_mb: 1536
   batch_size: 8
   parallelism: 1
-  stages: [exif, preview]
+  stages: [exif, preview, score]
   device: cpu
+# scoring:
+#   min_sharpness: 0.02
+#   min_exposure: 0.08
+#   max_exposure: 0.92
+#   max_clipped_highlights: 0.25
+#   max_clipped_shadows: 0.40
+# burst:
+#   window_seconds: 2
+#   max_hamming_distance: 8

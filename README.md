@@ -1,6 +1,6 @@
 # Photocull
 
-Photocull is a self-hosted photo and video culler for a LAN or Tailscale network. Browse by folder or capture day, review previews with a filmstrip and keyboard, and export ratings as XMP sidecars. The FastAPI service and SQLite indexing worker run independently, so you can browse and rate while the worker scans or restarts.
+Photocull is a self-hosted photo and video culler for a LAN or Tailscale network. Browse by folder, capture day or burst, review previews with a filmstrip and keyboard, and export ratings as XMP sidecars. The FastAPI service and SQLite indexing worker run independently, so you can browse and rate while the worker scans or restarts.
 
 ## Run locally
 
@@ -25,7 +25,7 @@ Set `PHOTOCULL_LIBRARY_ROOT` in `.env` to your photo directory. In two terminals
 
 Open `http://127.0.0.1:8000` and choose **Scan library**. You can also queue a scan with `.venv/bin/photocull scan photos` and check it with `.venv/bin/photocull status photos`. The API serves `frontend/dist` at the same origin. For frontend development, `npm --prefix frontend run dev` starts Vite on loopback and proxies `/api` to port 8000.
 
-The base package is the API and CLI (`uv sync --locked --no-dev` or `pip install .`). The worker installs media decoders with `pip install '.[worker]'` or the corresponding uv extra. The reserved `ml` extra is empty in Phase 1. No model weights are needed.
+The base package is the API and CLI (`uv sync --locked --no-dev` or `pip install .`). The worker extra installs media decoders, Pillow and NumPy. Scoring runs on the CPU without model weights.
 
 ## Configure libraries
 
@@ -45,7 +45,7 @@ The [YAML example](deploy/photocull.example.yaml) shows both layouts, and [.env.
 | `PHOTOCULL_TOKEN_FILE` | Optional path to a shared printable ASCII token |
 | `PHOTOCULL_WORKER_MEMORY_MB` | `1536` MiB peak worker RSS threshold |
 | `PHOTOCULL_WORKER_BATCH_SIZE`, `PHOTOCULL_WORKER_PARALLELISM` | `8` assets per scan transaction and `1` decoding task at a time |
-| `PHOTOCULL_WORKER_STAGES`, `PHOTOCULL_WORKER_DEVICE` | `exif,preview`, `cpu`; Phase 1 decoding uses CPU |
+| `PHOTOCULL_WORKER_STAGES`, `PHOTOCULL_WORKER_DEVICE` | `exif,preview,score` and `cpu` |
 
 Photocull scans DNG, ARW and common RAW formats, HEIF/HEIC/HIF, JPEG, PNG, WebP, TIFF, and MP4/MOV/M4V/MKV. RAW previews prefer an embedded JPEG and fall back to a half-size demosaic. Videos display a poster and duration. Capture day uses the best available EXIF timestamp and falls back to the file modification day in UTC. A **100%** view displays decoded pixels at their natural size. If an image exceeds the fit preview limit, **100%** opens a native-size center crop.
 
@@ -70,9 +70,33 @@ Photocull writes `STEM.xmp` beside the resolved original and preserves other XMP
 
 For a proprietary RAW file such as ARW, select it in Lightroom Classic and use **Metadata → Read Metadata From File**. Lightroom stores metadata inside formats such as DNG, JPEG and TIFF, so its sidecar import behavior depends on the format. Photocull uses a sidecar for every format. [Adobe metadata basics](https://helpx.adobe.com/lightroom-classic/desktop/organize-photos-in-lightroom-classic/metadata-basics-actions.html) · [Adobe advanced metadata actions](https://helpx.adobe.com/lightroom-classic/desktop/organize-photos-in-lightroom-classic/advanced-metadata-actions.html)
 
+## Scores and bursts
+
+- **Scores** shows normalized sharpness, average luminance and the share of pixels near black or white. Use **Score filters** to set a sharpness minimum, choose an exposure range or find flagged assets.
+- **Clear auto-reject** dismisses one flag. **Clear all auto-rejects…** dismisses current flags across the library. Dismissals persist when a photo is rescored or thresholds change. Ratings and XMP export use the manual review controls.
+- **Bursts** lists groups of similar photos taken close together. Filters find bursts with at least one matching member. Open a burst to see all its members, use **Compare with best** for a side-by-side view and **Set as best** to choose a different keeper. **Reject rest…** confirms and flags the others in one action. **Undo burst reject** restores only the flags changed by that action.
+
+The worker scores still-image previews using grayscale luminance and Laplacian variance on a resampled image of up to 512 pixels per side. The 64-bit dHash is compared by Hamming distance. A member must be within both thresholds of its burst's first photo. Burst membership requires an EXIF capture time. Capture subseconds are used when available in the indexed metadata. The best recommendation balances sharpness (60%), distance from mid-gray exposure (25%) and unclipped pixels (15%). A manually selected best follows its photo when groups are recalculated.
+
+| Worker environment variable | YAML key | Default |
+| --- | --- | --- |
+| `PHOTOCULL_SCORING_MIN_SHARPNESS` | `scoring.min_sharpness` | `0.02` |
+| `PHOTOCULL_SCORING_MIN_EXPOSURE` | `scoring.min_exposure` | `0.08` |
+| `PHOTOCULL_SCORING_MAX_EXPOSURE` | `scoring.max_exposure` | `0.92` |
+| `PHOTOCULL_SCORING_MAX_CLIPPED_HIGHLIGHTS` | `scoring.max_clipped_highlights` | `0.25` |
+| `PHOTOCULL_SCORING_MAX_CLIPPED_SHADOWS` | `scoring.max_clipped_shadows` | `0.40` |
+| `PHOTOCULL_BURST_WINDOW_SECONDS` | `burst.window_seconds` | `2` |
+| `PHOTOCULL_BURST_MAX_HAMMING_DISTANCE` | `burst.max_hamming_distance` | `8` |
+
+Scoring thresholds are inclusive bounds from 0 to 1. Set minimums to 0 and maximums to 1 to disable automatic flag suggestions. Restart the worker after changing settings. With Compose, edit the mounted YAML. The worker re-evaluates stored scores against new thresholds and refreshes groups after pending indexing work completes.
+
+Upgrading from Phase 1 schedules one score job per active still image through `0004_scores_and_bursts.sql`. Ensure `score` is in the worker's stage list if you previously set it explicitly. Scoring reads cached previews and adds one compact score row per photo plus membership rows for grouped photos. Allow CPU time and preview reads for the initial backfill. A 512 × 512 float analysis plane occupies 1 MiB, with additional temporary arrays and a decoded preview per worker task. The default worker parallelism of 1 and 1536 MiB restart threshold also cover media decoding. The API uses the existing 500 MiB deployment budget and queries SQLite for results.
+
+The asset and burst lists use integer cursors and accept `min_sharpness`, `min_exposure`, `max_exposure` and `auto_reject`. Pass `burst_id` to the asset list to page through a burst. The OpenAPI schema lists the burst selection, reject, undo and flag-clearing endpoints.
+
 ## SQLite and service health
 
-Keep state on a local writable Linux filesystem so both processes can share SQLite WAL, its `-wal` and `-shm` files, and the worker lock. Each library has its own index DB and generated thumbnails, previews and detail crops. Schema changes migrate automatically at startup. The worker holds an exclusive lock per library for indexing. It commits in batches and does filesystem I/O outside DB transactions. API writes for rating changes and queue requests use short `BEGIN IMMEDIATE` transactions. Connections use WAL, a 10-second busy timeout and `synchronous=NORMAL`.
+Keep state on a local writable Linux filesystem so both processes can share SQLite WAL, its `-wal` and `-shm` files, and the worker lock. Each library has its own index DB and generated thumbnails, previews and detail crops. Schema changes migrate automatically at startup. The worker holds an exclusive lock per library for indexing. It commits in batches and does filesystem I/O outside DB transactions. API writes use short `BEGIN IMMEDIATE` transactions. Connections use WAL, a 10-second busy timeout and `synchronous=NORMAL`.
 
 A scan computes SHA-256 for new and changed media and reuses hashes for files with unchanged source identity, size and timestamps. Jobs track each asset and stage. The worker requeues in-flight jobs on restart and preserves completed work. After three interrupted runs of a stage, the worker marks that job as failed and processes the rest of the queue. A stage can be rerun with `POST /api/libraries/{library}/assets/{asset_id}/jobs/{stage}`. The OpenAPI schema is at `/openapi.json`.
 

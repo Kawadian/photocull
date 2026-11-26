@@ -104,8 +104,9 @@ EXIF:
 
 **Phase 2:**
 
-- Classical scores: sharpness/blur, exposure, clipped highlights. Auto-reject only as a reversible flag.
-- Burst / near-duplicate grouping (time window + similarity once embeddings exist; time+hash in the meantime).
+- The worker adds a resumable `score` stage for still images with previews. It stores normalized Laplacian sharpness, mean luminance, clipped highlights and clipped shadows. Thresholds set reversible auto-reject flags with reasons. Ratings and explicit sidecar export are independent.
+- Burst grouping uses EXIF capture times and 64-bit dHash, with configurable time and Hamming-distance thresholds. The catalog stores membership, a score-based recommendation and the user's best selection across regrouping.
+- The API supports cursor-paginated score and burst filters, flag dismissal, best selection and atomic burst reject/undo. The review UI shows scores, offers side-by-side burst comparison and retains the Phase 1 shortcuts. See the [configuration and sizing guide](../README.md#scores-and-bursts).
 
 **Phase 3:**
 
