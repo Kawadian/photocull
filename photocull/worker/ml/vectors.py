@@ -8,6 +8,7 @@ from numkong import angular
 
 BLOCK = 2048
 STORAGE_DTYPE = "<f2"
+COSINE_TOLERANCE = 1e-6
 
 VECTOR_PAGE = """
     SELECT e.asset_id, e.vector FROM asset_embeddings AS e
@@ -66,7 +67,11 @@ def exact_search(
         if exclude is not None:
             scores[ids == exclude] = -np.inf
         order = np.lexsort((ids, -scores))[:limit]
-        best.extend((int(ids[i]), float(scores[i])) for i in order if scores[i] >= minimum)
+        best.extend(
+            (int(ids[i]), float(scores[i]))
+            for i in order
+            if scores[i] >= minimum - COSINE_TOLERANCE
+        )
         best.sort(key=lambda item: (-item[1], item[0]))
         del best[limit:]
     if not best:

@@ -72,6 +72,9 @@ def fetch_search(client, worker, pool, endpoint, body):
 
 
 def test_embedding_stages_groups_tags_and_search(settings):
+    settings = settings.model_copy(
+        update={"ml": settings.ml.model_copy(update={"similar_threshold": 1.0})}
+    )
     before = {
         path: sha256(path.read_bytes()).hexdigest()
         for path in settings.libraries["photos"].root.iterdir()
@@ -121,7 +124,7 @@ def test_embedding_stages_groups_tags_and_search(settings):
                     client, worker, pool, "search", {"query": query, "limit": 2}
                 )
                 assert [item["path"] for item in items] == ["a.jpg", "c.jpg"]
-                assert all(item["similarity"] == 1 for item in items)
+                assert [item["similarity"] for item in items] == pytest.approx([1.0, 1.0])
             items, stale = fetch_search(client, worker, pool, "assets/1/similar", {"tag": "cat"})
             assert [item["path"] for item in items] == ["c.jpg", "d.jpg"]
             items, _ = fetch_search(client, worker, pool, "search", {"query": "犬", "tag": "dog"})

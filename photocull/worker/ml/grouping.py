@@ -9,7 +9,7 @@ from usearch.index import Index
 
 from photocull.db import write
 from photocull.db.catalog import mark_catalog_updated
-from photocull.worker.ml.vectors import blob_vector
+from photocull.worker.ml.vectors import COSINE_TOLERANCE, blob_vector
 
 LOG = logging.getLogger(__name__)
 GROUP_BLOCK = 128
@@ -81,7 +81,7 @@ class SimilarityGroups:
         if self.index is None or not len(self.index):
             return None
         found = self.index.search(vector, count=8, threads=1)
-        threshold = 1 - self.threshold + 1e-6
+        threshold = 1 - self.threshold + COSINE_TOLERANCE
         nearest = min(
             (
                 (float(distance), int(key))

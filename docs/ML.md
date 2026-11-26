@@ -9,8 +9,8 @@ The default is the split INT8 ONNX export of the multilingual **SigLIP 2 Base/16
 | Consideration | ONNX Runtime CPU, split INT8 | OpenCLIP + PyTorch CPU, comparable full-precision model |
 | --- | --- | --- |
 | Model cache | 90.2 MiB vision, 270.3 MiB text, 32.8 MiB tokenizer | About 1.4 GiB just for the equivalent upstream FP32 weights |
-| RAM | 847 MiB peak child RSS measured with both encoders loaded | The FP32 parameters alone require about 1.4 GiB resident when both encoders are loaded, plus the Python runtime and activations |
-| CPU | Quantized matrix kernels and a measured 0.205 s per photo on CT 205, 2 threads and batches of 4 | FP32 inference reads four-byte weights and uses float kernels. Runtime and speed depend on the CPU and build. No PyTorch timing was taken on CT 205. |
+| RAM | 864 MiB peak child RSS measured with both encoders loaded | The FP32 parameters alone require about 1.4 GiB resident when both encoders are loaded, plus the Python runtime and activations |
+| CPU | Quantized matrix kernels and a measured 0.207 s per photo on CT 205, 2 threads and batches of 4 | FP32 inference reads four-byte weights and uses float kernels. Runtime and speed depend on the CPU and build. No PyTorch timing was taken on CT 205. |
 | Packages | `onnxruntime`, `tokenizers`, `usearch`, `numkong` plus the existing worker extra | PyTorch CPU, torchvision and OpenCLIP, plus a compatible multilingual model and tokenizer |
 
 ONNX Runtime provides a smaller cache and supports separate CPU sessions for vision and text. The measured speed and memory use fit the worker budget with both sessions resident. Quantized performance varies with the CPU instruction set. [Upstream weight sizes](https://huggingface.co/google/siglip2-base-patch16-224/tree/main) · [ONNX Runtime quantization guide](https://onnxruntime.ai/docs/performance/model-optimizations/quantization.html)
@@ -94,16 +94,16 @@ uv run --locked --extra ml pytest -m model -s
 uv run --locked --extra ml python scripts/benchmark_catalog.py --assets 100000 --requests 25 --ml
 ```
 
-CT 205 had two visible Ryzen 5 5500U CPU cores and 4 GiB RAM. On 2026-11-26, the first verified cache download took 13.9 s and stored 393.3 MiB. The four English and Japanese cat and coffee queries all ranked the expected photo first. The ML child peaked at 847 MiB RSS and processed warm previews at 0.205 s per photo with two threads and batches of four. At that rate, encoding 50,000 photos takes about 2.8 hours and 100,000 takes about 5.7 hours. Initial decode, tagging, warm-up and contention add time.
+CT 205 had two visible Ryzen 5 5500U CPU cores and 4 GiB RAM. On 2026-11-26, the first verified cache download took 13.9 s and stored 393.3 MiB. The four English and Japanese cat and coffee queries all ranked the expected photo first. The ML child peaked at 864 MiB RSS and processed warm previews at 0.207 s per photo with two threads and batches of four. At that rate, encoding 50,000 photos takes about 2.9 hours and 100,000 takes about 5.7 hours. Initial decode, tagging, warm-up and contention add time.
 
 The separate API-to-worker test timed enqueue through result retrieval with a worker process and 50 ms polling through FastAPI's test client. Idle queries ran over four indexed photos. Busy queries were sent after a batch entered the running state while the worker processed queued cached previews. Each row used eight queries.
 
 | Text encoder | Worker workload | p50 | p95 |
 | --- | --- | ---: | ---: |
-| Resident | Idle | 127 ms | 131 ms |
-| Resident | Embedding | 971 ms | 1,074 ms |
-| On demand | Idle | 1,651 ms | 1,704 ms |
-| On demand | Embedding | 2,483 ms | 2,548 ms |
+| Resident | Idle | 123 ms | 131 ms |
+| Resident | Embedding | 998 ms | 1,055 ms |
+| On demand | Idle | 1,652 ms | 1,711 ms |
+| On demand | Embedding | 2,471 ms | 2,535 ms |
 
 The timings use a local preloaded model cache. Browser polling, remote clients and larger catalogs add latency.
 
