@@ -25,6 +25,7 @@ worker:
 #   window_seconds: 2
 #   max_hamming_distance: 8
 #   min_cosine: 0.88
+#   aesthetic_weight: 0.25
 # model_dir: /var/lib/photocull/models
 # ml:
 #   enabled: true               # Install the ml extra on the worker.
@@ -39,3 +40,22 @@ worker:
 #   tag_vocabulary:
 #     bicycle: [Bicycle, 自転車]
 # With ML enabled, set worker.memory_mb: 6144 and raise the service memory limit.
+#
+# insights:
+#   aesthetic: true          # Also enable ml.enabled.
+#   taste: true
+#   faces: true
+#   story: true
+#   # story_geonames: /var/lib/photocull/geodata/cities1000.txt
+#   video: true
+#   transcript: false
+#   watch: true
+#   watch_mode: auto          # Use poll for a remote mount with unreliable events.
+#   watch_interval: 60
+#   watch_debounce: 3
+#   export: true
+#   report: true
+#   offline: true             # Prefetch the enabled face and speech weights.
+#   threads: 2
+#   export_roots:
+#     archive: /srv/photocull-exports

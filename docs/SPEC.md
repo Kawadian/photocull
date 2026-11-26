@@ -118,13 +118,15 @@ EXIF:
 - Prepare text vectors for the configurable bilingual vocabulary and store top tags with cosine scores. Keep photo review and explicit XMP export available with ML disabled or unavailable.
 - Use fake models in CI and a marked test for real-model checks. Size the cache, worker budget and CPU threads for deployment. [Configuration, deployment and measurements](ML.md)
 
-**Phase 4 (after the above is solid):**
+**Phase 4: local insights and exports**
 
-- Aesthetic quality model, face grouping, day/place stories, video highlight / dead-clip detection, optional local transcripts.
-- Taste-learning from keep/reject history.
-- Watch folder, keeper zip/copy export, trip recap HTML.
-
-Do not block MVP on phase 3–4 models.
+- Score aesthetics from a lightweight head over SigLIP 2 embeddings. Sort or filter by score and blend it into burst recommendations.
+- Detect and cluster faces locally. Review, rename, merge and split people and filter the filmstrip by person.
+- Group capture time and EXIF GPS into day stories with diverse representative photos, optional local geocoding and an offline route sketch.
+- Analyze videos for highlight intervals and reversible dead-clip flags. Provide seekable browser proxies and optional CPU transcription.
+- Train personalized recommendations from manual ratings and rejects and show the main factors behind each recommendation.
+- Watch media roots, copy or zip selected keepers with optional existing XMP sidecars, and export standalone trip reports.
+- Document feature flags, cache identities, licenses and CPU measurements. [Phase 4 setup and operation](INSIGHTS.md)
 
 ## Access and deployment
 
