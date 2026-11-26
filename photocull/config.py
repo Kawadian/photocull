@@ -8,8 +8,10 @@ import yaml
 from dotenv import dotenv_values
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-Stage = Literal["exif", "preview"]
+Stage = Literal["exif", "preview", "score"]
+STAGES: tuple[Stage, ...] = ("exif", "preview", "score")
 LibraryName = Annotated[str, StringConstraints(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")]
+Ratio = Annotated[float, Field(ge=0, le=1)]
 
 
 class Library(BaseModel):
@@ -29,8 +31,31 @@ class WorkerSettings(BaseModel):
     memory_mb: int = Field(default=1536, ge=128)
     batch_size: int = Field(default=8, ge=1, le=256)
     parallelism: int = Field(default=1, ge=1, le=16)
-    stages: tuple[Stage, ...] = ("exif", "preview")
+    stages: tuple[Stage, ...] = STAGES
     device: Literal["cpu", "cuda"] = "cpu"
+
+
+class ScoringSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    min_sharpness: Ratio = 0.02
+    min_exposure: Ratio = 0.08
+    max_exposure: Ratio = 0.92
+    max_clipped_highlights: Ratio = 0.25
+    max_clipped_shadows: Ratio = 0.40
+
+    @model_validator(mode="after")
+    def validate_exposure(self) -> ScoringSettings:
+        if self.min_exposure > self.max_exposure:
+            raise ValueError("min_exposure must be at most max_exposure")
+        return self
+
+
+class BurstSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    window_seconds: float = Field(default=2, gt=0, allow_inf_nan=False)
+    max_hamming_distance: int = Field(default=8, ge=0, le=64)
 
 
 class Settings(BaseModel):
@@ -43,6 +68,8 @@ class Settings(BaseModel):
     token_file: Path | None = None
     static_dir: Path = Path("frontend/dist")
     worker: WorkerSettings = Field(default_factory=WorkerSettings)
+    scoring: ScoringSettings = Field(default_factory=ScoringSettings)
+    burst: BurstSettings = Field(default_factory=BurstSettings)
 
     @model_validator(mode="after")
     def validate_state(self) -> Settings:
@@ -110,5 +137,11 @@ def load_settings() -> Settings:
             worker[field] = setting
     if (stages := env.get("PHOTOCULL_WORKER_STAGES")) is not None:
         worker["stages"] = [stage.strip() for stage in stages.split(",") if stage.strip()]
+
+    for section, model in (("scoring", ScoringSettings), ("burst", BurstSettings)):
+        settings = values.setdefault(section, {})
+        for field in model.model_fields:
+            if (value := env.get(f"PHOTOCULL_{section.upper()}_{field.upper()}")) is not None:
+                settings[field] = value
 
     return Settings.model_validate(values)

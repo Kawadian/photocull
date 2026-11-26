@@ -15,12 +15,28 @@ from pathlib import Path
 from sqlite3 import Connection
 from threading import Event
 
-from photocull.config import Library, Settings, load_settings
+from photocull.config import STAGES, Library, Settings, load_settings
 from photocull.db import connect, initialize, write
-from photocull.db.jobs import DISABLED, STAGES, Job, claim_jobs, claim_scan, finish_scan, recover
+from photocull.db.catalog import mark_catalog_updated
+from photocull.db.jobs import (
+    DISABLED,
+    NO_PREVIEW,
+    Job,
+    claim_jobs,
+    claim_scan,
+    finish_scan,
+    recover,
+    skip_unavailable_scores,
+)
 from photocull.media.cache import cache_path
 from photocull.media.walk import MediaJail, SourceChanged, source_key
-from photocull.worker.scan import fallback_day, mark_catalog_updated, scan_batches
+from photocull.worker.analysis import (
+    configure_scoring,
+    invalidate_burst,
+    refresh_bursts,
+    save_scores,
+)
+from photocull.worker.scan import fallback_day, scan_batches
 
 LOG = logging.getLogger(__name__)
 CACHE_DIRS = ("thumbs", "previews", "details")
@@ -57,8 +73,12 @@ class LibraryWorker:
         for stage in STAGES:
             if stage in self.settings.worker.stages:
                 status, reason = "pending", None
-                condition = "status = 'skipped' AND error = ?"
-                params = (DISABLED,)
+                condition = """status = 'skipped' AND (error = ? OR (
+                    stage = 'score' AND error = ? AND asset_id IN (
+                        SELECT asset_id FROM jobs WHERE stage = 'preview' AND status = 'done'
+                    )
+                ))"""
+                params = (DISABLED, NO_PREVIEW)
             else:
                 status, reason = "skipped", DISABLED
                 condition = "status = 'pending'"
@@ -80,6 +100,7 @@ class LibraryWorker:
         for variant in CACHE_DIRS:
             for temporary in (self.state / variant).glob(".[0-9]*-*-*"):
                 temporary.unlink(missing_ok=True)
+        configure_scoring(self.db, self.settings.scoring, self.pulse)
 
     def step_scan(self) -> bool:
         if self.scan is None:
@@ -106,6 +127,12 @@ class LibraryWorker:
         return True
 
     def work(self, job: Job) -> tuple[dict, str | None]:
+        if job.stage == "score":
+            from photocull.worker.scoring import score_preview
+
+            preview = cache_path(self.state, "previews", job.asset_id, job.content_hash)
+            return asdict(score_preview(preview)), None
+
         jail = MediaJail(self.library, self.settings.state_dir)
         with jail.open_media(job.path) as (fd, _):
             if source_key(os.fstat(fd)) != job.source_key:
@@ -141,7 +168,15 @@ class LibraryWorker:
                 error = exc.stderr.decode(errors="replace").strip() or error
             LOG.warning("%s for %s failed: %s", job.stage, job.path, error)
         with write(self.db):
-            if values:
+            if job.stage == "score" and values:
+                save_scores(self.db, job.asset_id, values, self.settings.scoring)
+            elif values:
+                if job.stage == "exif":
+                    captured_at = self.db.execute(
+                        "SELECT captured_at FROM assets WHERE id = ?", (job.asset_id,)
+                    ).fetchone()[0]
+                    if captured_at != values["captured_at"]:
+                        invalidate_burst(self.db, job.asset_id)
                 setters = ", ".join(f"{name} = ?" for name in values)
                 self.db.execute(
                     f"UPDATE assets SET {setters} WHERE id = ?", (*values.values(), job.asset_id)
@@ -151,6 +186,13 @@ class LibraryWorker:
                    WHERE asset_id = ? AND stage = ?""",
                 ("error" if error else "done", error, job.asset_id, job.stage),
             )
+            if not error and job.stage == "preview" and "score" in self.settings.worker.stages:
+                self.db.execute(
+                    """UPDATE jobs SET status = 'pending', error = NULL
+                       WHERE asset_id = ? AND stage = 'score' AND status = 'skipped'
+                         AND error = ?""",
+                    (job.asset_id, NO_PREVIEW),
+                )
             mark_catalog_updated(self.db)
         if not error and job.stage == "preview":
             for variant in CACHE_DIRS:
@@ -171,7 +213,11 @@ class LibraryWorker:
             done, _ = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
             for future in done:
                 self.finish(pending.pop(future), future)
-        return scanned or bool(jobs)
+        if scanned or jobs:
+            return True
+        if skip_unavailable_scores(self.db):
+            return True
+        return refresh_bursts(self.db, self.settings.burst, self.pulse)
 
 
 def run(settings: Settings, stop: Event) -> int:

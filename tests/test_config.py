@@ -13,15 +13,25 @@ libraries:
 state_dir: state
 worker:
   batch_size: 4
+scoring:
+  min_sharpness: 0.04
+burst:
+  max_hamming_distance: 12
 """)
     (tmp_path / ".env").write_text(
         "PHOTOCULL_CONFIG=config/settings.yaml\nPHOTOCULL_BIND_PORT=9999\n"
     )
     monkeypatch.setenv("PHOTOCULL_BIND_PORT", "8001")
     monkeypatch.setenv("PHOTOCULL_WORKER_STAGES", "exif")
+    monkeypatch.setenv("PHOTOCULL_BURST_WINDOW_SECONDS", "2.5")
+    monkeypatch.setenv("PHOTOCULL_SCORING_MAX_EXPOSURE", "0.85")
     settings = load_settings()
     assert settings.libraries["sony"].roots == (config_dir / "links", config_dir / "originals")
     assert settings.library_state("sony") == config_dir / "state/libraries/sony"
     assert settings.bind_port == 8001
     assert settings.worker.batch_size == 4
     assert settings.worker.stages == ("exif",)
+    assert settings.scoring.min_sharpness == 0.04
+    assert settings.scoring.max_exposure == 0.85
+    assert settings.burst.max_hamming_distance == 12
+    assert settings.burst.window_seconds == 2.5

@@ -25,12 +25,15 @@ class Metadata:
     metadata_error: str | None = None
 
 
-def _date(*values: str | None) -> str | None:
-    for value in values:
+def _date(*values: tuple[str | None, str | None]) -> str | None:
+    for value, subsecond in values:
         if value:
             for layout in DATES:
                 try:
-                    return datetime.strptime(value.strip("\0 "), layout).isoformat()
+                    captured = datetime.strptime(value.strip("\0 "), layout)
+                    if subsecond and subsecond.isascii() and subsecond.isdecimal():
+                        captured = captured.replace(microsecond=int(subsecond[:6].ljust(6, "0")))
+                    return captured.isoformat()
                 except ValueError:
                     continue
     return None
@@ -62,6 +65,9 @@ def _pillow_tags(path: str) -> dict:
             "Exif.Photo.DateTimeOriginal": photo.get(36867) or root.get(36867),
             "Exif.Photo.DateTimeDigitized": photo.get(36868) or root.get(36868),
             "Exif.Image.DateTime": root.get(306),
+            "Exif.Photo.SubSecTimeOriginal": photo.get(37521) or root.get(37521),
+            "Exif.Photo.SubSecTimeDigitized": photo.get(37522) or root.get(37522),
+            "Exif.Photo.SubSecTime": photo.get(37520) or root.get(37520),
             "Exif.Image.Make": root.get(271),
             "Exif.Image.Model": root.get(272),
             "Exif.GPSInfo.GPSLatitudeRef": gps.get(1),
@@ -97,9 +103,14 @@ def read_metadata(path: str) -> Metadata:
 
     return Metadata(
         captured_at=_date(
-            _text(tags.get("Exif.Photo.DateTimeOriginal")),
-            _text(tags.get("Exif.Photo.DateTimeDigitized")),
-            _text(tags.get("Exif.Image.DateTime")),
+            *(
+                (_text(tags.get(date)), _text(tags.get(subsecond)))
+                for date, subsecond in (
+                    ("Exif.Photo.DateTimeOriginal", "Exif.Photo.SubSecTimeOriginal"),
+                    ("Exif.Photo.DateTimeDigitized", "Exif.Photo.SubSecTimeDigitized"),
+                    ("Exif.Image.DateTime", "Exif.Photo.SubSecTime"),
+                )
+            )
         ),
         make=_text(tags.get("Exif.Image.Make")),
         model=_text(tags.get("Exif.Image.Model")),
