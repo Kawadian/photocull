@@ -319,8 +319,11 @@ class LibraryWorker:
             else None,
         ):
             return True
-        story = self.stories.step(between_work) if self.stories else False
-        return (ml.group() if ml else False) or story or searched
+        if self.stories and self.stories.step(between_work):
+            return True
+        grouped = ml.group() if ml else False
+        video = self.insights and self.insights.step(between_work, video_only=True)
+        return grouped or bool(video) or searched
 
 
 def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=None) -> int:

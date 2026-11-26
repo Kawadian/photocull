@@ -59,15 +59,19 @@ class Insights:
         if self.head is None:
             target = self.settings.model_cache / "aesthetic" / f"{key}.f32"
             try:
-                weights = target.read_bytes()
-                if len(weights) != 2 * len(vector):
-                    raise ValueError("Invalid cached aesthetic head shape")
+                with target.open("rb") as source:
+                    head = np.frombuffer(source.read(2 * len(vector) + 1), dtype="<f4")
+                if head.size * 2 != len(vector) or not np.all(np.isfinite(head)):
+                    raise ValueError("Invalid cached aesthetic head")
             except (FileNotFoundError, ValueError):
                 weights = self.inference.call(
                     "aesthetic_head", (AESTHETIC_PROMPTS,), self.worker.pulse
                 )
+                head = np.frombuffer(weights, dtype="<f4")
+                if head.size * 2 != len(vector) or not np.all(np.isfinite(head)):
+                    raise ValueError("Aesthetic head does not match the image encoder") from None
                 cache_bytes(target, weights)
-            self.head = np.frombuffer(weights, dtype="<f4")
+            self.head = head
         projection = float(blob_vector(vector) @ self.head)
         return float(1 / (1 + np.exp(-8 * projection)))
 
@@ -109,15 +113,16 @@ class Insights:
                 mark_catalog_updated(self.db)
             return True
 
-    def step(self, pulse, *, idle=False):
-        if idle and self._train(pulse):
+    def step(self, pulse, *, idle=False, video_only=False):
+        if idle and not video_only and self._train(pulse):
             return True
         stages = [*self.stages]
         if self.taste_enabled:
             stages.append("taste")
         for offset in range(len(stages)):
             index = (self.cursor + offset) % len(stages)
-            if self._process(stages[index], pulse):
+            stage = stages[index]
+            if (stage in {"video", "transcript"}) == video_only and self._process(stage, pulse):
                 self.cursor = (index + 1) % len(stages)
                 return True
         return False
@@ -133,7 +138,10 @@ class Insights:
         for asset_id, digest, active in rows:
             for target in directory.glob(f"{asset_id}-*.mp4"):
                 if not active or not target.name.startswith(f"{asset_id}-{digest}-"):
-                    target.unlink(missing_ok=True)
+                    try:
+                        target.unlink(missing_ok=True)
+                    except OSError as error:
+                        LOG.warning("Could not remove obsolete video preview %s: %s", target, error)
         with write(self.db):
             self.db.executemany(
                 "DELETE FROM video_cleanup WHERE asset_id=?", ((row[0],) for row in rows)
