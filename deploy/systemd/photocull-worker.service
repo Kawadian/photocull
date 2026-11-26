@@ -22,7 +22,9 @@ MemoryHigh=1700M
 MemoryMax=2G
 # For ML, set worker.memory_mb=6144 in shared YAML and override these
 # limits in a systemd drop-in. Example: CPUQuota=600%, MemoryHigh=6G, MemoryMax=8G.
-# Prefetch the model as the service user before running with PrivateNetwork.
+# Prefetch models as the service user before running with PrivateNetwork.
+# For directory exports, add ReadWritePaths=/srv/photocull-exports to the drop-in
+# and set the same destination under insights.export_roots in shared YAML.
 NoNewPrivileges=yes
 PrivateNetwork=yes
 PrivateTmp=yes

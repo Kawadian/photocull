@@ -144,7 +144,10 @@ local face grouping, day and place stories, and video highlights and dead-clip
 flags. It can also watch media folders, copy keepers or create ZIP64 archives,
 and generate standalone HTML trip reports. Video transcription runs locally
 and is independently configurable. The setup guide covers feature settings,
-model licenses, download sizes and CPU-only measurements. [Phase 4 setup and operation](docs/INSIGHTS.md)
+model licenses, download sizes and CPU-only measurements. For folder copies
+under Compose, set the destination in shared YAML and use the worker-only
+[example override](deploy/compose.insights.example.yml).
+[Phase 4 setup and operation](docs/INSIGHTS.md)
 
 ## Access and deployment examples
 

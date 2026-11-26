@@ -24,16 +24,21 @@ Hugging Face Hub client.
 
 ## Review workflow
 
-- **Recommendations** offers an aesthetic-score filter and descending sort. The
-  score uses the existing normalized SigLIP 2 vectors and a linear head made
-  from the difference between the averages of two positive and two negative
-  composition and lighting prompts. The sigmoid is a ranking scale. Its output
-  has no calibrated meaning as a probability or a universal aesthetic rating.
-  LAION's published heads use CLIP embeddings, including a 768-dimensional
-  variant with a different embedding space. Reusing them would give unrelated
-  coefficients. The prompt head uses the same encoder as the catalog, adds
-  only 3 KiB of weights, and also supplies a feature to the personalized model.
-  [LAION aesthetic predictor](https://github.com/LAION-AI/aesthetic-predictor)
+- **Recommendations** offers an aesthetic-score filter and descending sort.
+  The Photocull prompt head has no separately published or supervised aesthetic
+  weights. At first use the worker normalizes four vectors from the pinned
+  SigLIP 2 text encoder, then sets its weight vector to the mean of the two
+  positive prompts minus the mean of the two negative prompts. The prompts are
+  defined in [the source](../photocull/insights.py). For a normalized image
+  embedding `v`, the score is `sigmoid(8 * dot(v, weights))`, with no fitted
+  intercept. The local float32 weights take about 3 KiB. The prompt head
+  implementation and prompt text are MIT-licensed through Photocull. The
+  encoder and its weights are Apache 2.0. LAION's published heads were trained
+  for CLIP embedding spaces, including a different 768-value space.
+  This zero-shot score measures alignment with composition and lighting
+  prompts and has no calibrated aesthetic accuracy across genres or cameras.
+  The separate supervised taste model learns from the operator's ratings and
+  uses the aesthetic score as one feature. [LAION aesthetic predictor](https://github.com/LAION-AI/aesthetic-predictor)
 - Burst recommendations blend technical quality and the aesthetic score when
   it is available. Set `burst.aesthetic_weight` to change the blend. The default
   is `0.25`. Existing manual best picks take precedence.
@@ -55,7 +60,10 @@ Hugging Face Hub client.
   classification. SFace uses a 128-value float16 vector. An incremental HNSW
   lookup assigns sufficiently similar faces to existing groups. Distant or
   low-quality detections can remain singletons. Manual edits and named groups
-  carry forward when a reprocessed box overlaps the original detection. Face
+  carry forward when a reprocessed box overlaps the original detection.
+  Matched boxes retain their face IDs so in-progress selections remain valid.
+  The worker checks current assignments after taking the same SQLite writer
+  lock used by merge and split. Face
   vectors, boxes and names stay in the local library state.
 - **Stories** uses capture day and splits at a 90-minute gap or a location more
   than 15 km from the current stop's anchor. Undated media is grouped by the
@@ -79,7 +87,8 @@ Hugging Face Hub client.
 - **Watch** uses Linux notifications when available and periodically reconciles
   metadata through the same jailed scan walker. Set `watch_mode: poll` for
   a remote mount with unreliable notifications. Watch scans reuse hashes for
-  unchanged files. A quiet interval and before/after source identity checks
+  unchanged files. Once the quiet interval elapses, the watcher checks for
+  changes remaining after any manual scan. A quiet interval and before/after source identity checks
   defer files that are still changing. For writers that pause for longer than
   the debounce interval, write a temporary filename outside the supported
   media extensions, then atomically rename it into the library.
@@ -90,8 +99,10 @@ Hugging Face Hub client.
   original file bytes. **Include existing XMP sidecars** copies an existing
   `.xmp` or `.XMP` file with the matching exported stem. The source is opened read
   only. Progress is reported through SQLite. Cancellation discards temporary
-  output. A worker restart restarts an interrupted transfer from its selection
-  or recognizes an already published output. The standalone XMP write action
+  output. A worker restart restarts an interrupted transfer from its
+  selection or recognizes an already published output by its filesystem
+  identity. Publication uses an atomic no-replace rename on the destination
+  filesystem. An existing destination is an error. The standalone XMP write action
   in Review still requires confirmation.
 - **Trip reports** generates one responsive static HTML file from the stored
   stories. It waits for pending story updates, then embeds small thumbnails
@@ -173,7 +184,10 @@ library root and outside state. Use real directories without symlinks. Mount
 the destination read/write in the **worker** service. The API needs only the
 configured destination name. For the hardened systemd example, add a
 `ReadWritePaths=/srv/photocull-exports` drop-in for the worker. In Compose, use
-a worker-only bind mount and the container path in YAML. The default worker
+the [optional worker-only Compose override](../deploy/compose.insights.example.yml)
+with `PHOTOCULL_EXPORT_HOST_DIR` and the matching container path in YAML. Start
+with `docker compose -f docker-compose.yml -f deploy/compose.insights.example.yml up -d`.
+The destination filesystem must support Linux no-replace rename. The default worker
 image contains all opt-in dependencies. The build argument
 `PHOTOCULL_WORKER_EXTRA=ml` or `worker` produces a smaller worker image when
 those extras are sufficient. [Worker Dockerfile](../deploy/docker/Dockerfile.worker)
