@@ -7,7 +7,7 @@ from contextlib import closing, contextmanager
 from importlib.resources import files
 from pathlib import Path
 
-MIGRATIONS = ("0001_initial.sql",)
+MIGRATIONS = ("0001_initial.sql", "0002_source_identity.sql")
 BUSY_TIMEOUT_MS = 10_000
 
 

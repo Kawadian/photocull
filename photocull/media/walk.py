@@ -142,10 +142,6 @@ class MediaJail:
             pending.extend(reversed(folders))
 
 
-def stamp(info: os.stat_result) -> tuple[int, int]:
-    return info.st_size, info.st_mtime_ns
-
-
 def hash_file(jail: MediaJail, entry: MediaEntry, pulse: Callable[[], None]) -> str:
     digest = hashlib.sha256()
     with jail.open_media(entry.path) as (fd, _):
@@ -155,6 +151,10 @@ def hash_file(jail: MediaJail, entry: MediaEntry, pulse: Callable[[], None]) -> 
                 pulse()
                 digest.update(data)
         after = os.fstat(fd)
-        if stamp(before) != stamp(entry.stat) or stamp(after) != stamp(before):
+        if source_key(before) != source_key(entry.stat) or source_key(after) != source_key(before):
             raise SourceChanged(f"Media changed during scan: {entry.path}")
     return digest.hexdigest()
+
+
+def source_key(info: os.stat_result) -> str:
+    return f"{info.st_dev}:{info.st_ino}:{info.st_ctime_ns}:{info.st_mtime_ns}:{info.st_size}"
