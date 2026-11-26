@@ -6,17 +6,18 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from hashlib import sha256
-from itertools import combinations
+from itertools import combinations, islice
 
 from photocull.config import BurstSettings
 from photocull.db import write
 from photocull.db.catalog import mark_catalog_updated
 
 CANDIDATES_SQL = """
-    SELECT a.id, a.captured_at, a.content_hash, s.dhash,
+    SELECT a.id, a.captured_at, a.content_hash, s.dhash, e.vector,
            0.60 * s.sharpness + 0.25 * (1 - 2 * abs(s.exposure - 0.5))
            + 0.15 * (1 - s.clipped_highlights - s.clipped_shadows) AS quality
     FROM assets AS a JOIN asset_scores AS s ON s.asset_id = a.id
+    LEFT JOIN asset_embeddings AS e ON e.asset_id = a.id AND e.model_key = :model_key
     WHERE a.active = 1 AND a.captured_at IS NOT NULL
       AND a.captured_at BETWEEN :start AND :end
       AND (a.captured_at, a.id) > (:after_time, :after_id)
@@ -44,7 +45,7 @@ class AnchorIndex:
 
     def __init__(self, distance: int) -> None:
         self.distance = distance
-        self.anchors: dict[int, Burst] = {}
+        self.anchors: dict[int, dict[int, Burst]] = {}
         # For a dense window, partition the bits and probe nearby band values.
         # The sum of the first excluded distances is k+1, so every match is probed
         # in at least one band. Wide thresholds are cheaper to scan directly.
@@ -65,12 +66,18 @@ class AnchorIndex:
 
     def add(self, burst: Burst) -> None:
         fingerprint = burst.anchor.fingerprint
-        self.anchors[fingerprint] = burst
+        if fingerprint in self.anchors:
+            self.anchors[fingerprint][burst.anchor.id] = burst
+            return
+        self.anchors[fingerprint] = {burst.anchor.id: burst}
         for shift, mask, _, buckets in self.bands:
             buckets[(fingerprint >> shift) & mask].add(fingerprint)
 
     def remove(self, burst: Burst) -> None:
         fingerprint = burst.anchor.fingerprint
+        del self.anchors[fingerprint][burst.anchor.id]
+        if self.anchors[fingerprint]:
+            return
         del self.anchors[fingerprint]
         for shift, mask, _, buckets in self.bands:
             key = (fingerprint >> shift) & mask
@@ -81,7 +88,7 @@ class AnchorIndex:
     def nearest(self, fingerprint: int) -> Burst | None:
         exact = self.anchors.get(fingerprint)
         if exact or self.distance == 0:
-            return exact
+            return next(iter(exact.values())) if exact else None
         candidates = self.anchors.keys()
         if self.bands and len(candidates) >= 256:
             matches: set[int] = set()
@@ -97,7 +104,7 @@ class AnchorIndex:
             distance = (candidate ^ fingerprint).bit_count()
             if distance > best_distance or distance > self.distance:
                 continue
-            burst = self.anchors[candidate]
+            burst = next(iter(self.anchors[candidate].values()))
             if distance < best_distance or (
                 best is not None
                 and (burst.anchor.timestamp, burst.anchor.id)
@@ -166,12 +173,46 @@ def _stage_burst(db: sqlite3.Connection, burst: Burst) -> None:
     )
 
 
+def _nearest_embedding(anchors: dict[int, tuple[Burst, bytes]], blob: bytes, threshold: float):
+    if not anchors:
+        return None
+    import numpy as np
+
+    from photocull.worker.ml.vectors import STORAGE_DTYPE, blob_vector, normalized
+
+    query = blob_vector(blob)
+    candidates = iter(anchors.values())
+    best = None
+    while batch := list(islice(candidates, 128)):
+        data = b"".join(vector for _, vector in batch)
+        matrix = normalized(np.frombuffer(data, dtype=STORAGE_DTYPE).reshape(len(batch), -1))
+        scores = np.clip(np.einsum("ij,j->i", matrix, query), -1, 1)
+        index = int(scores.argmax())
+        score = float(scores[index])
+        if score >= threshold and (best is None or score > threshold):
+            best, threshold = batch[index][0], score
+    return best
+
+
 def _stage_range(
-    db: sqlite3.Connection, start: str, end: str, settings: BurstSettings, pulse: Callable[[], None]
+    db: sqlite3.Connection,
+    start: str,
+    end: str,
+    settings: BurstSettings,
+    pulse: Callable[[], None],
+    model_key: str | None,
 ) -> None:
     active: deque[Burst] = deque()
     index = AnchorIndex(settings.max_hamming_distance)
-    params = {"start": start, "end": end, "after_time": start, "after_id": 0}
+    hash_only = AnchorIndex(settings.max_hamming_distance) if model_key else index
+    vectors: dict[int, tuple[Burst, bytes]] = {}
+    params = {
+        "start": start,
+        "end": end,
+        "after_time": start,
+        "after_id": 0,
+        "model_key": model_key,
+    }
     while rows := db.execute(CANDIDATES_SQL, params).fetchall():
         pulse()
         params.update(after_time=rows[-1]["captured_at"], after_id=rows[-1]["id"])
@@ -190,25 +231,40 @@ def _stage_range(
             ):
                 expired = active.popleft()
                 index.remove(expired)
+                if vectors.pop(expired.anchor.id, None) is None and model_key:
+                    hash_only.remove(expired)
                 _stage_burst(db, expired)
 
-            burst = index.nearest(candidate.fingerprint)
+            blob = row["vector"]
+            if blob is not None:
+                burst = _nearest_embedding(vectors, blob, settings.min_cosine)
+                if burst is None:
+                    burst = hash_only.nearest(candidate.fingerprint)
+            else:
+                burst = index.nearest(candidate.fingerprint)
             if burst is None:
                 burst = Burst(anchor=candidate)
                 active.append(burst)
                 index.add(burst)
+                if blob is not None:
+                    vectors[candidate.id] = burst, blob
+                elif model_key:
+                    hash_only.add(burst)
             burst.members.append(candidate)
     for burst in active:
         _stage_burst(db, burst)
 
 
 def refresh_bursts(
-    db: sqlite3.Connection, settings: BurstSettings, pulse: Callable[[], None]
+    db: sqlite3.Connection,
+    settings: BurstSettings,
+    pulse: Callable[[], None],
+    model_key: str | None = None,
 ) -> bool:
     dirty, previous = db.execute(
         "SELECT bursts_dirty, burst_settings FROM analysis_state"
     ).fetchone()
-    config = settings.model_dump_json()
+    config = f"{settings.model_dump_json()}:{model_key or ''}"
     # A full pass is cheaper than thousands of small range seeks after a big import.
     rebuild_all = dirty or previous != config
     if not rebuild_all:
@@ -230,7 +286,7 @@ def refresh_bursts(
     db.execute("DELETE FROM affected_bursts")
 
     if rebuild_all:
-        _stage_range(db, "", "\uffff", settings, pulse)
+        _stage_range(db, "", "\uffff", settings, pulse, model_key)
     else:
         for start, end in _affected_ranges(db, settings.window_seconds, pulse):
             db.execute(
@@ -240,7 +296,7 @@ def refresh_bursts(
                      AND a.captured_at BETWEEN ? AND ?""",
                 (start, end),
             )
-            _stage_range(db, start, end, settings, pulse)
+            _stage_range(db, start, end, settings, pulse, model_key)
 
     pulse()
     scope = "" if rebuild_all else "id IN (SELECT id FROM affected_bursts) AND"

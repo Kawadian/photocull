@@ -17,11 +17,11 @@ jobs:
       - run: uv sync --locked
       - run: uv run --locked pytest tests/test_api.py
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - run: uv sync --locked --extra worker
-      - run: uv run --locked --extra worker ruff check
-      - run: uv run --locked --extra worker ruff format --check
-      - run: uv run --locked --extra worker pytest
-      - run: uv run --locked python scripts/benchmark_catalog.py --assets 2000 --requests 8
+      - run: uv sync --locked --extra ml
+      - run: uv run --locked --extra ml ruff check
+      - run: uv run --locked --extra ml ruff format --check
+      - run: uv run --locked --extra ml pytest
+      - run: uv run --locked --extra ml python scripts/benchmark_catalog.py --assets 2000 --requests 8 --ml
 
   frontend:
     runs-on: ubuntu-latest

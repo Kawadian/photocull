@@ -94,3 +94,70 @@ test('375px layout, focus visibility and burst list error recovery', async ({ pa
   expect(best?.y).toBeGreaterThan(current?.y ?? 0)
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(375)
 })
+
+test('search Japanese and English, browse similar groups, and filter tags on mobile', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.goto('/')
+  await page.getByLabel('Library', { exact: true }).selectOption('semantic')
+  const review = page.getByRole('main', { name: 'Photo review' })
+  const search = page.getByRole('searchbox', { name: 'Search photos' })
+  await expect(search).toBeEnabled()
+  await search.fill('猫')
+  await search.press('Enter')
+  await expect(review.getByText('No matching photos')).toBeVisible()
+  await review.getByRole('button', { name: 'Close photo search' }).click()
+
+  await page.getByRole('button', { name: 'Scan library', exact: true }).click()
+  await expect(page.getByLabel('Embedding progress')).toHaveAttribute('value', '6')
+  await page.route('**/api/libraries/semantic/search', (route) =>
+    route.fulfill({ status: 503, json: { detail: 'Search worker is busy' } }), { times: 1 })
+  await search.fill('猫')
+  await search.press('Enter')
+  await expect(review.getByRole('alert')).toContainText('Search worker is busy')
+  await review.getByRole('button', { name: 'Retry search' }).click()
+  await expect(review.getByRole('img', { name: 'a.jpg' })).toBeVisible()
+  await page.keyboard.press('ArrowRight')
+  await expect(review.getByRole('img', { name: 'b.jpg' })).toBeVisible()
+
+  await search.fill('a dog ')
+  await search.press('4')
+  await expect(search).toHaveValue('a dog 4')
+  await expect(page.getByRole('button', { name: 'Rate 4 stars' })).toHaveAttribute('aria-pressed', 'false')
+  await search.press('Enter')
+  await expect(review.getByRole('img', { name: 'white.jpg' })).toBeVisible()
+  await page.getByRole('button', { name: 'Dog / 犬', exact: true }).click()
+  await expect(page.getByLabel('Photo tag')).toHaveValue('dog')
+  await expect(review.getByRole('img', { name: 'white.jpg' })).toBeVisible()
+  await page.getByLabel('Photo tag').selectOption('')
+  await expect(review.getByRole('img', { name: 'a.jpg' })).toBeVisible()
+
+  await review.getByRole('button', { name: 'a.jpg', exact: true }).focus()
+  await page.keyboard.press('ArrowRight')
+  await expect(review.getByRole('img', { name: 'b.jpg' })).toBeVisible()
+  await page.getByRole('button', { name: 'Find similar photos' }).click()
+  await expect(review.getByRole('heading', { name: 'Similar to b.jpg' })).toBeVisible()
+  await expect(review.getByRole('img', { name: 'a.jpg' })).toBeVisible()
+  await review.getByRole('button', { name: 'Close photo search' }).click()
+  await expect(review.getByRole('img', { name: 'b.jpg' })).toBeVisible()
+  await page.getByRole('button', { name: 'Similar', exact: true }).click()
+  await page.getByRole('button', { name: 'Similar group a.jpg, 5 photos' }).click()
+  await expect(review.getByRole('heading', { name: 'Similar group', exact: true })).toBeVisible()
+  await expect(review.getByRole('img', { name: 'a.jpg' })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(375)
+})
+
+test('ML unavailable state leaves the review available', async ({ page }) => {
+  const progress = {
+    scan: null, worker: null, catalog_revision: 0, stages: { exif: {}, preview: {}, score: {} },
+    ml: { enabled: true, search_enabled: true, tags_enabled: true, waiting: false, grouping: false,
+      image_error: 'Offline cache is missing. Run photocull fetch-model.', text_error: null, group_error: null },
+  }
+  await page.route('**/api/libraries/desktop/events', (route) => route.fulfill({
+    status: 200, contentType: 'text/event-stream', body: `data: ${JSON.stringify(progress)}\n\n`,
+  }))
+  await page.goto('/')
+  await expect(page.getByRole('searchbox')).toBeDisabled()
+  await expect(page.getByText('Offline cache is missing.', { exact: false })).toBeVisible()
+  await expect(page.getByRole('main', { name: 'Photo review' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Find similar photos' })).toBeDisabled()
+})

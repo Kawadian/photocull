@@ -1,6 +1,6 @@
 # Photocull
 
-Photocull is a self-hosted photo and video culler for a LAN or Tailscale network. Browse by folder, capture day or burst, review previews with a filmstrip and keyboard, and export ratings as XMP sidecars. The FastAPI service and SQLite indexing worker run independently, so you can browse and rate while the worker scans or restarts.
+Photocull is a self-hosted photo and video culler for a LAN or Tailscale network. Browse by folder, capture day or burst, review previews with a filmstrip and keyboard, and export ratings as XMP sidecars. Optional CPU ML adds Japanese and English photo search, similar-photo groups and automatic tags. The FastAPI service and SQLite indexing worker run independently, so you can browse and rate while the worker scans or restarts.
 
 ## Run locally
 
@@ -25,7 +25,7 @@ Set `PHOTOCULL_LIBRARY_ROOT` in `.env` to your photo directory. In two terminals
 
 Open `http://127.0.0.1:8000` and choose **Scan library**. You can also queue a scan with `.venv/bin/photocull scan photos` and check it with `.venv/bin/photocull status photos`. The API serves `frontend/dist` at the same origin. For frontend development, `npm --prefix frontend run dev` starts Vite on loopback and proxies `/api` to port 8000.
 
-The base package is the API and CLI (`uv sync --locked --no-dev` or `pip install .`). The worker extra installs media decoders, Pillow and NumPy. Scoring runs on the CPU without model weights.
+The base package is the API and CLI (`uv sync --locked --no-dev` or `pip install .`). The worker extra installs media decoders, Pillow and NumPy. Scoring runs on the CPU without model weights. The optional `ml` extra includes the worker extra plus CPU inference and neighbor search.
 
 ## Configure libraries
 
@@ -43,7 +43,7 @@ The [YAML example](deploy/photocull.example.yaml) shows both layouts, and [.env.
 | `PHOTOCULL_BIND_HOST`, `PHOTOCULL_BIND_PORT` | `127.0.0.1`, `8000` |
 | `PHOTOCULL_STATIC_DIR` | `frontend/dist` |
 | `PHOTOCULL_TOKEN_FILE` | Optional path to a shared printable ASCII token |
-| `PHOTOCULL_WORKER_MEMORY_MB` | `1536` MiB peak worker RSS threshold |
+| `PHOTOCULL_WORKER_MEMORY_MB` | `1536` MiB worker budget, `6144` MiB recommended with ML on a 16 GiB host |
 | `PHOTOCULL_WORKER_BATCH_SIZE`, `PHOTOCULL_WORKER_PARALLELISM` | `8` assets per scan transaction and `1` decoding task at a time |
 | `PHOTOCULL_WORKER_STAGES`, `PHOTOCULL_WORKER_DEVICE` | `exif,preview,score` and `cpu` |
 
@@ -81,7 +81,7 @@ For a proprietary RAW file such as ARW, select it in Lightroom Classic and use *
 - **Clear auto-reject** dismisses one flag. **Clear all auto-rejects…** dismisses current flags across the library. Dismissals persist when a photo is rescored or thresholds change. Ratings and XMP export use the manual review controls.
 - **Bursts** lists groups of similar photos taken close together. Filters find bursts with at least one matching member. Open a burst to see all its members, use **Compare with best** for a side-by-side view and **Set as best** to choose a different keeper. **Reject rest…** confirms and flags the others in one action. **Undo burst reject** restores only the flags changed by that action.
 
-The worker scores still-image previews using grayscale luminance and Laplacian variance on a resampled image of up to 512 pixels per side. This includes RAW previews. The inspector shows queued, running, skipped and failed scoring states. Videos have poster previews and duration. The 64-bit dHash is compared by Hamming distance. A member must be within both thresholds of its burst's first photo. Burst membership requires an EXIF capture time. Capture subseconds are used when available in the indexed metadata. The best recommendation balances sharpness (60%), distance from mid-gray exposure (25%) and unclipped pixels (15%). A manually selected best follows its photo when groups are recalculated.
+The worker scores still-image previews using grayscale luminance and Laplacian variance on a resampled image of up to 512 pixels per side. This includes RAW previews. The inspector shows queued, running, skipped and failed scoring states. Videos have poster previews and duration. A burst member must be within the capture-time window and pass the similarity threshold against its burst's first photo. When both photos have current embeddings, the worker compares cosine similarity. Otherwise it compares 64-bit dHash by Hamming distance. Burst membership requires an EXIF capture time. Capture subseconds are used when available in the indexed metadata. The best recommendation balances sharpness (60%), distance from mid-gray exposure (25%) and unclipped pixels (15%). A manually selected best follows its photo when groups are recalculated.
 
 | Worker environment variable | YAML key | Default |
 | --- | --- | --- |
@@ -92,6 +92,7 @@ The worker scores still-image previews using grayscale luminance and Laplacian v
 | `PHOTOCULL_SCORING_MAX_CLIPPED_SHADOWS` | `scoring.max_clipped_shadows` | `0.40` |
 | `PHOTOCULL_BURST_WINDOW_SECONDS` | `burst.window_seconds` | `2` |
 | `PHOTOCULL_BURST_MAX_HAMMING_DISTANCE` | `burst.max_hamming_distance` | `8` |
+| `PHOTOCULL_BURST_MIN_COSINE` | `burst.min_cosine` | `0.88` |
 
 Scoring thresholds are inclusive bounds from 0 to 1. Set minimums to 0 and maximums to 1 to disable automatic flag suggestions. Restart the worker after changing settings. With Compose, edit the mounted YAML. The worker re-evaluates stored scores against new thresholds and refreshes groups after pending indexing work completes.
 
@@ -125,7 +126,16 @@ Keep state on a local writable Linux filesystem so both processes can share SQLi
 
 A scan computes SHA-256 for new and changed media and reuses hashes for files with unchanged source identity, size and timestamps. Jobs track each asset and stage. The worker requeues in-flight jobs on restart and preserves completed work. After three interrupted runs of a stage, the worker marks that job as failed and processes the rest of the queue. A stage can be rerun with `POST /api/libraries/{library}/assets/{asset_id}/jobs/{stage}`. The OpenAPI schema is at `/openapi.json`.
 
-`GET /api/health` reports API RSS, worker last heartbeat and job counts. The API stays healthy while the worker is offline. `GET /api/libraries/{library}/events` streams job and catalog updates via SSE. The default worker exits for a supervisor restart if its peak RSS exceeds the configured threshold after a batch. Compose and systemd also apply a hard memory limit.
+`GET /api/health` reports API RSS, worker last heartbeat and job counts. The API stays healthy while the worker is offline. `GET /api/libraries/{library}/events` streams job and catalog updates via SSE. The worker exits for a supervisor restart if its peak RSS reaches the configured threshold after a batch. Optional ML runs with a separate address-space limit inside that budget. Compose and systemd also apply a hard memory limit to the service.
+
+## Photo search, similarity and tags
+
+1. Install `uv sync --locked --extra ml` in the worker environment. The Docker worker image includes this extra.
+2. Set `ml.enabled: true` in the shared configuration and raise the worker memory budget. Use `worker.memory_mb: 6144` on a 16 GiB host and allow up to 8 GiB in the service or container.
+3. Run `photocull fetch-model` as the worker user to preload the 393 MiB model cache. With outbound network access, the worker can also populate the cache on first use.
+4. Restart the API and worker. Existing still photos with previews are queued automatically. New photos get embeddings after preview generation.
+
+Use **Search photos** with a phrase such as `雪の山` or `snowy mountains`. Use **Find similar photos** in the inspector to search from the current photo, or browse **Similar** groups. Pick a **Photo tag** or click a tag in the inspector to filter the catalog. The ML guide covers all settings, offline deployment steps and measured resource use. [ML guide](docs/ML.md)
 
 ## Access and deployment examples
 
@@ -169,18 +179,18 @@ Nginx supplies `X-Photocull-Token` upstream, so the browser uses ordinary same-o
 ## Checks
 
 ```sh
-uv sync --locked --extra worker
-uv run --locked --extra worker ruff check
-uv run --locked --extra worker ruff format --check
-uv run --locked --extra worker pytest
+uv sync --locked --extra ml
+uv run --locked --extra ml ruff check
+uv run --locked --extra ml ruff format --check
+uv run --locked --extra ml pytest
 npm --prefix frontend ci
 npm --prefix frontend run lint
 npm --prefix frontend run build
-uv run --locked python scripts/benchmark_catalog.py --assets 2000 --requests 8
+uv run --locked --extra ml python scripts/benchmark_catalog.py --assets 2000 --requests 8 --ml
 (cd frontend && npx playwright install --with-deps --only-shell chromium && npm run test:e2e)
 ```
 
-[GitHub Actions](.github/workflows/ci.yml) runs these checks for pull requests and pushes to `main`, including API tests with the base package. Playwright starts the API and worker with a temporary synthetic library and exercises keyboard review, filter and error states, and the 375 px layout. The [specification](docs/SPEC.md) describes later phases.
+GitHub Actions runs these checks for pull requests and pushes to `main`, including API tests with the base package. The ML tests and Playwright use a deterministic encoder. Playwright covers keyboard review, both search languages, tags, similarity, error recovery and the 375 px layout. The opt-in real-model check is documented separately. [CI workflow](.github/workflows/ci.yml) · [ML guide](docs/ML.md#validation) · [Specification](docs/SPEC.md)
 
 ## 日本語
 
@@ -195,3 +205,5 @@ Photocull は、LAN または Tailscale 内で写真・動画を選別するた�
 **Bursts** では `[` と `]` でバースト間を移動し、`B` でベストを選択、`R` で一括除外の確認、`Shift+U` で一括除外を取り消せます。`?` でショートカット一覧を開けます。自動除外フラグは [スコアとバーストの設定](#scores-and-bursts) から調整できます。
 
 Docker Compose と systemd の設定例は [deploy](deploy/) を参照してください。nginx の許可リストで LAN・Tailscale・ループバックからの接続に制限します。
+
+写真検索を使う場合は worker に `photocull[ml]` を導入し、共通設定の `ml.enabled` を有効にしてください。**Search photos** は「猫の写真」のような日本語や英語で検索できます。**Similar** から類似グループを、**Photo tag** からタグを選べます。 [設定・必要メモリ・オフライン導入](docs/ML.md)

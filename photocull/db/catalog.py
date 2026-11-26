@@ -17,6 +17,7 @@ ASSET_COLUMNS = f"""
     p.status AS preview_status, p.error AS preview_error,
     e.status AS exif_status, e.error AS exif_error,
     q.status AS score_status, q.error AS score_error,
+    v.status AS embedding_status, v.error AS embedding_error,
     s.sharpness, s.exposure, s.clipped_highlights, s.clipped_shadows,
     ({AUTO_REJECT_REASON}) AS auto_reject_reason, m.burst_id
 """
@@ -27,6 +28,7 @@ ASSET_JOINS = """
     LEFT JOIN jobs AS p ON p.asset_id = a.id AND p.stage = 'preview'
     LEFT JOIN jobs AS e ON e.asset_id = a.id AND e.stage = 'exif'
     LEFT JOIN jobs AS q ON q.asset_id = a.id AND q.stage = 'score'
+    LEFT JOIN jobs AS v ON v.asset_id = a.id AND v.stage = 'embedding'
 """
 
 
@@ -83,26 +85,60 @@ def asset_page_query(
     folder: str | None = None,
     day: str | None = None,
     burst_id: int | None = None,
+    similar_group_id: int | None = None,
+    tag: str | None = None,
+    tag_key: str | None = None,
 ) -> tuple[str, tuple]:
     clauses, score_params = scores.clauses()
     # Order burst members through the membership index. All SQL fragments are
     # fixed predicates and external values are bound below.
     order = "m.asset_id" if burst_id is not None else "a.id"
+    joins = ASSET_JOINS
+    if similar_group_id is not None:
+        joins += " JOIN similar_members AS sm ON sm.asset_id = a.id"
+        order = "sm.asset_id"
     filters = ["a.active = 1", f"{order} > ?", *clauses]
     params: list[str | int | float] = [cursor, *score_params]
     for condition, value in (
         ("a.folder = ?", folder),
         ("a.day = ?", day),
         ("m.burst_id = ?", burst_id),
+        ("sm.group_id = ?", similar_group_id),
     ):
         if value is not None:
             filters.append(condition)
             params.append(value)
+    if tag is not None:
+        filters.append("""a.id IN (SELECT t.asset_id FROM asset_tags AS t
+            JOIN asset_embeddings AS te ON te.asset_id = t.asset_id
+            WHERE t.tag = ? AND te.tag_key = ? AND t.asset_id > ?)""")
+        params.extend((tag, tag_key or "", cursor))
     return (
-        f"""SELECT {ASSET_COLUMNS} {ASSET_JOINS}
+        f"""SELECT {ASSET_COLUMNS} {joins}
             WHERE {" AND ".join(filters)} ORDER BY {order} LIMIT ?""",
         (*params, limit + 1),
     )
+
+
+def attach_tags(db: sqlite3.Connection, assets: list[dict], tag_key: str, vocabulary: dict) -> None:
+    if not assets:
+        return
+    by_id = {asset["id"]: asset for asset in assets}
+    for asset in assets:
+        asset["tags"] = []
+    placeholders = ",".join("?" for _ in by_id)
+    for asset_id, tag, score in db.execute(
+        f"""SELECT t.asset_id, t.tag, t.score FROM asset_tags AS t
+            JOIN asset_embeddings AS e ON e.asset_id = t.asset_id
+            JOIN assets AS a ON a.id = t.asset_id AND a.content_hash = e.content_hash
+            WHERE t.asset_id IN ({placeholders}) AND e.tag_key = ?
+            ORDER BY t.asset_id, t.score DESC, t.tag""",
+        (*by_id, tag_key),
+    ):
+        if tag in vocabulary:
+            by_id[asset_id]["tags"].append(
+                {"tag": tag, "label": " / ".join(vocabulary[tag]), "score": score}
+            )
 
 
 def set_rating(

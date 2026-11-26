@@ -8,8 +8,9 @@ import uvicorn
 from PIL import Image
 
 from photocull.api import create_app
-from photocull.config import Library, ScoringSettings, Settings
+from photocull.config import Library, MLSettings, ScoringSettings, Settings, WorkerSettings
 from photocull.worker import run
+from tests.fake_embedding import FakeEmbedding
 
 
 def write_fixtures(root: Path) -> Library:
@@ -34,14 +35,20 @@ def main() -> None:
     with TemporaryDirectory(prefix="photocull-playwright-") as directory:
         root = Path(directory)
         settings = Settings(
-            libraries={name: write_fixtures(root / name) for name in ("desktop", "mobile")},
+            libraries={
+                name: write_fixtures(root / name) for name in ("desktop", "mobile", "semantic")
+            },
             state_dir=root / "state",
             static_dir=Path(__file__).resolve().parents[1] / "dist",
             scoring=ScoringSettings(min_sharpness=0),
+            worker=WorkerSettings(memory_mb=3072),
+            ml=MLSettings(enabled=True, tag_top_k=1, offline=True),
         )
         context = get_context("fork")
         stop = context.Event()
-        worker = context.Process(target=run, args=(settings, stop))
+        worker = context.Process(
+            target=run, args=(settings, stop), kwargs={"model_factory": FakeEmbedding}
+        )
         worker.start()
         try:
             uvicorn.run(create_app(settings), host="127.0.0.1", port=18787, proxy_headers=False)

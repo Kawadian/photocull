@@ -3,7 +3,10 @@ import { useEffect, useState } from 'react'
 export type Library = { name: string }
 export type Page<T, Cursor = number> = { items: T[]; next_cursor: Cursor | null }
 export type Group = { name: string; count: number }
-export type GroupBy = 'folder' | 'day' | 'burst'
+export type GroupBy = 'folder' | 'day' | 'burst' | 'similar'
+export type SimilarGroup = { id: number; path: string; member_count: number }
+export type Tag = { tag: string; label: string }
+export type PhotoTag = Tag & { score: number }
 export type Burst = {
   id: number
   captured_at: string
@@ -32,6 +35,10 @@ export type Asset = Rating & {
   preview_error: string | null
   score_status: StageStatus | null
   score_error: string | null
+  embedding_status: StageStatus | null
+  embedding_error: string | null
+  similarity?: number
+  tags?: PhotoTag[]
   sharpness: number | null
   exposure: number | null
   clipped_highlights: number | null
@@ -43,8 +50,20 @@ export type Asset = Rating & {
 export type Progress = {
   catalog_revision: number
   scan: { id: number; status: StageStatus; error: string | null } | null
-  stages: Record<'exif' | 'preview' | 'score', Partial<Record<StageStatus, number>>>
+  stages: Record<'exif' | 'preview' | 'score', Partial<Record<StageStatus, number>>> & {
+    embedding?: Partial<Record<StageStatus, number>>
+  }
   worker: { heartbeat: number; pid: number } | null
+  ml: {
+    enabled: boolean
+    search_enabled: boolean
+    tags_enabled: boolean
+    waiting: boolean
+    grouping: boolean
+    image_error: string | null
+    text_error: string | null
+    group_error: string | null
+  }
 }
 export type XmpPlan = {
   sidecar: string
@@ -118,7 +137,7 @@ export function useProgress(base: string) {
   return { progress, connected }
 }
 
-export function assetName(asset: Asset): string {
+export function assetName(asset: { path: string }): string {
   return asset.path.slice(asset.path.lastIndexOf('/') + 1)
 }
 

@@ -12,6 +12,8 @@ DISABLED = "Stage disabled by worker settings"
 NO_VIDEO_EXIF = "Video has no image EXIF stage"
 NO_VIDEO_SCORE = "Video has no image score stage"
 NO_PREVIEW = "Score requires a completed preview"
+NO_EMBEDDING_PREVIEW = "Embedding requires a completed preview"
+MODEL_FAILURE = "Embedding model unavailable: "
 
 
 @dataclass(frozen=True)
@@ -68,16 +70,18 @@ def finish_scan(db: sqlite3.Connection, scan_id: int, error: str | None = None) 
         )
 
 
-def claim_jobs(db: sqlite3.Connection, limit: int) -> list[Job]:
-    sql = """
+def claim_jobs(db: sqlite3.Connection, limit: int, *, embedding: bool = False) -> list[Job]:
+    stage = "j.stage = 'embedding'" if embedding else "j.stage <> 'embedding'"
+    sql = f"""
         SELECT j.asset_id, j.stage, j.content_hash, a.path, a.kind, a.source_key, a.mtime_ns
         FROM jobs AS j JOIN assets AS a ON a.id = j.asset_id
         LEFT JOIN jobs AS p ON p.asset_id = j.asset_id AND p.stage = 'preview'
         WHERE j.status = 'pending' AND a.active = 1
-          AND (j.stage <> 'score' OR p.status = 'done')
+          AND (j.stage NOT IN ('score', 'embedding') OR p.status = 'done')
+          AND {stage}
         ORDER BY j.asset_id, j.stage LIMIT ?
         """
-    if db.execute("SELECT 1 FROM jobs WHERE status = 'pending' LIMIT 1").fetchone() is None:
+    if db.execute(sql, (1,)).fetchone() is None:
         return []
     with write(db):
         jobs = [Job(**dict(row)) for row in db.execute(sql, (limit,))]
@@ -89,11 +93,11 @@ def claim_jobs(db: sqlite3.Connection, limit: int) -> list[Job]:
     return jobs
 
 
-def skip_unavailable_scores(db: sqlite3.Connection) -> bool:
+def skip_unavailable_previews(db: sqlite3.Connection) -> bool:
     rows = db.execute(
-        """SELECT j.asset_id FROM jobs AS j
+        """SELECT j.asset_id, j.stage FROM jobs AS j
            LEFT JOIN jobs AS p ON p.asset_id = j.asset_id AND p.stage = 'preview'
-           WHERE j.stage = 'score' AND j.status = 'pending'
+           WHERE j.stage IN ('score', 'embedding') AND j.status = 'pending'
              AND (p.status IS NULL OR p.status IN ('error', 'skipped'))
            LIMIT 256"""
     ).fetchall()
@@ -102,10 +106,13 @@ def skip_unavailable_scores(db: sqlite3.Connection) -> bool:
     with write(db):
         db.executemany(
             """UPDATE jobs SET status = 'skipped', error = ?
-               WHERE asset_id = ? AND stage = 'score' AND status = 'pending'
+               WHERE asset_id = ? AND stage = ? AND status = 'pending'
                  AND NOT EXISTS (SELECT 1 FROM jobs AS p WHERE p.asset_id = jobs.asset_id
                      AND p.stage = 'preview' AND p.status IN ('pending', 'running', 'done'))""",
-            ((NO_PREVIEW, row[0]) for row in rows),
+            (
+                (NO_PREVIEW if stage == "score" else NO_EMBEDDING_PREVIEW, asset_id, stage)
+                for asset_id, stage in rows
+            ),
         )
         mark_catalog_updated(db)
     return True
@@ -124,6 +131,8 @@ def retry_job(db: sqlite3.Connection, asset_id: int, stage: Stage) -> sqlite3.Ro
                    WHERE asset_id = ? AND stage = ? RETURNING *""",
                 (asset_id, stage),
             ).fetchone()
+            if stage == "embedding" and job is not None:
+                db.execute("UPDATE ml_state SET image_error = NULL")
         return job
 
 
@@ -134,16 +143,27 @@ def progress(db: sqlite3.Connection) -> dict:
         scan = db.execute("SELECT * FROM scan_requests ORDER BY id DESC LIMIT 1").fetchone()
         counts: dict[str, dict[str, int]] = {stage: {} for stage in STAGES}
         for row in db.execute("SELECT stage, status, count FROM stage_counts WHERE count > 0"):
-            counts[row["stage"]][row["status"]] = row["count"]
+            counts.setdefault(row["stage"], {})[row["status"]] = row["count"]
         worker = db.execute("SELECT heartbeat, pid FROM worker_status WHERE id = 1").fetchone()
         activity = db.execute("SELECT revision FROM catalog_status WHERE id = 1").fetchone()[
             "revision"
         ]
+        ml = db.execute("SELECT * FROM ml_state").fetchone()
         return {
             "scan": dict(scan) if scan else None,
             "stages": counts,
             "worker": dict(worker) if worker else None,
             "catalog_revision": activity,
+            "ml": {
+                "enabled": bool(ml["enabled"]),
+                "search_enabled": bool(ml["search_enabled"]),
+                "tags_enabled": bool(ml["tags_enabled"]),
+                "model_key": ml["model_key"],
+                "image_error": ml["image_error"],
+                "text_error": ml["text_error"],
+                "group_error": ml["group_error"],
+                "grouping": bool(ml["enabled"] and ml["grouped_generation"] != ml["generation"]),
+            },
         }
     finally:
         db.rollback()

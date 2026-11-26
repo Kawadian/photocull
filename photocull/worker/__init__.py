@@ -20,17 +20,21 @@ from photocull.db import connect, initialize, write
 from photocull.db.catalog import mark_catalog_updated
 from photocull.db.jobs import (
     DISABLED,
+    NO_EMBEDDING_PREVIEW,
     NO_PREVIEW,
     Job,
     claim_jobs,
     claim_scan,
     finish_scan,
     recover,
-    skip_unavailable_scores,
+    skip_unavailable_previews,
 )
 from photocull.media.cache import cache_path
 from photocull.media.walk import MediaJail, SourceChanged, source_key
 from photocull.worker.bursts import refresh_bursts
+from photocull.worker.ml import LibraryML
+from photocull.worker.ml.model import Siglip
+from photocull.worker.ml.process import InferenceProcess
 from photocull.worker.rejections import (
     configure_scoring,
     save_scores,
@@ -54,6 +58,7 @@ class LibraryWorker:
     pulse: Callable[[], None]
     heartbeat: float = 0
     scan: tuple[int, Iterator[None]] | None = None
+    ml: LibraryML | None = None
 
     def beat(self) -> None:
         if time.monotonic() - self.heartbeat < 5:
@@ -102,6 +107,8 @@ class LibraryWorker:
             for temporary in (self.state / variant).glob(".[0-9]*-*-*"):
                 temporary.unlink(missing_ok=True)
         configure_scoring(self.db, self.settings.scoring, self.pulse)
+        if self.ml is not None:
+            self.ml.configure()
 
     def step_scan(self) -> bool:
         if self.scan is None:
@@ -113,7 +120,8 @@ class LibraryWorker:
             except (OSError, RuntimeError, ValueError) as error:
                 finish_scan(self.db, scan_id, str(error))
                 return True
-            batches = scan_batches(self.db, scan_id, jail, self.settings.worker, self.pulse)
+            key = self.ml.key if self.ml is not None and self.settings.ml.enabled else None
+            batches = scan_batches(self.db, scan_id, jail, self.settings.worker, self.pulse, key)
             self.scan = (scan_id, batches)
         scan_id, batches = self.scan
         try:
@@ -201,6 +209,13 @@ class LibraryWorker:
                          AND error = ?""",
                     (job.asset_id, NO_PREVIEW),
                 )
+            if not error and job.stage == "preview" and self.settings.ml.enabled:
+                self.db.execute(
+                    """UPDATE jobs SET status = 'pending', error = NULL
+                       WHERE asset_id = ? AND stage = 'embedding' AND status = 'skipped'
+                         AND error = ?""",
+                    (job.asset_id, NO_EMBEDDING_PREVIEW),
+                )
             mark_catalog_updated(self.db)
         if not error and job.stage == "preview":
             for variant in CACHE_DIRS:
@@ -211,6 +226,8 @@ class LibraryWorker:
 
     def step(self, pool: ThreadPoolExecutor, heartbeat: Callable[[], None]) -> bool:
         self.pulse()
+        ml = self.ml if self.settings.ml.enabled else None
+        searched = ml.process_search() if ml else False
         scanned = self.step_scan()
         self.pulse()
         config = self.settings.worker
@@ -221,20 +238,26 @@ class LibraryWorker:
             done, _ = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
             for future in done:
                 self.finish(pending.pop(future), future)
-        if scanned or jobs:
+        embedded = ml.process_images() if ml else False
+        tagged = ml.process_tags() if ml else False
+        if scanned or jobs or embedded or tagged:
             return True
-        if skip_unavailable_scores(self.db):
+        if skip_unavailable_previews(self.db):
             return True
-        return refresh_bursts(self.db, self.settings.burst, self.pulse)
+        if refresh_bursts(self.db, self.settings.burst, self.pulse, ml.key if ml else None):
+            return True
+        return (ml.group() if ml else False) or searched
 
 
-def run(settings: Settings, stop: Event) -> int:
+def run(settings: Settings, stop: Event, *, model_factory=Siglip) -> int:
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     if not settings.libraries:
         LOG.info("No libraries configured")
     try:
         with ExitStack() as stack:
             workers: list[LibraryWorker] = []
+            inference = InferenceProcess(settings, model_factory)
+            stack.callback(inference.close)
 
             def heartbeat() -> None:
                 for worker in workers:
@@ -255,7 +278,16 @@ def run(settings: Settings, stop: Event) -> int:
                 except BlockingIOError as exc:
                     raise RuntimeError(f"A worker already owns library {name}") from exc
                 db = stack.enter_context(connect(path))
-                workers.append(LibraryWorker(db, library, state, settings, pulse))
+                workers.append(
+                    LibraryWorker(
+                        db,
+                        library,
+                        state,
+                        settings,
+                        pulse,
+                        ml=LibraryML(db, state, inference, pulse),
+                    )
+                )
             for worker in workers:
                 recover(worker.db)
                 worker.configure()
@@ -270,7 +302,7 @@ def run(settings: Settings, stop: Event) -> int:
                         LOG.warning("Worker reached %.0f MiB RSS and will restart", rss_mb)
                         return 75
                 if not busy:
-                    stop.wait(1)
+                    stop.wait(0.2 if settings.ml.enabled else 1)
     except StopWorker:
         pass
     return 0

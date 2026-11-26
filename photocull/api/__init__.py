@@ -16,9 +16,9 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi import Path as RoutePath
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 
-from photocull.config import Settings, Stage, load_settings
+from photocull.config import MLSettings, Settings, Stage, load_settings
 from photocull.db import connect, initialize
 from photocull.db.bursts import (
     BurstConflict,
@@ -33,11 +33,13 @@ from photocull.db.catalog import (
     ScoreFilters,
     asset_json,
     asset_page_query,
+    attach_tags,
     clear_auto_reject,
     get_asset,
 )
 from photocull.db.catalog import set_rating as save_rating
 from photocull.db.jobs import progress, request_scan, retry_job
+from photocull.db.search import QueueFull, QueueUnavailable, enqueue, get_result
 from photocull.media.cache import cache_path
 from photocull.media.xmp import XMPConflict, XMPError, export_xmp
 
@@ -48,6 +50,7 @@ ScoreBound = Annotated[float, Query(ge=0, le=1)]
 SQLITE_MAX_ID = 2**63 - 1
 Cursor = Annotated[int, Query(ge=0, le=SQLITE_MAX_ID)]
 CatalogId = Annotated[int, RoutePath(gt=0, le=SQLITE_MAX_ID)]
+TagKey = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")]
 
 
 def score_filters(
@@ -64,6 +67,15 @@ def score_filters(
 class BurstBestUpdate(BaseModel):
     asset_id: int = Field(gt=0, le=SQLITE_MAX_ID)
     membership_key: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class SearchParameters(BaseModel):
+    tag: TagKey | None = None
+    limit: int = Field(default=60, ge=1, le=100)
+
+
+class SearchQuery(SearchParameters):
+    query: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
 
 
 class BurstRejectUpdate(BaseModel):
@@ -94,16 +106,29 @@ class XMPUpdate(BaseModel):
         return self
 
 
-def _get_progress(path: Path) -> dict:
+def _get_progress(path: Path, settings: MLSettings | None = None) -> dict:
     with connect(path) as db:
-        return progress(db)
+        result = progress(db)
+    if settings is not None:
+        ml = result["ml"]
+        configured = ml["enabled"] and ml["model_key"] == settings.model_key
+        ml["waiting"] = settings.enabled and not configured
+        ml["enabled"] = settings.enabled
+        ml["search_enabled"] = settings.enabled and settings.search_enabled
+        ml["tags_enabled"] = settings.enabled and settings.tags_enabled
+        if not (settings.enabled and configured):
+            for field in ("image_error", "text_error", "group_error"):
+                ml[field] = None
+            ml["grouping"] = False
+            result["stages"].pop("embedding", None)
+    return result
 
 
-async def _events(path: Path) -> AsyncIterator[str]:
+async def _events(path: Path, settings: MLSettings | None = None) -> AsyncIterator[str]:
     last = ""
     sent = time.monotonic()
     while True:
-        payload = json.dumps(await asyncio.to_thread(_get_progress, path))
+        payload = json.dumps(await asyncio.to_thread(_get_progress, path, settings))
         if payload != last:
             yield f"data: {payload}\n\n"
             last, sent = payload, time.monotonic()
@@ -137,11 +162,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="Photocull", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.settings = settings
+    ml = settings.ml
+    model_key, tag_key, vocabulary = ml.model_key, ml.tag_key, ml.vocabulary
 
     def library_path(library: str) -> Path:
         if library not in settings.libraries:
             raise HTTPException(404, "Unknown library")
         return settings.library_state(library) / "index.db"
+
+    def require_ml(*, text: bool = False) -> None:
+        if not ml.enabled:
+            raise HTTPException(409, "Photo embeddings are disabled")
+        if text and not ml.search_enabled:
+            raise HTTPException(409, "Text search is disabled")
+
+    def require_tag(tag: str | None) -> None:
+        if tag is not None:
+            require_ml()
+            if not ml.tags_enabled:
+                raise HTTPException(409, "Photo tags are disabled")
+            if tag not in vocabulary:
+                raise HTTPException(422, "Unknown photo tag")
+
+    def add_tags(db, items: list[dict]) -> None:
+        if ml.enabled and ml.tags_enabled:
+            attach_tags(db, items, tag_key, vocabulary)
 
     @app.middleware("http")
     async def access(request: Request, call_next):
@@ -162,7 +207,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         libraries = {}
         now = time.time()
         for name in settings.libraries:
-            details = _get_progress(library_path(name))
+            details = _get_progress(library_path(name), ml)
             heartbeat = details["worker"]
             details["worker_online"] = bool(heartbeat and now - heartbeat["heartbeat"] < 30)
             libraries[name] = details
@@ -201,15 +246,110 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         folder: str | None = None,
         day: str | None = None,
         burst_id: Annotated[int, Query(gt=0, le=SQLITE_MAX_ID)] | None = None,
+        similar_group_id: Annotated[int, Query(gt=0, le=SQLITE_MAX_ID)] | None = None,
+        tag: TagKey | None = None,
     ):
-        with connect(library_path(library)) as db:
-            items = db.execute(
-                *asset_page_query(cursor, limit, scores, folder=folder, day=day, burst_id=burst_id)
+        path = library_path(library)
+        require_tag(tag)
+        if similar_group_id is not None:
+            require_ml()
+        with connect(path) as db:
+            db.execute("BEGIN")
+            group_id = similar_group_id
+            if (
+                group_id is not None
+                and not db.execute(
+                    "SELECT 1 FROM ml_state WHERE enabled = 1 AND model_key = ?", (model_key,)
+                ).fetchone()
+            ):
+                group_id = -1
+            rows = db.execute(
+                *asset_page_query(
+                    cursor,
+                    limit,
+                    scores,
+                    folder=folder,
+                    day=day,
+                    burst_id=burst_id,
+                    similar_group_id=group_id,
+                    tag=tag,
+                    tag_key=tag_key,
+                )
+            ).fetchall()
+            items = [asset_json(row) for row in rows[:limit]]
+            add_tags(db, items)
+        return {
+            "items": items,
+            "next_cursor": items[-1]["id"] if len(rows) > limit else None,
+        }
+
+    @app.get("/api/libraries/{library}/similar-groups")
+    def similar_groups(library: str, cursor: Cursor = 0, limit: Limit = 100):
+        path = library_path(library)
+        require_ml()
+        with connect(path) as db:
+            rows = db.execute(
+                """SELECT g.id, a.path, g.member_count FROM similar_groups AS g
+                   JOIN assets AS a ON a.id = g.id
+                   WHERE g.id > ? AND EXISTS (
+                       SELECT 1 FROM ml_state WHERE enabled = 1 AND model_key = ?
+                   ) ORDER BY g.id LIMIT ?""",
+                (cursor, model_key, limit + 1),
             ).fetchall()
         return {
-            "items": [asset_json(row) for row in items[:limit]],
-            "next_cursor": items[limit - 1]["id"] if len(items) > limit else None,
+            "items": [dict(row) for row in rows[:limit]],
+            "next_cursor": rows[limit - 1]["id"] if len(rows) > limit else None,
         }
+
+    @app.get("/api/libraries/{library}/tags")
+    def tags(library: str):
+        library_path(library)
+        return {
+            "items": [
+                {"tag": tag, "label": " / ".join(vocabulary[tag])} for tag in sorted(vocabulary)
+            ]
+            if ml.enabled and ml.tags_enabled
+            else [],
+        }
+
+    def submit_search(library: str, params: SearchParameters, *, query=None, asset_id=None):
+        path = library_path(library)
+        require_ml(text=query is not None)
+        require_tag(params.tag)
+        with connect(path) as db:
+            try:
+                search_id = enqueue(
+                    db, ml, query=query, asset_id=asset_id, tag=params.tag, limit=params.limit
+                )
+            except QueueUnavailable as error:
+                raise HTTPException(503, str(error)) from error
+            except QueueFull as error:
+                raise HTTPException(429, str(error)) from error
+            except LookupError as error:
+                raise HTTPException(404, str(error)) from error
+        return {"id": search_id}
+
+    @app.post("/api/libraries/{library}/search", status_code=202)
+    def search(library: str, params: SearchQuery):
+        return submit_search(library, params, query=params.query)
+
+    @app.post("/api/libraries/{library}/assets/{asset_id}/similar", status_code=202)
+    def similar(library: str, asset_id: CatalogId, params: SearchParameters):
+        return submit_search(library, params, asset_id=asset_id)
+
+    @app.get("/api/libraries/{library}/search/{search_id}")
+    def search_result(
+        library: str, search_id: Annotated[str, RoutePath(pattern=r"^[a-f0-9]{32}$")]
+    ):
+        path = library_path(library)
+        require_ml()
+        with connect(path) as db:
+            db.execute("BEGIN")
+            result = get_result(db, search_id, model_key, tag_key if ml.tags_enabled else None)
+            if result is None:
+                raise HTTPException(404, "Unknown or expired search")
+            add_tags(db, result["items"])
+            return result
 
     @app.get("/api/libraries/{library}/bursts")
     def bursts(
@@ -274,10 +414,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/libraries/{library}/assets/{asset_id}")
     def asset(library: str, asset_id: CatalogId):
         with connect(library_path(library)) as db:
+            db.execute("BEGIN")
             row = get_asset(db, asset_id)
             if row is None:
                 raise HTTPException(404, "Unknown asset")
-            return asset_json(row)
+            items = [asset_json(row)]
+            add_tags(db, items)
+            return items[0]
 
     @app.patch("/api/libraries/{library}/assets/{asset_id}/rating")
     def set_rating(library: str, asset_id: CatalogId, update: RatingUpdate):
@@ -330,12 +473,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/libraries/{library}/jobs")
     def job_progress(library: str):
-        return _get_progress(library_path(library))
+        return _get_progress(library_path(library), ml)
 
     @app.post("/api/libraries/{library}/assets/{asset_id}/jobs/{stage}", status_code=202)
     def rerun(library: str, asset_id: CatalogId, stage: Stage):
         path = library_path(library)
-        if stage not in settings.worker.stages:
+        if (stage == "embedding" and not ml.enabled) or (
+            stage != "embedding" and stage not in settings.worker.stages
+        ):
             raise HTTPException(409, "Stage disabled by worker settings")
         with connect(path) as db:
             job = retry_job(db, asset_id, stage)
@@ -348,7 +493,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/libraries/{library}/events")
     async def events(library: str):
         return StreamingResponse(
-            _events(library_path(library)),
+            _events(library_path(library), ml),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )

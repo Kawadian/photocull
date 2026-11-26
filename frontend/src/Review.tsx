@@ -3,9 +3,11 @@ import {
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { assetName, mediaUrl, useRemote } from './api'
-import type { Asset, Burst, GroupBy, Page, Rating } from './api'
+import type { Asset, Burst, GroupBy, Page, Progress, Rating } from './api'
 import { ConfirmAction, ScoreBadges } from './Analysis'
 import { Inspector } from './Inspector'
+import { usePhotoSearch } from './ML'
+import type { Lookup } from './ML'
 import { useShortcuts } from './shortcuts'
 
 type ReviewProps = {
@@ -22,6 +24,12 @@ type ReviewProps = {
   onChooseBest: (burst: Burst, assetId: number) => void
   onRejectRest: (burst: Burst) => Promise<void>
   onClearFlag: (asset: Asset) => void
+  lookup?: Lookup
+  onCloseLookup: () => void
+  ml?: Progress['ml']
+  onSimilar: (asset: Asset) => void
+  onTag: (tag: string) => void
+  activeTag: string
 }
 
 function Filmstrip({ base, assets, active, bestId, select }: {
@@ -68,13 +76,14 @@ function Filmstrip({ base, assets, active, bestId, select }: {
   )
 }
 
-function Preview({ base, asset, zoom, error, loading, filtered }: {
+function Preview({ base, asset, zoom, error, loading, filtered, searching }: {
   base: string
   asset: Asset | undefined
   zoom: boolean
   error: string | undefined
   loading: boolean
   filtered?: boolean
+  searching?: boolean
 }) {
   const viewer = useRef<HTMLDivElement>(null)
   const [failed, setFailed] = useState(false)
@@ -98,9 +107,9 @@ function Preview({ base, asset, zoom, error, loading, filtered }: {
     )
   }
 
-  const heading = error ? 'Could not load assets'
-    : loading ? 'Loading assets…'
-    : !asset ? filtered ? 'No matching assets' : 'No assets here'
+  const heading = error ? searching ? 'Could not search photos' : 'Could not load assets'
+    : loading ? searching ? 'Searching photos…' : 'Loading assets…'
+    : !asset ? searching ? 'No matching photos' : filtered ? 'No matching assets' : 'No assets here'
     : failed || asset.preview_status === 'error' ? 'Preview unavailable'
     : asset.preview_status === 'skipped' ? 'Preview skipped' : 'Preview queued'
   const detail = error || asset?.preview_error || (!asset && !loading && !filtered
@@ -118,18 +127,25 @@ function Preview({ base, asset, zoom, error, loading, filtered }: {
 
 export function Review(props: ReviewProps) {
   const { base, group, by, version, ratings, busy, undoAvailable, onRating, onUndo,
-    filters, onChooseBest, onRejectRest, onClearFlag } = props
+    filters, onChooseBest, onRejectRest, onClearFlag, lookup, onCloseLookup, ml,
+    onSimilar, onTag, activeTag } = props
   const [cursors, setCursors] = useState([0])
-  const [selected, setSelected] = useState<number | 'first' | 'last'>('first')
+  const [browseSelection, setBrowseSelection] = useState<number | 'first' | 'last'>('first')
+  const [searchSelection, setSearchSelection] = useState<{ lookup: Lookup; id: number }>()
   const [zoom, setZoom] = useState(false)
   const [retry, setRetry] = useState(0)
   const [compare, setCompare] = useState(false)
   const [confirmReject, setConfirmReject] = useState<Burst>()
-  const isBurst = by === 'burst'
+  const headingRef = useRef<HTMLHeadingElement>(null)
+  const isBurst = by === 'burst' && !lookup
+  const isSimilar = by === 'similar'
   const params = new URLSearchParams(isBurst ? '' : filters)
   params.set('cursor', String(cursors.at(-1)))
-  if (group !== null) params.set(isBurst ? 'burst_id' : by, group)
-  const result = useRemote<Page<Asset>>(`${base}/assets?${params}`, version + retry)
+  if (group !== null) params.set(isBurst ? 'burst_id' : isSimilar ? 'similar_group_id' : by, group)
+  const browse = useRemote<Page<Asset>>(lookup ? null : `${base}/assets?${params}`, version + retry)
+  const search = usePhotoSearch(base, lookup, retry)
+  const result = lookup ? search : browse
+  const selected = lookup ? searchSelection?.lookup === lookup ? searchSelection.id : 'first' : browseSelection
   const burstResult = useRemote<Burst>(isBurst && group !== null ? `${base}/bursts/${group}` : null, version + retry)
   const loadError = burstResult?.error ?? result?.error
   const loading = !result || (isBurst && !burstResult)
@@ -147,18 +163,26 @@ export function Review(props: ReviewProps) {
     compare && burst && !bestInPage ? `${base}/assets/${burst.best_id}` : null, version + retry,
   )
   const best = bestInPage ?? bestResult?.data
+  useEffect(() => {
+    if (lookup) headingRef.current?.focus()
+  }, [lookup])
+
+  function select(asset: Asset) {
+    if (lookup) setSearchSelection({ lookup, id: asset.id })
+    else setBrowseSelection(asset.id)
+  }
 
   function move(direction: number) {
     if (loading || (loadError && direction > 0)) return
     const target = assets[index + direction]
     if (target && asset) {
-      setSelected(target.id)
-    } else if (direction < 0 && cursors.length > 1) {
+      select(target)
+    } else if (!lookup && direction < 0 && cursors.length > 1) {
       setCursors(cursors.slice(0, -1))
-      setSelected('last')
-    } else if (direction > 0 && nextCursor !== null) {
+      setBrowseSelection('last')
+    } else if (!lookup && direction > 0 && nextCursor !== null) {
       setCursors([...cursors, nextCursor])
-      setSelected('first')
+      setBrowseSelection('first')
     }
   }
 
@@ -196,9 +220,10 @@ export function Review(props: ReviewProps) {
     }
   })
 
-  const previousAvailable = !loading && (index > 0 || cursors.length > 1)
+  const previousAvailable = !loading && (index > 0 || (!lookup && cursors.length > 1))
   const nextAvailable = !loading && !loadError && (index + 1 < assets.length || nextCursor !== null)
-  const heading = isBurst ? 'Burst review' : group === null ? 'All assets' : group || 'Library root'
+  const heading = lookup?.title ?? (isBurst ? 'Burst review' : isSimilar ? 'Similar group'
+    : group === null ? 'All assets' : group || 'Library root')
   const image = (
     <Preview
       key={`${asset?.id}-${asset?.content_hash}-${asset?.preview_status}-${zoom}`}
@@ -207,7 +232,8 @@ export function Review(props: ReviewProps) {
       zoom={zoom}
       error={loadError}
       loading={loading}
-      filtered={!!filters || isBurst}
+      filtered={!!filters || isBurst || isSimilar}
+      searching={!!lookup}
     />
   )
 
@@ -217,10 +243,14 @@ export function Review(props: ReviewProps) {
         <div className="review-header">
           <div className="review-bar">
             <div className="review-title">
-              <h1 title={heading}>{heading}</h1>
-              {asset && <p>{assetName(asset)}</p>}
+              <h1 title={heading} ref={headingRef} tabIndex={lookup ? -1 : undefined}>{heading}</h1>
+              {asset && <p>{assetName(asset)}
+                {asset.similarity !== undefined && <> · Cosine {asset.similarity.toFixed(2)}</>}
+              </p>}
             </div>
             <div className="review-tools">
+              {lookup && <button className="icon-button" aria-label="Close photo search"
+                title="Close photo search" onClick={onCloseLookup}><X size={16} /></button>}
               <div className="segment zoom" role="group" aria-label="Preview zoom">
                 <button
                   aria-pressed={!zoom}
@@ -259,7 +289,9 @@ export function Review(props: ReviewProps) {
             </div>
           )}
           {loadError && <div className="review-retry">
-            <button className="button secondary" onClick={() => setRetry((value) => value + 1)}>Retry review</button>
+            <button className="button secondary" onClick={() => setRetry((value) => value + 1)}>
+              {lookup ? 'Retry search' : 'Retry review'}
+            </button>
           </div>}
         </div>
         {compare && burst && asset && asset.id !== burst.best_id ? (
@@ -282,28 +314,29 @@ export function Review(props: ReviewProps) {
           <div className="filmstrip-bar">
             <span>Filmstrip</span>
             {!!assets.length && <span>{index + 1} / {assets.length}</span>}
-            {(cursors.length > 1 || nextCursor !== null) && (
+            {!lookup && (cursors.length > 1 || nextCursor !== null) && (
               <div className="filmstrip-pages">
                 <button className="icon-button" aria-label="Previous asset page"
                   disabled={cursors.length < 2}
-                  onClick={() => { setCursors(cursors.slice(0, -1)); setSelected('first') }}
+                  onClick={() => { setCursors(cursors.slice(0, -1)); setBrowseSelection('first') }}
                 ><ChevronLeft size={16} /></button>
                 <span>Page {cursors.length}</span>
                 <button className="icon-button" aria-label="Next asset page"
                   disabled={!nextAvailable || nextCursor === null}
                   onClick={() => {
-                    if (nextCursor !== null) { setCursors([...cursors, nextCursor]); setSelected('first') }
+                    if (nextCursor !== null) { setCursors([...cursors, nextCursor]); setBrowseSelection('first') }
                   }}
                 ><ChevronRight size={16} /></button>
               </div>
             )}
           </div>
           <Filmstrip assets={assets} active={asset} bestId={burst?.best_id}
-            base={base} select={(value) => setSelected(value.id)} />
+            base={base} select={select} />
         </div>
       </main>
       <Inspector base={base} asset={asset} busy={busy} undoAvailable={undoAvailable}
-        onRating={onRating} onUndo={onUndo} onClearFlag={onClearFlag} />
+        onRating={onRating} onUndo={onUndo} onClearFlag={onClearFlag}
+        ml={ml} onSimilar={onSimilar} onTag={onTag} activeTag={activeTag} />
       {confirmReject && <ConfirmAction
         title="Reject the other photos in this burst?"
         description="Apply a reversible flag to each of the other photos. You can undo this action after confirming."

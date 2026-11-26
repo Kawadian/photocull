@@ -1,0 +1,422 @@
+from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
+
+import pytest
+from fastapi.testclient import TestClient
+from PIL import Image
+
+from photocull.api import create_app
+from photocull.config import Library, MLSettings, Settings, WorkerSettings
+from photocull.db import connect
+from photocull.db.jobs import claim_jobs, recover, request_scan, retry_job
+from photocull.db.search import MAX_PENDING, REQUEST_TTL
+from photocull.media.cache import cache_path
+from photocull.worker import LibraryWorker
+from photocull.worker.ml import LibraryML
+from photocull.worker.ml.process import InferenceProcess
+from tests.fake_embedding import FakeEmbedding
+
+BASE = "/api/libraries/photos"
+
+
+def photo(path, color, stamp, *, gradient=False):
+    exif = Image.Exif()
+    exif[34665] = {36867: f"2025:01:{stamp}"}
+    image = Image.new("RGB", (80, 50), color)
+    if gradient:
+        image.putdata([(180 + x, y, y) for y in range(50) for x in reversed(range(80))])
+    with image:
+        image.save(path, exif=exif)
+
+
+@pytest.fixture
+def settings(tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    photo(root / "a.jpg", "red", "01 00:00:01")
+    photo(root / "b.jpg", "blue", "01 00:00:01")
+    photo(root / "c.jpg", "red", "05 00:00:01")
+    photo(root / "d.jpg", "red", "01 00:00:02", gradient=True)
+    return Settings(
+        libraries={"photos": Library(root=root)},
+        state_dir=tmp_path / "state",
+        worker=WorkerSettings(memory_mb=3072, batch_size=4),
+        ml=MLSettings(enabled=True, batch_size=3, tag_top_k=1),
+    )
+
+
+def make_worker(db, settings, inference):
+    library = settings.libraries["photos"]
+    state = settings.library_state("photos")
+    worker = LibraryWorker(
+        db, library, state, settings, lambda: None, ml=LibraryML(db, state, inference, lambda: None)
+    )
+    recover(db)
+    worker.configure()
+    worker.beat()
+    return worker
+
+
+def drain(worker, pool):
+    for _ in range(100):
+        if not worker.step(pool, worker.beat):
+            return
+    raise AssertionError("Worker queue failed to reach idle")
+
+
+def fetch_search(client, worker, pool, endpoint, body):
+    response = client.post(f"{BASE}/{endpoint}", json=body)
+    assert response.status_code == 202, response.text
+    result_url = f"{BASE}/search/{response.json()['id']}"
+    assert client.get(result_url).json()["status"] == "pending"
+    worker.step(pool, worker.beat)
+    result = client.get(result_url).json()
+    assert result["status"] == "done", result
+    return result["items"], result_url
+
+
+def test_embedding_stages_groups_tags_and_search(settings):
+    before = {
+        path: sha256(path.read_bytes()).hexdigest()
+        for path in settings.libraries["photos"].root.iterdir()
+    }
+    state = settings.library_state("photos")
+    inference = InferenceProcess(settings, FakeEmbedding)
+    try:
+        with (
+            TestClient(create_app(settings)) as client,
+            connect(state / "index.db") as db,
+            ThreadPoolExecutor(1) as pool,
+        ):
+            worker = make_worker(db, settings, inference)
+            assert inference.process is None
+            request_scan(db)
+            drain(worker, pool)
+            jobs = client.get(f"{BASE}/jobs").json()
+            assert jobs["stages"]["embedding"] == {"done": 4}
+            assert not jobs["ml"]["grouping"]
+            model = db.execute("SELECT * FROM embedding_models").fetchone()
+            assert model["model_id"] == settings.ml.model_id
+            assert model["revision"] == settings.ml.model_revision
+            assert '"resize": [224, 224]' in model["preprocessing"]
+            assert (
+                db.execute("SELECT DISTINCT length(vector) FROM asset_embeddings").fetchone()[0]
+                == 6
+            )
+            assert client.get(f"{BASE}/similar-groups").json()["items"] == [
+                {"id": 1, "path": "a.jpg", "member_count": 3}
+            ]
+            burst = client.get(f"{BASE}/bursts").json()["items"]
+            assert [item["member_count"] for item in burst] == [2]
+            assert [
+                item["path"]
+                for item in client.get(
+                    f"{BASE}/assets", params={"burst_id": burst[0]["id"]}
+                ).json()["items"]
+            ] == ["a.jpg", "d.jpg"]
+            groups = client.get(f"{BASE}/assets", params={"similar_group_id": 1, "limit": 1}).json()
+            assert groups["next_cursor"] == 1 and groups["items"][0]["path"] == "a.jpg"
+            assert groups["items"][0]["tags"] == [{"tag": "cat", "label": "Cat / 猫", "score": 1.0}]
+            dog = client.get(f"{BASE}/assets", params={"tag": "dog"}).json()["items"]
+            assert [item["path"] for item in dog] == ["b.jpg"]
+
+            for query in ("a cat", "猫の写真"):
+                items, _ = fetch_search(
+                    client, worker, pool, "search", {"query": query, "limit": 2}
+                )
+                assert [item["path"] for item in items] == ["a.jpg", "c.jpg"]
+                assert all(item["similarity"] == 1 for item in items)
+            items, stale = fetch_search(client, worker, pool, "assets/1/similar", {"tag": "cat"})
+            assert [item["path"] for item in items] == ["c.jpg", "d.jpg"]
+            items, _ = fetch_search(client, worker, pool, "search", {"query": "犬", "tag": "dog"})
+            assert [item["path"] for item in items] == ["b.jpg"]
+            assert client.get(f"{BASE}/assets", params={"tag": "unknown"}).status_code == 422
+            assert client.post(f"{BASE}/search", json={"query": "  "}).status_code == 422
+
+            assert {path: sha256(path.read_bytes()).hexdigest() for path in before} == before
+            photo(settings.libraries["photos"].root / "c.jpg", "blue", "05 00:00:01")
+            request_scan(db)
+            drain(worker, pool)
+            assert [item["path"] for item in client.get(stale).json()["items"]] == ["d.jpg"]
+            assert client.get(f"{BASE}/assets/3").json()["tags"][0]["tag"] == "dog"
+    finally:
+        inference.close()
+
+
+def test_model_change_resume_and_vocabulary_only_refresh(settings):
+    state = settings.library_state("photos")
+    initialize_client = TestClient(create_app(settings))
+    with initialize_client, connect(state / "index.db") as db, ThreadPoolExecutor(1) as pool:
+        config = settings
+        for model_id, image_size in (
+            (settings.ml.model_id, 224),
+            ("test/changed-model", 224),
+            ("test/changed-model", 256),
+        ):
+            config = config.model_copy(
+                update={
+                    "ml": config.ml.model_copy(
+                        update={"model_id": model_id, "image_size": image_size}
+                    )
+                }
+            )
+            inference = InferenceProcess(config, FakeEmbedding)
+            try:
+                worker = make_worker(db, config, inference)
+                if not db.execute("SELECT 1 FROM assets LIMIT 1").fetchone():
+                    request_scan(db)
+                else:
+                    assert (
+                        db.execute(
+                            "SELECT count(*) FROM jobs WHERE stage = 'embedding' "
+                            "AND status = 'pending' AND model_key = ?",
+                            (config.ml.model_key,),
+                        ).fetchone()[0]
+                        == 4
+                    )
+                    assert len(claim_jobs(db, 2, embedding=True)) == 2
+                    recover(db)
+                drain(worker, pool)
+                assert {
+                    row[0] for row in db.execute("SELECT DISTINCT model_key FROM asset_embeddings")
+                } == {config.ml.model_key}
+            finally:
+                inference.close()
+
+        assert db.execute("SELECT count(*) FROM embedding_models").fetchone()[0] == 3
+        config = config.model_copy(
+            update={
+                "ml": config.ml.model_copy(update={"tag_vocabulary": {"cat": ("Kitten", "猫")}})
+            }
+        )
+        inference = InferenceProcess(config, FakeEmbedding)
+        try:
+            worker = make_worker(db, config, inference)
+            assert (
+                db.execute("SELECT sum(attempts) FROM jobs WHERE stage = 'embedding'").fetchone()[0]
+                == 6
+            )
+            drain(worker, pool)
+            assert (
+                db.execute(
+                    "SELECT count(*) FROM asset_embeddings WHERE tag_key = ?", (config.ml.tag_key,)
+                ).fetchone()[0]
+                == 4
+            )
+            assert (
+                db.execute("SELECT sum(attempts) FROM jobs WHERE stage = 'embedding'").fetchone()[0]
+                == 6
+            )
+        finally:
+            inference.close()
+
+
+@pytest.mark.parametrize("failure", ["offline", "memory", "dependency"])
+def test_ml_failure_preserves_media_work(settings, monkeypatch, failure):
+    if failure == "memory":
+        settings = settings.model_copy(update={"worker": WorkerSettings(memory_mb=1536)})
+    if failure == "dependency":
+        from importlib.util import find_spec
+
+        monkeypatch.setattr(
+            "photocull.worker.ml.process.find_spec",
+            lambda name: None if name == "onnxruntime" else find_spec(name),
+        )
+    settings = settings.model_copy(update={"ml": settings.ml.model_copy(update={"offline": True})})
+    inference = InferenceProcess(settings)
+    match = {
+        "offline": "Offline cache is missing",
+        "memory": "worker budget",
+        "dependency": "Install photocull[ml]",
+    }[failure]
+    try:
+        with (
+            TestClient(create_app(settings)) as client,
+            connect(settings.library_state("photos") / "index.db") as db,
+            ThreadPoolExecutor(1) as pool,
+        ):
+            worker = make_worker(db, settings, inference)
+            request_scan(db)
+            drain(worker, pool)
+            jobs = client.get(f"{BASE}/jobs").json()
+            assert jobs["stages"]["embedding"] == {"error": 4}
+            assert jobs["stages"]["preview"] == {"done": 4}
+            assert match in jobs["ml"]["image_error"]
+            assert client.get(f"{BASE}/assets/1/media/thumb").status_code == 200
+            assert client.post(f"{BASE}/search", json={"query": "猫"}).status_code == 503
+            if failure != "offline":
+                assert inference.process is None
+    finally:
+        inference.close()
+
+
+def test_disabled_features_queue_limit_and_expiry(settings):
+    state = settings.library_state("photos")
+    inference = InferenceProcess(settings, FakeEmbedding)
+    try:
+        with TestClient(create_app(settings)) as client, connect(state / "index.db") as db:
+            worker = make_worker(db, settings, inference)
+            with ThreadPoolExecutor(1) as pool:
+                request_scan(db)
+                drain(worker, pool)
+            for _ in range(MAX_PENDING):
+                queued = client.post(f"{BASE}/search", json={"query": "猫"})
+                assert queued.status_code == 202
+            assert client.post(f"{BASE}/search", json={"query": "猫"}).status_code == 429
+            db.execute("UPDATE search_requests SET created_at = created_at - ?", (REQUEST_TTL,))
+            assert client.get(f"{BASE}/search/{queued.json()['id']}").status_code == 404
+            assert client.post(f"{BASE}/search", json={"query": "猫"}).status_code == 202
+            db.execute("UPDATE worker_status SET heartbeat = 0")
+            assert client.post(f"{BASE}/search", json={"query": "cat"}).status_code == 503
+    finally:
+        inference.close()
+
+    settings = settings.model_copy(update={"ml": MLSettings(enabled=False)})
+    with TestClient(create_app(settings)) as client, connect(state / "index.db") as db:
+        inference = InferenceProcess(settings, FakeEmbedding)
+        make_worker(db, settings, inference)
+        assert inference.process is None
+        assert "embedding" not in client.get(f"{BASE}/jobs").json()["stages"]
+        assert client.get(f"{BASE}/tags").json()["items"] == []
+        assert client.post(f"{BASE}/search", json={"query": "猫"}).status_code == 409
+        assert client.get(f"{BASE}/assets", params={"tag": "cat"}).status_code == 409
+        assert client.get(f"{BASE}/similar-groups").status_code == 409
+        assert "tags" not in client.get(f"{BASE}/assets/1").json()
+
+
+def test_embedding_waits_for_preview_and_can_be_retried(settings):
+    config = settings.model_copy(
+        update={"worker": WorkerSettings(memory_mb=3072, stages=("exif",))}
+    )
+    state = settings.library_state("photos")
+    with (
+        TestClient(create_app(config)),
+        connect(state / "index.db") as db,
+        ThreadPoolExecutor(1) as pool,
+    ):
+        inference = InferenceProcess(config, FakeEmbedding)
+        worker = make_worker(db, config, inference)
+        request_scan(db)
+        drain(worker, pool)
+        assert inference.process is None
+        assert (
+            db.execute(
+                "SELECT count(*) FROM jobs WHERE stage = 'embedding' AND status = 'skipped'"
+            ).fetchone()[0]
+            == 4
+        )
+        inference = InferenceProcess(settings)
+        try:
+            worker = make_worker(db, settings, inference)
+            # Exercise the real adapter with missing cached previews without loading weights.
+            row = db.execute("SELECT content_hash FROM assets WHERE id = 1").fetchone()
+            preview = cache_path(state, "previews", 1, row[0])
+            db.execute("UPDATE jobs SET status = 'done' WHERE stage = 'preview' AND asset_id = 1")
+            db.execute(
+                "UPDATE jobs SET status = 'pending' WHERE stage = 'embedding' AND asset_id = 1"
+            )
+            assert not preview.exists()
+            assert worker.ml.process_images()
+            assert (
+                "cached preview"
+                in db.execute(
+                    "SELECT error FROM jobs WHERE stage = 'embedding' AND asset_id = 1"
+                ).fetchone()[0]
+            )
+            assert retry_job(db, 1, "embedding")["status"] == "pending"
+        finally:
+            inference.close()
+
+
+class AllocationProbe(FakeEmbedding):
+    def image_vectors(self, paths):
+        import errno
+        import mmap
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+        assert 1536 * 1024**2 <= soft == hard < (3072 - 512) * 1024**2
+        with pytest.raises(OSError, match="Cannot allocate memory") as failure:
+            mmap.mmap(-1, soft)
+        assert failure.value.errno == errno.ENOMEM
+        return super().image_vectors(paths)
+
+
+def test_inference_allocation_cap_is_applied_in_the_child(settings):
+    inference = InferenceProcess(settings, AllocationProbe)
+    try:
+        paths = list(settings.libraries["photos"].root.glob("*.jpg"))
+        assert all(blob for blob, error in inference.call("images", (paths,), lambda: None))
+    finally:
+        inference.close()
+
+
+def test_search_and_tag_flags_are_independent(settings):
+    state = settings.library_state("photos")
+    for search_enabled, tags_enabled in ((False, True), (True, False)):
+        config = settings.model_copy(
+            update={
+                "ml": settings.ml.model_copy(
+                    update={
+                        "search_enabled": search_enabled,
+                        "tags_enabled": tags_enabled,
+                    }
+                )
+            }
+        )
+        inference = InferenceProcess(config, FakeEmbedding)
+        try:
+            with (
+                TestClient(create_app(config)) as client,
+                connect(state / "index.db") as db,
+                ThreadPoolExecutor(1) as pool,
+            ):
+                worker = make_worker(db, config, inference)
+                request_scan(db)
+                drain(worker, pool)
+                assert bool(client.get(f"{BASE}/tags").json()["items"]) == tags_enabled
+                assert client.get(f"{BASE}/assets", params={"tag": "cat"}).status_code == (
+                    200 if tags_enabled else 409
+                )
+                assert client.post(f"{BASE}/search", json={"query": "猫"}).status_code == (
+                    202 if search_enabled else 409
+                )
+                similar = client.post(f"{BASE}/assets/1/similar", json={})
+                assert similar.status_code == 202
+        finally:
+            inference.close()
+
+
+def test_model_files_download_once_and_publish_only_complete_files(tmp_path, monkeypatch):
+    from io import BytesIO
+
+    from photocull.worker.ml import model
+
+    payload = b"cached model data"
+    monkeypatch.setitem(model.FILES, model.VISION, (len(payload), sha256(payload).hexdigest()))
+    opened = []
+
+    def fetch(url, timeout):
+        opened.append((url, timeout))
+        return BytesIO(payload if len(opened) == 1 else b"invalid")
+
+    monkeypatch.setattr(model, "urlopen", fetch)
+    settings = MLSettings()
+    with ThreadPoolExecutor(2) as pool:
+        files = list(
+            pool.map(lambda _: model.model_file(settings, tmp_path, model.VISION), range(2))
+        )
+    assert files[0] == files[1]
+    assert files[0].read_bytes() == payload
+    assert len(opened) == 1
+    assert settings.model_revision in opened[0][0]
+
+    offline = settings.model_copy(update={"offline": True})
+    assert model.model_file(offline, tmp_path, model.VISION) == files[0]
+    files[0].unlink()
+    with pytest.raises(model.ModelUnavailable, match="Offline cache"):
+        model.model_file(offline, tmp_path, model.VISION)
+    with pytest.raises(model.ModelUnavailable, match="Checksum mismatch"):
+        model.model_file(settings, tmp_path, model.VISION)
+    assert not files[0].exists()
+    assert not files[0].with_suffix(".part").exists()

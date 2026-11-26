@@ -19,10 +19,15 @@ def test_api_import_never_loads_decoders_or_ml():
             """
 import builtins
 import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from fastapi.testclient import TestClient
 
 forbidden = {
-    'onnxruntime', 'insightface', 'faster_whisper', 'torch', 'transformers',
-    'rawpy', 'pyexiv2', 'PIL', 'numpy', 'pillow_heif', 'cv2', 'imagehash'
+    'onnxruntime', 'insightface', 'faster_whisper', 'torch', 'torchvision',
+    'open_clip', 'transformers', 'tokenizers', 'usearch', 'numkong', 'huggingface_hub',
+    'faiss', 'hnswlib', 'rawpy', 'pyexiv2', 'PIL', 'numpy', 'pillow_heif', 'cv2', 'imagehash',
 }
 original = builtins.__import__
 def guarded(name, *args, **kwargs):
@@ -31,8 +36,22 @@ def guarded(name, *args, **kwargs):
     return original(name, *args, **kwargs)
 builtins.__import__ = guarded
 import photocull.api
+from photocull.config import Library, MLSettings, Settings
+with TemporaryDirectory() as directory:
+    state = Path(directory)
+    settings = Settings(
+        state_dir=state / 'state', libraries={'photos': Library(root=state / 'media')},
+        ml=MLSettings(enabled=True),
+    )
+    with TestClient(photocull.api.create_app(settings)) as client:
+        base = '/api/libraries/photos'
+        assert client.get(f'{base}/jobs').json()['ml']['waiting']
+        assert client.get(f'{base}/tags').status_code == 200
+        assert client.get(f'{base}/similar-groups').json()['items'] == []
+        assert client.post(f'{base}/search', json={'query': '猫'}).status_code == 503
+        assert client.post(f'{base}/assets/1/similar', json={}).status_code == 503
 assert forbidden.isdisjoint({name.split('.')[0] for name in sys.modules})
-assert 'photocull.worker' not in sys.modules
+assert not any(name.startswith('photocull.worker') for name in sys.modules)
 """,
         ],
         check=True,

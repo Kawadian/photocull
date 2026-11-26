@@ -17,6 +17,7 @@ def main() -> None:
     commands.add_parser("libraries", help="list configured libraries")
     commands.add_parser("scan", help="queue a library scan").add_argument("library")
     commands.add_parser("status", help="show job progress").add_argument("library")
+    commands.add_parser("fetch-model", help="prepare the worker's pinned ONNX model cache")
     xmp = commands.add_parser("xmp", help="preview or write XMP ratings for selected asset IDs")
     xmp.add_argument("library")
     xmp.add_argument("asset_ids", type=int, nargs="+")
@@ -28,6 +29,16 @@ def main() -> None:
     if args.command == "libraries":
         for library in settings.libraries:
             print(library)
+        return
+    if args.command == "fetch-model":
+        from photocull.worker.ml.model import FILES, ModelUnavailable, model_file
+
+        model = settings.ml.model_copy(update={"offline": False})
+        try:
+            for name in FILES:
+                print(model_file(model, settings.model_cache, name))
+        except ModelUnavailable as error:
+            parser.exit(1, f"{error}\n")
         return
     if args.library not in settings.libraries:
         parser.error(f"Unknown library: {args.library}")

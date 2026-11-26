@@ -9,7 +9,7 @@ export default defineConfig({
   workers: 1,
   use: { baseURL: url, trace: 'retain-on-failure' },
   webServer: {
-    command: 'uv run --locked --extra worker python frontend/e2e/serve.py',
+    command: 'uv run --locked --extra ml python frontend/e2e/serve.py',
     cwd: root,
     url,
     timeout: 30_000,

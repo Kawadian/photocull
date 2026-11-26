@@ -1,9 +1,10 @@
 import { Aperture, Images, Keyboard } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import { ApiError, json, message, request, useProgress, useRemote } from './api'
+import { ApiError, assetName, json, message, request, useProgress, useRemote } from './api'
 import type { Asset, Burst, GroupBy, Library, Rating } from './api'
 import { ShortcutHelp } from './Dialog'
 import { LibraryNav } from './LibraryNav'
+import type { Lookup } from './ML'
 import { Review } from './Review'
 import { useShortcuts } from './shortcuts'
 
@@ -44,6 +45,8 @@ function Workspace({ libraries, library, selectLibrary }: {
   const [by, setBy] = useState<GroupBy>('folder')
   const [group, setGroup] = useState<string | null>(null)
   const [filters, setFilters] = useState('')
+  const [tag, setTag] = useState('')
+  const [lookup, setLookup] = useState<Lookup>()
   const [ratings, setRatings] = useState(new Map<number, Rating>())
   const [undo, setUndo] = useState<{ assetId: number; before: Rating; revision: number }>()
   const [busy, setBusy] = useState(false)
@@ -54,6 +57,17 @@ function Workspace({ libraries, library, selectLibrary }: {
   const [help, setHelp] = useState(false)
   const inFlight = useRef(false)
   const version = (progress?.catalog_revision ?? 0) + refresh
+  const reviewFilters = new URLSearchParams(filters)
+  if (tag && progress?.ml.tags_enabled) reviewFilters.set('tag', tag)
+
+  function selectTag(value: string) {
+    setTag(value)
+    setLookup(undefined)
+    if (by === 'burst' || by === 'similar') {
+      setBy('folder')
+      setGroup(null)
+    }
+  }
 
   async function changeRating(assetId: number, rating: number, rejected: boolean, revision: number) {
     if (inFlight.current) return
@@ -181,23 +195,42 @@ function Workspace({ libraries, library, selectLibrary }: {
       <div className="workspace">
         <LibraryNav
           base={base} libraries={libraries} library={library} selectLibrary={selectLibrary}
-          by={by} selectBy={(mode) => { if (by !== mode) { setBy(mode); setGroup(null) } }}
-          group={group} selectGroup={setGroup} version={version} progress={progress}
+          by={by} selectBy={(mode) => {
+            setLookup(undefined)
+            if (by !== mode) {
+              setBy(mode)
+              setGroup(null)
+              if (mode === 'burst') setTag('')
+            }
+          }}
+          group={group} selectGroup={(value) => { setGroup(value); setLookup(undefined) }}
+          version={version} progress={progress} browsing={!lookup}
           filters={filters} setFilters={(value) => {
             if (by === 'burst' && value !== filters) setGroup(null)
             setFilters(value)
+            setLookup(undefined)
           }}
+          tag={tag} selectTag={selectTag} onSearch={(query) => setLookup({
+            title: `Search · ${query}`, url: `${base}/search`, body: { query, tag: tag || undefined },
+          })}
           analysisBusy={busy} onClearAll={clearAll}
         />
-        {by === 'burst' && group === null ? (
-          <main className="image-stage empty"><div><Images size={30} /><h2>Select a burst to review it</h2>
-            <p>Use <kbd>[</kbd> and <kbd>]</kbd> to move between bursts.</p>
+        {!lookup && (by === 'burst' || by === 'similar') && group === null ? (
+          <main className="image-stage empty"><div><Images size={30} />
+            <h2>{by === 'burst' ? 'Select a burst to review it' : 'Select a group to review similar photos'}</h2>
+            {by === 'burst' && <p>Use <kbd>[</kbd> and <kbd>]</kbd> to move between bursts.</p>}
           </div></main>
         ) : <Review
-          key={JSON.stringify([by, group, by === 'burst' ? '' : filters])}
+          key={JSON.stringify([by, group, by === 'burst' ? '' : String(reviewFilters)])}
           base={base} by={by} group={group} version={version} ratings={ratings}
           busy={busy} undoAvailable={!!undo} onRating={rate} onUndo={undoRating}
-          filters={filters} onChooseBest={chooseBest} onRejectRest={rejectRest}
+          filters={String(reviewFilters)} onChooseBest={chooseBest} onRejectRest={rejectRest}
+          lookup={lookup} onCloseLookup={() => setLookup(undefined)} ml={progress?.ml}
+          onTag={selectTag} activeTag={tag}
+          onSimilar={(asset) => setLookup({
+            title: `Similar to ${assetName(asset)}`,
+            url: `${base}/assets/${asset.id}/similar`, body: { tag: tag || undefined },
+          })}
           onClearFlag={(asset) => analysisAction(`assets/${asset.id}/auto-reject`, { method: 'DELETE' })}
         />}
       </div>

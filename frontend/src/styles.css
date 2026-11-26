@@ -477,3 +477,47 @@ dialog.modal { max-height: 88dvh; overflow-y: auto; }
   .comparison-caption .score-badges { margin-top: 4px; }
   .status-banner { padding-inline: 12px; }
 }
+
+.photo-tools {
+  display: grid;
+  gap: 7px;
+  padding: 0 15px 16px;
+}
+.photo-tools form { display: grid; gap: 7px; }
+.photo-query { display: grid; gap: 5px; grid-template-columns: minmax(0, 1fr) auto; }
+.photo-query input, .photo-tools select {
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: inherit;
+  min-height: 34px;
+  min-width: 0;
+  padding: 6px 8px;
+  width: 100%;
+}
+.photo-tools .score-state { margin-top: 0; }
+.embedding-progress { display: grid; gap: 5px; }
+.embedding-progress .inline-error, .embedding-progress .score-state { margin-top: 0; }
+.photo-analysis > .button { width: 100%; }
+.photo-analysis > .section-heading { margin-top: 12px; }
+.photo-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.photo-tags .button {
+  font-size: 12px;
+  min-height: 28px;
+  overflow-wrap: anywhere;
+  padding-inline: 7px;
+  text-align: left;
+  white-space: normal;
+}
+.photo-tags .button[aria-pressed="true"] { background: var(--accent-surface); color: var(--accent); }
+
+@media (min-width: 761px) {
+  .group-nav .segment:has(button:nth-child(4)) svg { display: none; }
+}
+
+@media (max-width: 760px) {
+  .photo-tools { padding: 0 12px 10px; }
+  .photo-analysis { grid-column: 2; grid-row: 1; }
+  .photo-analysis > .button { justify-content: flex-start; white-space: normal; }
+  .review-tools { flex-wrap: wrap; justify-content: flex-end; }
+}
