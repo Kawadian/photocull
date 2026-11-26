@@ -8,6 +8,7 @@ import { PhotoTools } from './ML'
 import { useShortcuts } from './shortcuts'
 
 type NavProps = {
+  watching?: boolean
   base: string
   libraries: Library[]
   library: string
@@ -218,6 +219,7 @@ export function LibraryNav(props: NavProps) {
         </button>
         {error && <p className="inline-error" role="alert">{error}</p>}
       </div>
+      {props.watching && <p className="watch-status">Folder watching on</p>}
       <PhotoTools base={base} progress={progress} tag={tag} selectTag={selectTag} onSearch={onSearch}
         inputRef={searchInputRef} onEscape={onSearchEscape} />
       <nav className="group-nav" aria-label="Browse assets">

@@ -47,8 +47,14 @@ const searchKeys = [
   ['Esc', 'Leave the search field or close results'],
 ]
 
+const insightKeys = [
+  ['I', 'Switch between photo review and insights'],
+  ['Esc', 'Return to photo review'],
+  ['← / →', 'Previous or next clip in the Videos view'],
+]
+
 export function ShortcutHelp({ onClose }: { onClose: () => void }) {
-  const sections = [['Photo review', reviewKeys], ['Burst review', burstKeys], ['Photo search', searchKeys]] as const
+  const sections = [['Photo review', reviewKeys], ['Burst review', burstKeys], ['Photo search', searchKeys], ['Insights', insightKeys]] as const
   return (
     <Dialog title="Keyboard shortcuts" onClose={onClose}>
       {sections.map(([section, keys]) => (

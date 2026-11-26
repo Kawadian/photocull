@@ -18,6 +18,11 @@ export type Burst = {
 }
 export type StageStatus = 'pending' | 'running' | 'done' | 'error' | 'skipped'
 export type Rating = { rating: number; rejected: boolean; revision: number }
+export type InsightScore = {
+  score: number | null
+  error: string | null
+  factors?: { feature: string; contribution: number }[] | null
+}
 export type Asset = Rating & {
   id: number
   path: string
@@ -46,6 +51,7 @@ export type Asset = Rating & {
   auto_reject: boolean
   auto_reject_reason: string | null
   burst_id: number | null
+  insights?: Record<string, InsightScore>
 }
 export type Progress = {
   catalog_revision: number
@@ -143,6 +149,6 @@ export function assetName(asset: { path: string }): string {
   return asset.path.slice(asset.path.lastIndexOf('/') + 1)
 }
 
-export function mediaUrl(base: string, asset: Asset, variant: 'thumb' | 'preview' | 'detail') {
+export function mediaUrl(base: string, asset: Pick<Asset, 'id' | 'content_hash'>, variant: 'thumb' | 'preview' | 'detail') {
   return `${base}/assets/${asset.id}/media/${variant}?v=${asset.content_hash}`
 }

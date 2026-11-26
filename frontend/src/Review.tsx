@@ -13,6 +13,8 @@ import { useShortcuts } from './shortcuts'
 
 type ReviewProps = {
   base: string
+  startAsset?: number
+  onVideo?: () => void
   group: string | null
   by: GroupBy
   version: number
@@ -133,7 +135,7 @@ export function Review(props: ReviewProps) {
   const { base, group, by, version, ratings, busy, undoAvailable, onRating, onUndo,
     filters, onChooseBest, onRejectRest, onClearFlag, lookup, onCloseLookup, ml,
     onSimilar, onTag, activeTag, workerOnline, headingRef, similarRef } = props
-  const [cursors, setCursors] = useState([0])
+  const [cursors, setCursors] = useState([props.startAsset ? props.startAsset - 1 : 0])
   const [browseSelection, setBrowseSelection] = useState<number | 'first' | 'last'>('first')
   const [searchSelection, setSearchSelection] = useState<{ lookup: Lookup; id: number }>()
   const [zoom, setZoom] = useState(false)
@@ -347,7 +349,7 @@ export function Review(props: ReviewProps) {
             base={base} select={select} />
         </div>
       </main>
-      <Inspector base={base} asset={asset} busy={busy} undoAvailable={undoAvailable}
+      <Inspector onVideo={props.onVideo} base={base} asset={asset} busy={busy} undoAvailable={undoAvailable}
         onRating={onRating} onUndo={onUndo} onClearFlag={onClearFlag}
         ml={ml} onSimilar={onSimilar} onTag={onTag} activeTag={activeTag}
         workerOnline={workerOnline} similarRef={similarRef} />
