@@ -17,10 +17,10 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; min-inline-size: 300px; }
-button, select { font: inherit; }
+button, select, input { font: inherit; }
 button { color: inherit; cursor: pointer; }
 button:disabled { cursor: default; opacity: .44; }
-button:focus-visible, select:focus-visible {
+button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -71,7 +71,7 @@ kbd {
   min-height: 0;
 }
 .library-nav, .inspector { background: var(--panel); }
-.library-nav { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.library-nav { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
 .library-top { display: grid; gap: 10px; padding: 21px 15px 18px; }
 .section-heading {
   color: var(--muted);
@@ -115,7 +115,7 @@ kbd {
   flex: 1;
   flex-direction: column;
   gap: 10px;
-  min-height: 0;
+  min-height: 105px;
   padding: 0 12px 12px;
 }
 .group-nav > .section-heading { padding: 0 3px; }
@@ -143,7 +143,9 @@ kbd {
   white-space: nowrap;
 }
 .segment button[aria-pressed="true"] { background: #34383a; color: #f0f3f2; }
+.group-nav .segment button { gap: 4px; padding-inline: 4px; }
 .group-list { min-height: 0; overflow: auto; }
+.group-empty { color: var(--muted); font-size: 12px; padding: 9px 6px; }
 .group-row {
   align-items: center;
   background: transparent;
@@ -171,6 +173,22 @@ kbd {
   gap: 8px;
   justify-content: space-between;
 }
+
+.analysis-filters { border-top: 1px solid var(--line); font-size: 12px; padding: 10px 15px 4px; }
+.analysis-filters summary { cursor: pointer; color: #d6d9d8; padding: 4px 0; }
+.analysis-filters form { display: grid; gap: 6px; margin-top: 7px; }
+.analysis-filters label { align-items: center; color: #c3c6c6; display: flex; gap: 4px; justify-content: space-between; }
+.analysis-filters input, .analysis-filters select {
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: inherit;
+  min-width: 0;
+  padding: 4px;
+}
+.analysis-filters input { width: 48px; }
+.filter-actions { display: flex; gap: 5px; }
+.clear-all { align-self: flex-start; margin: 2px 5px 7px; }
 
 .worker-progress { border-top: 1px solid var(--line); display: grid; gap: 8px; padding: 14px 15px 18px; }
 .progress-line { color: #c1c6c3; display: flex; font-size: 11px; gap: 5px; justify-content: space-between; }
@@ -223,6 +241,27 @@ progress::-moz-progress-bar { background: #99cdaa; }
 }
 .review-tools, .arrow-buttons { align-items: center; display: flex; gap: 6px; }
 .review-tools { gap: 10px; }
+.burst-toolbar {
+  align-items: center;
+  background: #1e2022;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 7px 12px;
+}
+.burst-toolbar [aria-pressed="true"] { background: var(--accent-surface); color: var(--accent); }
+.burst-toolbar .reject { color: var(--danger); }
+.comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); min-height: 0; }
+.comparison-frame { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+.comparison-frame + .comparison-frame { border-left: 1px solid var(--line); }
+.comparison-caption { background: var(--panel); font-size: 12px; padding: 8px 10px; }
+.comparison-caption > strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.score-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.score-badge { background: #2b3031; border-radius: 4px; color: #e0e4e1; font-size: 11px; padding: 3px 5px; }
+.score-badge.flagged { background: #432d2f; color: var(--danger); }
+.score-state { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.clear-flag { margin-top: 6px; }
 .image-stage { background: #101112; min-height: 0; min-width: 0; }
 .image-stage.fit { align-items: center; display: flex; justify-content: center; overflow: hidden; padding: 18px; }
 .image-stage.fit img { height: 100%; object-fit: contain; width: 100%; }
@@ -289,6 +328,17 @@ progress::-moz-progress-bar { background: #99cdaa; }
   right: 3px;
 }
 .frame-rating.rejected { color: var(--danger); }
+.frame-flag, .frame-best {
+  background: #17191bea;
+  border-radius: 4px;
+  color: var(--danger);
+  font-size: 10px;
+  left: 3px;
+  padding: 2px 4px;
+  position: absolute;
+  top: 3px;
+}
+.frame-best { color: var(--accent); left: auto; right: 3px; }
 
 .inspector { border-left: 1px solid var(--line); min-width: 0; overflow-y: auto; }
 .inspector-section { border-bottom: 1px solid var(--line); padding: 18px 14px; }
@@ -360,6 +410,7 @@ progress::-moz-progress-bar { background: #99cdaa; }
   justify-content: space-between;
   padding: 4px 20px;
 }
+.status-banner[role="status"] { background: var(--accent-surface); border-color: #496252; color: var(--accent); }
 .initial-state { align-content: center; display: grid; flex: 1; gap: 11px; justify-items: center; padding: 20px; text-align: center; }
 .initial-state svg { color: var(--accent); }
 .initial-state h1 { font-size: 22px; }
@@ -369,6 +420,7 @@ progress::-moz-progress-bar { background: #99cdaa; }
   .workspace { grid-template-columns: 170px minmax(0, 1fr) 219px; }
   .library-top, .inspector-section { padding-inline: 11px; }
   .review-bar { padding-inline: 10px; }
+  .group-nav .segment svg { display: none; }
 }
 
 @media (max-width: 760px) {
@@ -379,11 +431,14 @@ progress::-moz-progress-bar { background: #99cdaa; }
   .library-top .inline-error { grid-column: 1 / -1; }
   .group-nav > .section-heading { display: none; }
   .group-nav { gap: 6px; padding-bottom: 8px; }
+  .group-nav { min-height: 0; }
   .group-list { display: flex; gap: 4px; overflow-x: auto; }
   .group-row { flex-shrink: 0; max-width: 180px; width: auto; }
   .worker-progress { padding: 9px 12px; }
   .worker-progress > .section-heading { display: none; }
   .review { grid-template-rows: auto minmax(270px, 55dvh) auto; }
+  .workspace > .image-stage.empty { min-height: 35dvh; }
+  .comparison .image-stage.fit { padding: 6px; }
   .inspector { border-left: 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); }
   .inspector-section:last-child { grid-column: 1 / -1; }
 }

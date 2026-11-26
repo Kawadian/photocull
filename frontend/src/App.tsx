@@ -1,7 +1,7 @@
 import { Aperture, Images } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { ApiError, json, message, request, useProgress, useRemote } from './api'
-import type { Asset, GroupBy, Library, Rating } from './api'
+import type { Asset, Burst, GroupBy, Library, Rating } from './api'
 import { LibraryNav } from './LibraryNav'
 import { Review } from './Review'
 
@@ -35,11 +35,14 @@ function Workspace({ libraries, library, selectLibrary }: {
   const { progress, connected } = useProgress(base)
   const [by, setBy] = useState<GroupBy>('folder')
   const [group, setGroup] = useState<string | null>(null)
+  const [filters, setFilters] = useState('')
   const [ratings, setRatings] = useState(new Map<number, Rating>())
   const [undo, setUndo] = useState<{ assetId: number; before: Rating; revision: number }>()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
   const [refresh, setRefresh] = useState(0)
+  const [burstUndo, setBurstUndo] = useState<{ token: string; count: number }>()
+  const [notice, setNotice] = useState<string>()
   const inFlight = useRef(false)
   const version = (progress?.catalog_revision ?? 0) + refresh
 
@@ -81,6 +84,58 @@ function Workspace({ libraries, library, selectLibrary }: {
     if (result) setUndo(undefined)
   }
 
+  async function analysisAction<T>(path: string, init: RequestInit) {
+    if (inFlight.current) return
+    inFlight.current = true
+    setBusy(true)
+    setError(undefined)
+    setNotice(undefined)
+    try {
+      return await request<T>(`${base}/${path}`, init)
+    } catch (failure) {
+      setError(message(failure))
+    } finally {
+      setRefresh((value) => value + 1)
+      inFlight.current = false
+      setBusy(false)
+    }
+  }
+
+  async function chooseBest(burst: Burst, assetId: number) {
+    await analysisAction<Burst>(`bursts/${burst.id}/best`, json('PATCH', {
+      asset_id: assetId, membership_key: burst.membership_key,
+    }))
+  }
+
+  async function rejectRest(burst: Burst) {
+    const result = await analysisAction<{ undo_token: string | null; changed: number }>(
+      `bursts/${burst.id}/reject-rest`, json('POST', {
+        best_id: burst.best_id, membership_key: burst.membership_key,
+      }),
+    )
+    if (result?.undo_token) setBurstUndo({ token: result.undo_token, count: result.changed })
+    else if (result) setNotice('The remaining photos are already flagged.')
+  }
+
+  async function undoBurstRejection() {
+    if (!burstUndo) return
+    const result = await analysisAction<{ changed: number }>(
+      `burst-rejections/${burstUndo.token}`, { method: 'DELETE' },
+    )
+    if (result) {
+      setBurstUndo(undefined)
+      setNotice(`Removed ${result.changed} burst flags.`)
+    }
+  }
+
+  async function clearAll() {
+    const result = await analysisAction<{ changed: number }>('auto-reject', { method: 'DELETE' })
+    if (result) {
+      setBurstUndo(undefined)
+      setNotice(`Cleared ${result.changed} auto-reject flags.`)
+    }
+  }
+
   return (
     <div className="app">
       <Header connected={connected} heartbeat={progress?.worker?.heartbeat} />
@@ -89,17 +144,37 @@ function Workspace({ libraries, library, selectLibrary }: {
           {error} <button className="button quiet" onClick={() => setError(undefined)}>Dismiss</button>
         </div>
       )}
+      {notice && (
+        <div className="status-banner" role="status">
+          {notice} <button className="button quiet" onClick={() => setNotice(undefined)}>Dismiss</button>
+        </div>
+      )}
+      {burstUndo && (
+        <div className="status-banner" role="status">
+          Flagged {burstUndo.count} {burstUndo.count === 1 ? 'photo' : 'photos'} in the burst.
+          <button className="button quiet" disabled={busy} onClick={undoBurstRejection}>Undo burst reject</button>
+        </div>
+      )}
       <div className="workspace">
         <LibraryNav
           base={base} libraries={libraries} library={library} selectLibrary={selectLibrary}
           by={by} selectBy={(mode) => { if (by !== mode) { setBy(mode); setGroup(null) } }}
           group={group} selectGroup={setGroup} version={version} progress={progress}
+          filters={filters} setFilters={(value) => {
+            if (by === 'burst' && value !== filters) setGroup(null)
+            setFilters(value)
+          }}
+          analysisBusy={busy} onClearAll={clearAll}
         />
-        <Review
-          key={JSON.stringify([by, group])}
+        {by === 'burst' && group === null ? (
+          <main className="image-stage empty"><div><Images size={30} /><h2>Select a burst to review it</h2></div></main>
+        ) : <Review
+          key={JSON.stringify([by, group, by === 'burst' ? '' : filters])}
           base={base} by={by} group={group} version={version} ratings={ratings}
           busy={busy} undoAvailable={!!undo} onRating={rate} onUndo={undoRating}
-        />
+          filters={filters} onChooseBest={chooseBest} onRejectRest={rejectRest}
+          onClearFlag={(asset) => analysisAction(`assets/${asset.id}/auto-reject`, { method: 'DELETE' })}
+        />}
       </div>
     </div>
   )

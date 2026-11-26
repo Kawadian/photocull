@@ -1,6 +1,7 @@
 import { Check, FileOutput, Star, Undo2, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { assetName, json, message, request } from './api'
+import { ScoreBadges } from './Analysis'
 import type { Asset, XmpPlan } from './api'
 
 type InspectorProps = {
@@ -10,6 +11,7 @@ type InspectorProps = {
   undoAvailable: boolean
   onRating: (asset: Asset, rating: number, rejected?: boolean) => void
   onUndo: () => void
+  onClearFlag: (asset: Asset) => void
 }
 
 function XmpDialog({ plan, onClose, onWrite }: {
@@ -111,7 +113,7 @@ function ExportButton({ base, asset }: { base: string; asset: Asset }) {
   )
 }
 
-export function Inspector({ base, asset, busy, undoAvailable, onRating, onUndo }: InspectorProps) {
+export function Inspector({ base, asset, busy, undoAvailable, onRating, onUndo, onClearFlag }: InspectorProps) {
   const camera = [asset?.make, asset?.model].filter(Boolean).join(' ')
   const duration = asset?.duration
   const filename = asset ? assetName(asset) : ''
@@ -153,6 +155,20 @@ export function Inspector({ base, asset, busy, undoAvailable, onRating, onUndo }
       </div>
       {asset && (
         <>
+          {(asset.score_status || asset.auto_reject) && (
+            <div className="inspector-section">
+              <div className="section-heading">Scores</div>
+              <ScoreBadges asset={asset} />
+              {asset.sharpness === null && asset.score_status && (
+                <p className="score-state" title={asset.score_error ?? undefined}>Scoring {asset.score_status}</p>
+              )}
+              {asset.auto_reject && (
+                <button className="button quiet clear-flag" disabled={busy} onClick={() => onClearFlag(asset)}>
+                  Clear auto-reject
+                </button>
+              )}
+            </div>
+          )}
           <div className="inspector-section file-info">
             <div className="section-heading">File details</div>
             <div className="file-name" title={asset.path}>{filename}</div>
