@@ -41,7 +41,12 @@ def run(args, settings, db_path):
         raise ValueError("Library index is missing. Start the API or worker and scan the library.")
     with connect(db_path) as db:
         action = args.action
-        actor = f"cli:{pwd.getpwuid(os.getuid()).pw_name}({os.getuid()})"
+        uid = os.getuid()
+        try:
+            actor = f"cli:{pwd.getpwuid(uid).pw_name}({uid})"
+        except KeyError:
+            # Container UIDs can run without a corresponding /etc/passwd entry.
+            actor = f"cli:uid={uid}"
         if action in {"preview", "apply"}:
             plan = ArchiveRequest.model_validate_json(args.plan.read_text(encoding="utf-8"))
             if action == "preview":

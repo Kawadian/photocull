@@ -13,6 +13,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -543,3 +544,24 @@ def test_cli_requires_settings_preview_and_yes(catalog, tmp_path):
     )
     assert jobs(db, json.loads(submitted.stdout)["id"])["actor"].startswith("cli:")
     assert source.exists()
+
+
+def test_cli_audits_numeric_container_uid(catalog, tmp_path, monkeypatch):
+    from photocull.archive_cli import run
+
+    settings, root, _, db = catalog
+    source = root / "container.jpg"
+    source.write_bytes(b"Container UID fixture")
+    id_ = record(db, root, source)
+    request = ArchiveRequest(operation="trash", filters=Filters(ids=(id_,)))
+    plan = tmp_path / "container.json"
+    plan.write_text(request.model_dump_json())
+    confirmation = preview(db, settings, "photos", request)["confirmation"]
+
+    def missing_uid(uid):
+        raise KeyError(uid)
+
+    monkeypatch.setattr("photocull.archive_cli.pwd.getpwuid", missing_uid)
+    args = SimpleNamespace(action="apply", library="photos", plan=plan, confirmation=confirmation)
+    job = run(args, settings, settings.library_state("photos") / "index.db")
+    assert jobs(db, job["id"])["actor"] == f"cli:uid={os.getuid()}"
