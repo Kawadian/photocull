@@ -2,6 +2,7 @@ import { Aperture, Images, Keyboard } from 'lucide-react'
 import { useRef, useState } from 'react'
 import { ApiError, assetName, json, message, request, useProgress, useRemote } from './api'
 import type { Asset, Burst, GroupBy, Library, Rating } from './api'
+import { Archive } from './Archive'
 import { ShortcutHelp } from './Dialog'
 import { InsightsScreen, views } from './Insights'
 import type { InsightCapabilities, View } from './Insights'
@@ -263,7 +264,8 @@ function Workspace({ libraries, library, selectLibrary }: {
           </select>
         </label>}
       </nav>
-      {view !== 'review' ? <InsightsScreen key={view} view={view} base={base}
+      {view === 'archive' ? <Archive key={library} base={base} online={!!progress?.worker_online} /> :
+      view !== 'review' ? <InsightsScreen key={view} view={view} base={base}
         capability={capabilities?.data} version={version} openReview={openReview}
         videoStart={videoStart} error={capabilities?.error} retry={() => setRefresh((value) => value + 1)} /> : <>
       {insightFilter && <div className="status-banner" role="status">

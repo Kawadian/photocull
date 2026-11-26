@@ -10,6 +10,7 @@ from PIL import Image
 
 from photocull.api import create_app
 from photocull.config import (
+    ArchiveSettings,
     InsightSettings,
     Library,
     MLSettings,
@@ -62,16 +63,22 @@ def write_fixtures(root: Path) -> Library:
 def main() -> None:
     with TemporaryDirectory(prefix="photocull-playwright-") as directory:
         root = Path(directory)
+        archive_output = root / "archive-output"
+        archive_output.mkdir()
         settings = Settings(
             libraries={
                 name: write_fixtures(root / name)
-                for name in ("desktop", "mobile", "semantic", "insights")
+                for name in ("desktop", "mobile", "semantic", "insights", "archive")
             },
             state_dir=root / "state",
             static_dir=Path(__file__).resolve().parents[1] / "dist",
             scoring=ScoringSettings(min_sharpness=0),
             worker=WorkerSettings(memory_mb=3072),
             ml=MLSettings(enabled=True, tag_top_k=1, offline=True),
+            archive=ArchiveSettings(
+                write_roots=(root / "archive",),
+                export_roots={"archive": archive_output},
+            ),
             insights=InsightSettings(
                 aesthetic=True,
                 taste=True,

@@ -626,3 +626,71 @@ dialog.modal { max-height: 88dvh; overflow-y: auto; }
   .video-layout { grid-template-columns: minmax(0, 1fr); }
   .video-list { max-height: 180px; }
 }
+
+.archive {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  min-width: 0;
+}
+
+.archive h2, .archive h3 { margin: 0; }
+.archive nav [aria-current], .archive [aria-pressed="true"] {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-surface);
+}
+
+.archive-form { display: grid; width: 100%; gap: 12px; }
+.archive-form legend { padding-inline: 5px; color: var(--muted); }
+.archive-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(205px, 100%), 1fr));
+  gap: 10px;
+  min-width: 0;
+}
+.archive-fields input, .archive-fields select { width: 100%; min-width: 0; }
+.archive-advanced { margin-top: 10px; }
+.archive-advanced .archive-fields { margin-top: 8px; }
+.archive summary { cursor: pointer; }
+.archive-start { justify-self: start; }
+
+.archive-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(139px, 100%), 1fr));
+  gap: 8px;
+}
+.archive-metrics > div {
+  display: grid;
+  gap: 4px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.archive-metrics span { font-size: .85rem; color: var(--muted); }
+.archive-list {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.archive-list li {
+  min-width: 0;
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.archive-list li > div { margin-top: 4px; color: var(--muted); }
+.archive-list .button { white-space: normal; text-align: left; }
+.archive-check { display: flex; align-items: baseline; gap: 8px; cursor: pointer; }
+.archive-check input { flex: none; }
+.archive meter, .archive progress { width: min(100%, 340px); accent-color: var(--accent); }
+.archive pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.archive-preview { border-top: 1px solid var(--line); padding-top: 16px; }
+
+@media (max-width: 480px) {
+  .archive .insight-actions > .button { min-height: 40px; }
+}
