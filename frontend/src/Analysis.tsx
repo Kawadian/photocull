@@ -100,13 +100,14 @@ export function AnalysisFilters({ active, onChange }: {
         <label>Min sharpness (%) <input type="number" min="0" max="100" name="min_sharpness" /></label>
         <label>Min exposure (%) <input type="number" min="0" max="100" name="min_exposure" /></label>
         <label>Max exposure (%) <input type="number" min="0" max="100" name="max_exposure" /></label>
-        <label>Auto-reject
-          <select name="auto_reject">
+        <div className="filter-field">
+          <label htmlFor="filter-auto-reject">Auto-reject</label>
+          <select id="filter-auto-reject" name="auto_reject">
             <option value="">Any</option>
             <option value="true">Flagged</option>
             <option value="false">Unflagged</option>
           </select>
-        </label>
+        </div>
         {error && <p className="inline-error" role="alert">{error}</p>}
         <div className="filter-actions">
           <button className="button secondary" type="submit">Apply</button>

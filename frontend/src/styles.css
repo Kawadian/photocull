@@ -177,7 +177,13 @@ kbd {
 .analysis-filters { border-top: 1px solid var(--line); font-size: 12px; padding: 10px 15px 4px; }
 .analysis-filters summary { cursor: pointer; color: #d6d9d8; padding: 4px 0; }
 .analysis-filters form { display: grid; gap: 6px; margin-top: 7px; }
-.analysis-filters label { align-items: center; color: #c3c6c6; display: flex; gap: 4px; justify-content: space-between; }
+.analysis-filters label, .filter-field {
+  align-items: center;
+  color: #c3c6c6;
+  display: flex;
+  gap: 4px;
+  justify-content: space-between;
+}
 .analysis-filters input, .analysis-filters select {
   background: var(--panel-raised);
   border: 1px solid var(--line);
