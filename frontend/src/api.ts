@@ -93,7 +93,14 @@ export async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init)
   if (!response.ok) {
     const payload: { detail?: unknown } = await response.json().catch(() => ({}))
-    const detail = typeof payload.detail === 'string' ? payload.detail : response.statusText
+    const validation = Array.isArray(payload.detail) ? payload.detail.flatMap((item: unknown) => {
+      if (!item || typeof item !== 'object' || !('msg' in item) || typeof item.msg !== 'string') return []
+      const location = 'loc' in item && Array.isArray(item.loc)
+        ? item.loc.slice(1).filter((segment): segment is string => typeof segment === 'string').join(' / ')
+        : ''
+      return [`${location ? `${location} · ` : ''}${item.msg.replace(/^Value error, /, '')}`]
+    }).slice(0, 3).join('. ') : undefined
+    const detail = typeof payload.detail === 'string' ? payload.detail : validation || response.statusText
     throw new ApiError(response.status, detail || `Request failed (${response.status})`)
   }
   return (await response.json()) as T

@@ -68,3 +68,84 @@ test('video review, recommendations and portable downloads use the indexed libra
   await html.click()
   expect((await htmlEvent).suggestedFilename()).toBe('photocull-trip.html')
 })
+
+test('insight views expose disabled, loading, empty and recoverable errors on mobile', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 })
+  const capabilities = {
+    faces: false, story: false, video: false, transcript: false, aesthetic: false, watch: false,
+    export: false, report: false, destinations: [],
+    taste: { status: 'disabled', positives: 0, negatives: 0, error: null }, stages: {},
+  }
+  const viewData = [
+    ['People', 'faces', '**/insights/people?*', 'No faces found in this library.'],
+    ['Stories', 'story', '**/insights/stories?*', 'No day stories yet. Scan a library to create them.'],
+    ['Videos', 'video', '**/assets?kind=video&*', 'No videos in this library.'],
+    ['Exports', 'export', '**/insights/transfers?kind=export', 'No exports yet.'],
+    ['Trip reports', 'report', '**/insights/transfers?kind=report', 'No trip reports generated yet.'],
+  ] as const
+  await page.route('**/insights', (route) => route.fulfill({ json: capabilities }))
+  await page.goto('/')
+  const nav = page.getByRole('navigation', { name: 'Library views' })
+  const main = page.getByRole('main', { name: /People|Stories|Videos|Exports|Trip reports/ })
+  for (const [name] of viewData) {
+    await nav.getByRole('button', { name, exact: true }).click()
+    await expect(main.getByRole('heading', { name, exact: true })).toBeFocused()
+    await expect(main.getByText(`${name} are disabled in the library configuration.`)).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(nav.getByRole('button', { name: 'Review' })).toHaveAttribute('aria-current', 'page')
+  }
+
+  for (const [name, setting, url, empty] of viewData) {
+    capabilities[setting] = true
+    let failRequest = true
+    let release: () => void = () => {}
+    const delayedError = new Promise<void>((resolve) => { release = resolve })
+    await page.route(url, async (route) => {
+      if (failRequest) {
+        await delayedError
+        await route.fulfill({ status: 503, json: { detail: 'Library results temporarily unavailable' } })
+      } else {
+        await route.fulfill({ json: { items: [], next_cursor: null } })
+      }
+    })
+    await page.reload()
+    await nav.getByRole('button', { name, exact: true }).click()
+    await expect(main.getByText('Loading…', { exact: true }).first()).toBeVisible()
+    release()
+    await expect(main.getByRole('alert')).toHaveText(/Library results temporarily unavailable/)
+    failRequest = false
+    await main.getByRole('button', { name: 'Retry', exact: true }).focus()
+    await page.keyboard.press('Enter')
+    await expect(main.getByText(empty, { exact: true })).toBeVisible()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375)
+    await page.unroute(url)
+  }
+})
+
+test('mobile export reports validation errors and allows a queued transfer to be cancelled', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.goto('/')
+  const nav = page.getByRole('navigation', { name: 'Library views' })
+  await nav.getByRole('button', { name: 'Exports' }).click()
+  await page.getByLabel('From date').fill('2025-02-04')
+  await page.getByLabel('To date').fill('2025-02-03')
+  await page.getByRole('button', { name: 'Start export' }).click()
+  await expect(page.getByRole('alert')).toContainText('End date must be on or after the start date')
+
+  const id = 'a'.repeat(32)
+  let status = 'pending'
+  await page.route('**/insights/transfers?kind=export', (route) => route.fulfill({ json: { items: [{
+    id, kind: 'zip', status, destination: null, error: null, processed: 0, total: 0,
+    total_bytes: 0, written_bytes: 0,
+  }] } }))
+  await page.route(`**/insights/transfers/${id}`, (route) => {
+    status = 'cancelled'
+    return route.fulfill({ json: { id, status } })
+  })
+  await page.getByRole('button', { name: 'Retry', exact: true }).focus()
+  await page.keyboard.press('Enter')
+  const cancel = page.getByRole('button', { name: 'Cancel', exact: true })
+  await cancel.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByText('cancelled', { exact: true })).toBeVisible()
+})

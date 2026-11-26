@@ -31,7 +31,7 @@ type ScreenProps = {
 type Media = Pick<Asset, 'id' | 'path' | 'content_hash'>
 type Box = { left: number; top: number; right: number; bottom: number }
 type Face = Box & { id: number; asset_id: number; path: string; content_hash: string; quality: number }
-type Person = { id: number; name: string | null; count: number; cover: Box & {
+type Person = { id: number; name: string | null; revision: number; count: number; cover: Box & {
   asset_id: number; content_hash: string
 } }
 
@@ -70,7 +70,7 @@ function useAction(version: number) {
   const [refresh, setRefresh] = useState(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
-  const retry = () => setRefresh((v) => v + 1)
+  const retry = () => { setError(undefined); setRefresh((v) => v + 1) }
   async function action<T>(url: string, init: RequestInit, after?: (value: T) => void) {
     setBusy(true)
     setError(undefined)
@@ -103,35 +103,52 @@ function FacePicture({ base, face, alt = '' }: {
 
 const personName = (person: Person) => person.name ?? `Person ${person.id}`
 
+function useDetailHeading() {
+  const heading = useRef<HTMLHeadingElement>(null)
+  useEffect(() => { heading.current?.focus() }, [])
+  return heading
+}
+
 function PersonDetail({ base, initial, version, openReview, beginMerge, openPerson, close }: ScreenProps & {
   initial: Person; beginMerge: (person: Person) => void; openPerson: (person: Person) => void; close: () => void
 }) {
   const [person, setPerson] = useState(initial)
+  const heading = useDetailHeading()
   const [name, setName] = useState(initial.name ?? '')
   const [selected, setSelected] = useState<number[]>([])
   const cursor = usePageCursor(0)
   const work = useAction(version)
   const url = `${base}/insights/people/${person.id}`
-  const result = useRemote<Page<Face>>(`${url}/faces?cursor=${cursor.cursor}`, work.version)
+  const result = useRemote<Page<Face> & { person: Pick<Person, 'id' | 'name' | 'revision'> }>(
+    `${url}/faces?cursor=${cursor.cursor}`, work.version)
   const faces = result?.data?.items ?? []
-  return <section className="insight-section" aria-label={personName(person)}>
+  const current = { ...person, ...result?.data?.person }
+  const available = !!result?.data && !result.error
+  return <section className="insight-section" aria-label={personName(current)}>
+    <h2 ref={heading} tabIndex={-1}>{personName(current)}</h2>
     <div className="insight-actions">
       <button className="button secondary" onClick={close}>All people</button>
-      <button className="button secondary" onClick={() =>
-        openReview(`person_id=${person.id}`, personName(person))}>Review photos of {personName(person)}</button>
-      <button className="button secondary" onClick={() => beginMerge(person)}>Merge into another person…</button>
+      <button className="button secondary" disabled={!available} onClick={() =>
+        openReview(`person_id=${person.id}`, personName(current))}>Review photos of {personName(current)}</button>
+      <button className="button secondary" disabled={!available} onClick={() =>
+        beginMerge(current)}>Merge into another person…</button>
     </div>
     <form className="insight-actions" onSubmit={(event) => {
       event.preventDefault()
-      void work.action<Person>(url, json('PATCH', { name: name.trim() || null }),
+      void work.action<Person>(url, json('PATCH', { name: name.trim() || null, expected_revision: person.revision }),
         (value) => setPerson({ ...person, ...value })).catch(() => {})
     }}>
       <label>Person name <input value={name} maxLength={120} onChange={(event) => setName(event.target.value)} /></label>
-      <button className="button secondary" disabled={work.busy || name.trim() === (person.name ?? '')}>
+      <button className="button secondary" disabled={!available || work.busy || name.trim() === (person.name ?? '')}>
         Save name
       </button>
     </form>
-    <Status error={work.error || result?.error} pending={!result} empty={!faces.length} retry={work.retry}>
+    <Status error={work.error || result?.error} pending={!result} empty={!faces.length} retry={() => {
+      setPerson(current)
+      setName(current.name ?? '')
+      setSelected([])
+      work.retry()
+    }}>
       This person has no indexed faces.
     </Status>
     {faces.length > 0 && <fieldset className="insight-fieldset">
@@ -147,7 +164,7 @@ function PersonDetail({ base, initial, version, openReview, beginMerge, openPers
       </div>
       <button className="button primary" disabled={!selected.length || work.busy} onClick={() => {
         void work.action<{ id: number; moved: number }>(`${url}/split`, json('POST', { faces: selected }),
-          ({ id, moved }) => openPerson({ ...person, id, name: null, count: moved })).catch(() => {})
+          ({ id, moved }) => openPerson({ ...person, id, name: null, revision: 0, count: moved })).catch(() => {})
       }}>Split {selected.length || ''} selected faces</button>
     </fieldset>}
     <Paging {...cursor} next={result?.data?.next_cursor}
@@ -187,10 +204,12 @@ function People(props: ScreenProps) {
     {target && source && <ConfirmAction title={`Merge into ${personName(target)}?`}
       description={`Move all faces from ${personName(source)} into ${personName(target)}.`}
       action="Merge people" onClose={() => setTarget(undefined)} onConfirm={() =>
-        work.action<{ name: string | null }>(`${url}/${target.id}/merge`, json('POST', { source: source.id }), ({ name }) => {
+        work.action<Pick<Person, 'name' | 'revision'>>(`${url}/${target.id}/merge`, json('POST', {
+          source: source.id, expected_revision: target.revision, expected_source_revision: source.revision,
+        }), ({ name, revision }) => {
           setTarget(undefined)
           setSource(undefined)
-          setPerson({ ...target, name, count: target.count + source.count })
+          setPerson({ ...target, name, revision, count: target.count + source.count })
         })} />}
   </>
 }
@@ -253,6 +272,7 @@ function StoryDetail({ base, version, day, openReview, close }: ScreenProps & {
 }) {
   const work = useAction(version)
   const cursor = usePageCursor(0)
+  const heading = useDetailHeading()
   const result = useRemote<Page<Segment>>(`${base}/insights/stories/${day}?cursor=${cursor.cursor}`,
     work.version)
   const items = result?.data?.items ?? []
@@ -261,7 +281,7 @@ function StoryDetail({ base, version, day, openReview, close }: ScreenProps & {
       <button className="button secondary" onClick={close}>All stories</button>
       <button className="button secondary" onClick={() => openReview(`day=${day}`, day)}>Review this day</button>
     </div>
-    <h2>{day}</h2>
+    <h2 ref={heading} tabIndex={-1}>{day}</h2>
     <Status error={result?.error} pending={!result} empty={!items.length} retry={work.retry}>
       This story is waiting for indexing.
     </Status>
@@ -352,6 +372,7 @@ function VideoDetail({ base, version, asset, enabled }: {
     {analysis?.error && <Status error={analysis.error} retry={() => retry('video')} />}
     {analysis?.data?.preview && <video ref={video} className="insight-video" controls playsInline
       aria-label={assetName(asset)} preload="metadata" src={`${url}/preview?v=${asset.content_hash}`}
+      onError={() => setPlayError('The video preview could not be played.')}
       onTimeUpdate={() => {
         if (video.current && stop.current !== null && video.current.currentTime >= stop.current) {
           video.current.pause()
@@ -362,7 +383,11 @@ function VideoDetail({ base, version, asset, enabled }: {
         <track kind="captions" label="Local transcript" srcLang="und" src={`${url}/captions`} />}
     </video>}
     <Status error={playError || analysis?.data?.preview_error}
-      retry={analysis?.data?.preview_error ? () => retry('video') : undefined} />
+      retry={analysis?.data?.preview_error || playError ? () => {
+        setPlayError(undefined)
+        video.current?.load()
+        if (analysis?.data?.preview_error) retry('video')
+      } : undefined} />
     {analysis?.data && <section>
       <h3>Highlights</h3>
       {analysis.data.highlights.length ? <div className="insight-actions">
@@ -374,7 +399,7 @@ function VideoDetail({ base, version, asset, enabled }: {
     </section>}
     {result?.data && <section>
       <h3>Clip flag</h3>
-      <p className="insight-muted">{flagged ? 'Flagged as a dead clip' : 'No dead-clip flag'}
+      <p className="insight-muted" role="status">{flagged ? 'Flagged as a dead clip' : 'No dead-clip flag'}
         {reasons.length ? ` · ${reasons.map((reason) => deadReasons[reason] ?? reason).join(', ')}` : ''}</p>
       <div className="insight-actions">
         <button className="button secondary" disabled={work.busy}
@@ -570,6 +595,7 @@ function Transfers({ base, version, capability, report }: ScreenProps & { report
               <option key={item.id} value={item.id}>{personName(item)}</option>)}
           </select></label>
           <Paging {...cursor} next={people?.data?.next_cursor} forward={() => cursor.forward(people?.data?.next_cursor)} />
+          <Status error={people?.error} pending={!people} retry={work.retry} />
         </>}
         <label className="transfer-checkbox"><input type="checkbox" name="xmp" /> Include existing XMP sidecars</label>
       </>}
@@ -583,13 +609,15 @@ function Transfers({ base, version, capability, report }: ScreenProps & { report
     <div className="insight-list">
       {tasks.map((item) => <article className="transfer-row" key={item.id}>
         <div><strong>{item.kind === 'report' ? 'Trip report' : item.kind === 'zip' ? 'Keeper ZIP' : 'Folder copy'}</strong>
-          <p className="insight-muted">{item.status} · {item.processed} / {item.total}
+          <p className="insight-muted"><span role="status">{item.status}</span> · {item.processed} / {item.total}
             {item.kind === 'report' ? ' days' : ' items'}</p>
+          {item.status === 'done' && item.total === 0 &&
+            <p className="insight-muted">{item.kind === 'report' ? 'No matching story days.' : 'No matching keepers.'}</p>}
           {item.kind === 'copy' && item.status === 'done' && <p className="copy-target">{item.destination}/{item.id}</p>}
           {item.error && <p role="alert" className="inline-error">{item.error}</p>}
           {['running', 'cancelling'].includes(item.status) && <progress aria-label="Transfer progress"
             max={item.total_bytes || item.total || 1}
-            value={item.total_bytes ? item.written_bytes : item.processed} />}
+            value={item.total_bytes ? item.written_bytes : item.total ? item.processed : undefined} />}
         </div>
         <div className="insight-actions">
           {item.status === 'done' && item.kind !== 'copy' && <a className="button secondary"
