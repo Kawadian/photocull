@@ -154,9 +154,10 @@ function PersonDetail({ base, initial, version, openReview, beginMerge, openPers
     {faces.length > 0 && <fieldset className="insight-fieldset">
       <legend>Select faces to split into a new person</legend>
       <div className="insight-grid">
-        {faces.map((face) => <label className="insight-card selectable" key={face.id}>
+        {faces.map((face, index) => <label className="insight-card selectable" key={face.id}>
           <FacePicture base={base} face={face} />
           <span><input type="checkbox" checked={selected.includes(face.id)}
+            aria-label={`Face ${index + 1} on this page, ${assetName(face)}`}
             disabled={selected.length >= 200 && !selected.includes(face.id)} onChange={() =>
               setSelected((all) => all.includes(face.id) ? all.filter((id) => id !== face.id) : [...all, face.id])
             } /> {assetName(face)}</span>
@@ -500,7 +501,7 @@ function Recommendations({ base, capability, version, openReview }: ScreenProps)
           {state.status === 'ready' && <button className="button secondary"
             onClick={() => openReview('sort=taste', 'Recommendation score')}>Review recommendations</button>}
         </div>
-        {state.status === 'ready' && <Status pending={!result} empty={!assets.length}>
+        {state.status === 'ready' && !result?.error && <Status pending={!result} empty={!assets.length}>
           {capability.stages.taste?.pending ? 'Scoring photos…' : 'No recommendations available.'}
         </Status>}
         <div className="insight-grid">

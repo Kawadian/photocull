@@ -80,13 +80,14 @@ test('insight views expose disabled, loading, empty and recoverable errors on mo
     ['People', 'faces', '**/insights/people?*', 'No faces found in this library.'],
     ['Stories', 'story', '**/insights/stories?*', 'No day stories yet. Scan a library to create them.'],
     ['Videos', 'video', '**/assets?kind=video&*', 'No videos in this library.'],
+    ['Recommendations', 'taste', '**/assets?sort=taste&*', 'No recommendations available.'],
     ['Exports', 'export', '**/insights/transfers?kind=export', 'No exports yet.'],
     ['Trip reports', 'report', '**/insights/transfers?kind=report', 'No trip reports generated yet.'],
   ] as const
   await page.route('**/insights', (route) => route.fulfill({ json: capabilities }))
   await page.goto('/')
   const nav = page.getByRole('navigation', { name: 'Library views' })
-  const main = page.getByRole('main', { name: /People|Stories|Videos|Exports|Trip reports/ })
+  const main = page.getByRole('main', { name: /People|Stories|Videos|Recommendations|Exports|Trip reports/ })
   for (const [name] of viewData) {
     await nav.getByRole('button', { name, exact: true }).click()
     await expect(main.getByRole('heading', { name, exact: true })).toBeFocused()
@@ -96,7 +97,8 @@ test('insight views expose disabled, loading, empty and recoverable errors on mo
   }
 
   for (const [name, setting, url, empty] of viewData) {
-    capabilities[setting] = true
+    if (setting === 'taste') capabilities.taste.status = 'ready'
+    else capabilities[setting] = true
     let failRequest = true
     let release: () => void = () => {}
     const delayedError = new Promise<void>((resolve) => { release = resolve })
