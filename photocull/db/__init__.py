@@ -11,6 +11,8 @@ MIGRATIONS = (
     "0001_initial.sql",
     "0002_source_identity.sql",
     "0003_job_interruptions.sql",
+    "0004_scores_and_bursts.sql",
+    "0005_incremental_bursts.sql",
 )
 BUSY_TIMEOUT_MS = 10_000
 

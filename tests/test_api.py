@@ -22,7 +22,7 @@ import sys
 
 forbidden = {
     'onnxruntime', 'insightface', 'faster_whisper', 'torch', 'transformers',
-    'rawpy', 'pyexiv2', 'PIL', 'numpy', 'pillow_heif'
+    'rawpy', 'pyexiv2', 'PIL', 'numpy', 'pillow_heif', 'cv2', 'imagehash'
 }
 original = builtins.__import__
 def guarded(name, *args, **kwargs):
@@ -140,3 +140,152 @@ def test_optional_token_file(tmp_path):
             client.get("/api/health", headers={"X-Photocull-Token": "test-only-value"}).status_code
             == 200
         )
+
+
+def test_score_filters_burst_best_and_reversible_flags(tmp_path):
+    settings = Settings(
+        libraries={"photos": Library(root=tmp_path / "media")}, state_dir=tmp_path / "state"
+    )
+    base = "/api/libraries/photos"
+    path = settings.library_state("photos") / "index.db"
+    group_key = "1" * 64
+    with TestClient(create_app(settings)) as client:
+        with connect(path) as db, write(db):
+            db.execute("INSERT INTO scan_requests (id, status, created_at) VALUES (1, 'done', 0)")
+            db.executemany(
+                """INSERT INTO assets (id, path, folder, kind, size, mtime_ns, content_hash,
+                                       scan_id, day, captured_at, rating, rejected)
+                   VALUES (?, ?, 'trip', 'image', 1, 0, 'hash', 1, '2024-01-01',
+                           '2024-01-01T00:00:00', ?, ?)""",
+                [
+                    (1, "a.jpg", 4, 0),
+                    (2, "b.jpg", 5, 0),
+                    (3, "c.jpg", 0, 1),
+                    (4, "d.jpg", 0, 0),
+                    (5, "e.jpg", 0, 0),
+                    (6, "f.jpg", 0, 0),
+                ],
+            )
+            db.executemany(
+                """INSERT INTO asset_scores (asset_id, sharpness, exposure, clipped_highlights,
+                                             clipped_shadows, dhash, suggested_reject_reason)
+                   VALUES (?, ?, ?, 0, 0, '0000000000000000', ?)""",
+                [
+                    (1, 0.9, 0.5, None),
+                    (2, 0.8, 0.6, None),
+                    (3, 0.01, 0.5, "blur"),
+                    (4, 0.7, 0.4, None),
+                    (5, 0.2, 0.02, "underexposed"),
+                ],
+            )
+            db.executemany(
+                "INSERT INTO bursts VALUES (?, ?, ?)", [(1, 1, group_key), (5, 5, "2" * 64)]
+            )
+            db.executemany(
+                "INSERT INTO burst_members VALUES (?, ?)",
+                [(1, 1), (2, 1), (3, 1), (4, 1), (5, 5), (6, 5)],
+            )
+
+        filtered = client.get(
+            f"{base}/assets",
+            params={
+                "min_sharpness": 0.7,
+                "min_exposure": 0.4,
+                "max_exposure": 0.6,
+                "auto_reject": "false",
+                "limit": 1,
+                "folder": "trip",
+            },
+        ).json()
+        assert filtered["next_cursor"] == 1
+        assert filtered["items"][0]["sharpness"] == 0.9
+        assert not filtered["items"][0]["auto_reject"]
+        assert filtered["items"][0]["burst_id"] == 1
+        assert client.get(f"{base}/assets", params={"min_sharpness": 1.1}).status_code == 422
+        assert client.get(f"{base}/assets", params={"cursor": 2**63}).status_code == 422
+        assert client.get(f"{base}/assets/{2**63}").status_code == 422
+        assert client.get(f"{base}/bursts/{2**63}").status_code == 422
+        assert client.get(f"{base}/groups", params={"by": "captured_at"}).status_code == 422
+        assert client.get(f"{base}/assets", params={"folder": "Aki's shoot"}).json()["items"] == []
+        assert (
+            client.get(
+                f"{base}/assets",
+                params={
+                    "min_exposure": 0.7,
+                    "max_exposure": 0.2,
+                },
+            ).status_code
+            == 422
+        )
+        assert (
+            client.get(f"{base}/assets", params={"burst_id": 1, "cursor": 2}).json()["items"][1][
+                "id"
+            ]
+            == 4
+        )
+
+        bursts = client.get(f"{base}/bursts", params={"auto_reject": "true", "limit": 1}).json()
+        assert bursts["next_cursor"] == 1
+        assert bursts["items"][0]["recommended_best_id"] == 1
+        assert client.get(f"{base}/bursts", params={"cursor": 1}).json()["items"][0]["id"] == 5
+        assert (
+            client.get(f"{base}/bursts", params={"min_sharpness": 0.8}).json()["items"][0][
+                "member_count"
+            ]
+            == 4
+        )
+
+        best = f"{base}/bursts/1/best"
+        assert (
+            client.patch(best, json={"asset_id": 5, "membership_key": group_key}).status_code == 422
+        )
+        assert (
+            client.patch(
+                best,
+                json={
+                    "asset_id": 2,
+                    "membership_key": "0" * 64,
+                },
+            ).status_code
+            == 409
+        )
+        chosen = client.patch(best, json={"asset_id": 2, "membership_key": group_key}).json()
+        assert (chosen["user_best_id"], chosen["best_id"], chosen["recommended_best_id"]) == (
+            2,
+            2,
+            1,
+        )
+        assert client.get(f"{base}/bursts/1").json() == chosen
+
+        reject = f"{base}/bursts/1/reject-rest"
+        assert (
+            client.post(reject, json={"best_id": 1, "membership_key": group_key}).status_code == 409
+        )
+        result = client.post(reject, json={"best_id": 2, "membership_key": group_key}).json()
+        assert result["changed"] == 2
+        assert client.post(reject, json={"best_id": 2, "membership_key": group_key}).json() == {
+            "changed": 0,
+            "undo_token": None,
+        }
+        flagged = client.get(f"{base}/assets", params={"burst_id": 1, "auto_reject": "true"}).json()
+        assert [
+            (item["id"], item["auto_reject_reason"], item["rating"], item["rejected"])
+            for item in flagged["items"]
+        ] == [
+            (1, "burst_remaining", 4, False),
+            (3, "blur", 0, True),
+            (4, "burst_remaining", 0, False),
+        ]
+
+        assert client.delete(f"{base}/assets/4/auto-reject").json() == {"changed": 1}
+        undo = f"{base}/burst-rejections/{result['undo_token']}"
+        assert client.delete(f"{base}/burst-rejections/invalid").status_code == 422
+        assert client.delete(f"{base}/burst-rejections/{'0' * 32}").json() == {"changed": 0}
+        assert client.delete(undo).json() == {"changed": 1}
+        assert client.delete(undo).json() == {"changed": 0}
+        assert client.get(f"{base}/assets/3").json()["auto_reject"]
+        assert client.delete(f"{base}/auto-reject").json() == {"changed": 2}
+        assert client.get(f"{base}/assets", params={"auto_reject": "true"}).json()["items"] == []
+        assert client.get(f"{base}/assets/3").json()["rejected"]
+        assert client.get(f"{base}/assets/1").json()["rating"] == 4
+        assert client.get(f"{base}/assets/2").json()["rating"] == 5

@@ -4,12 +4,14 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
-from photocull.config import Stage
+from photocull.config import STAGES, Stage
 from photocull.db import write
+from photocull.db.catalog import mark_catalog_updated
 
-STAGES: tuple[Stage, ...] = ("exif", "preview")
 DISABLED = "Stage disabled by worker settings"
 NO_VIDEO_EXIF = "Video has no image EXIF stage"
+NO_VIDEO_SCORE = "Video has no image score stage"
+NO_PREVIEW = "Score requires a completed preview"
 
 
 @dataclass(frozen=True)
@@ -70,7 +72,9 @@ def claim_jobs(db: sqlite3.Connection, limit: int) -> list[Job]:
     sql = """
         SELECT j.asset_id, j.stage, j.content_hash, a.path, a.kind, a.source_key, a.mtime_ns
         FROM jobs AS j JOIN assets AS a ON a.id = j.asset_id
+        LEFT JOIN jobs AS p ON p.asset_id = j.asset_id AND p.stage = 'preview'
         WHERE j.status = 'pending' AND a.active = 1
+          AND (j.stage <> 'score' OR p.status = 'done')
         ORDER BY j.asset_id, j.stage LIMIT ?
         """
     if db.execute("SELECT 1 FROM jobs WHERE status = 'pending' LIMIT 1").fetchone() is None:
@@ -83,6 +87,28 @@ def claim_jobs(db: sqlite3.Connection, limit: int) -> list[Job]:
             [(job.asset_id, job.stage) for job in jobs],
         )
     return jobs
+
+
+def skip_unavailable_scores(db: sqlite3.Connection) -> bool:
+    rows = db.execute(
+        """SELECT j.asset_id FROM jobs AS j
+           LEFT JOIN jobs AS p ON p.asset_id = j.asset_id AND p.stage = 'preview'
+           WHERE j.stage = 'score' AND j.status = 'pending'
+             AND (p.status IS NULL OR p.status IN ('error', 'skipped'))
+           LIMIT 256"""
+    ).fetchall()
+    if not rows:
+        return False
+    with write(db):
+        db.executemany(
+            """UPDATE jobs SET status = 'skipped', error = ?
+               WHERE asset_id = ? AND stage = 'score' AND status = 'pending'
+                 AND NOT EXISTS (SELECT 1 FROM jobs AS p WHERE p.asset_id = jobs.asset_id
+                     AND p.stage = 'preview' AND p.status IN ('pending', 'running', 'done'))""",
+            ((NO_PREVIEW, row[0]) for row in rows),
+        )
+        mark_catalog_updated(db)
+    return True
 
 
 def retry_job(db: sqlite3.Connection, asset_id: int, stage: Stage) -> sqlite3.Row | None:

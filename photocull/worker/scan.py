@@ -4,18 +4,15 @@ import sqlite3
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 
-from photocull.config import WorkerSettings
+from photocull.config import STAGES, WorkerSettings
 from photocull.db import write
-from photocull.db.jobs import DISABLED, NO_VIDEO_EXIF, STAGES
+from photocull.db.catalog import mark_catalog_updated
+from photocull.db.jobs import DISABLED, NO_VIDEO_EXIF, NO_VIDEO_SCORE
 from photocull.media.walk import MediaEntry, MediaJail, hash_file, source_key
 
 
 def fallback_day(mtime_ns: int) -> str:
     return datetime.fromtimestamp(mtime_ns // 1_000_000_000, UTC).date().isoformat()
-
-
-def mark_catalog_updated(db: sqlite3.Connection) -> None:
-    db.execute("UPDATE catalog_status SET revision = revision + 1 WHERE id = 1")
 
 
 def _record(
@@ -26,6 +23,9 @@ def _record(
 ) -> None:
     with write(db):
         for entry, key, digest in batch:
+            prior = db.execute(
+                "SELECT content_hash FROM assets WHERE path = ?", (entry.path,)
+            ).fetchone()
             asset = db.execute(
                 """
                 INSERT INTO assets (path, folder, kind, size, mtime_ns, content_hash, scan_id,
@@ -53,10 +53,20 @@ def _record(
                 ),
             ).fetchone()
             asset_id = asset["id"]
+            if prior and prior["content_hash"] != digest:
+                db.execute("DELETE FROM asset_scores WHERE asset_id = ?", (asset_id,))
+                db.execute("DELETE FROM burst_choices WHERE asset_id = ?", (asset_id,))
+                db.execute(
+                    """UPDATE assets SET auto_reject_dismissed = 0, burst_reject_token = NULL
+                       WHERE id = ?""",
+                    (asset_id,),
+                )
             for stage in STAGES:
                 reason = None
                 if stage == "exif" and entry.kind == "video":
                     reason = NO_VIDEO_EXIF
+                elif stage == "score" and entry.kind == "video":
+                    reason = NO_VIDEO_SCORE
                 elif stage not in settings.stages:
                     reason = DISABLED
                 job = db.execute(

@@ -11,6 +11,8 @@ __pycache__/
 build/
 dist/
 node_modules/
+frontend/playwright-report/
+frontend/test-results/
 .env
 photocull.yaml
 .photocull/

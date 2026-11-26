@@ -3,7 +3,16 @@ import { useEffect, useState } from 'react'
 export type Library = { name: string }
 export type Page<T, Cursor = number> = { items: T[]; next_cursor: Cursor | null }
 export type Group = { name: string; count: number }
-export type GroupBy = 'folder' | 'day'
+export type GroupBy = 'folder' | 'day' | 'burst'
+export type Burst = {
+  id: number
+  captured_at: string
+  recommended_best_id: number
+  user_best_id: number | null
+  best_id: number
+  member_count: number
+  membership_key: string
+}
 export type StageStatus = 'pending' | 'running' | 'done' | 'error' | 'skipped'
 export type Rating = { rating: number; rejected: boolean; revision: number }
 export type Asset = Rating & {
@@ -21,11 +30,20 @@ export type Asset = Rating & {
   duration: number | null
   preview_status: StageStatus | null
   preview_error: string | null
+  score_status: StageStatus | null
+  score_error: string | null
+  sharpness: number | null
+  exposure: number | null
+  clipped_highlights: number | null
+  clipped_shadows: number | null
+  auto_reject: boolean
+  auto_reject_reason: string | null
+  burst_id: number | null
 }
 export type Progress = {
   catalog_revision: number
   scan: { id: number; status: StageStatus; error: string | null } | null
-  stages: Record<'exif' | 'preview', Partial<Record<StageStatus, number>>>
+  stages: Record<'exif' | 'preview' | 'score', Partial<Record<StageStatus, number>>>
   worker: { heartbeat: number; pid: number } | null
 }
 export type XmpPlan = {
@@ -62,12 +80,15 @@ export function message(error: unknown): string {
   return error instanceof Error ? error.message : 'The request failed.'
 }
 
-export function useRemote<T>(url: string, version = 0) {
+export function useRemote<T>(url: string | null, version = 0) {
   const [result, setResult] = useState<{ url: string; data?: T; error?: string }>()
   useEffect(() => {
+    if (url === null) return
     const controller = new AbortController()
     request<T>(url, { signal: controller.signal })
-      .then((data) => setResult({ url, data }))
+      .then((data) => {
+        if (!controller.signal.aborted) setResult({ url, data })
+      })
       .catch((error: unknown) => {
         if (!controller.signal.aborted) {
           setResult((previous) => ({

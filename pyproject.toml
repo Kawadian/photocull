@@ -21,6 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 worker = [
+  "numpy>=2",
   "pillow>=12",
   "pillow-heif>=1.1",
   "pyexiv2>=2.15",
