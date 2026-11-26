@@ -557,6 +557,15 @@ ml = [
 ]
 transcript = [
     { name = "faster-whisper" },
+    { name = "numkong" },
+    { name = "numpy" },
+    { name = "onnxruntime" },
+    { name = "pillow" },
+    { name = "pillow-heif" },
+    { name = "pyexiv2" },
+    { name = "rawpy" },
+    { name = "tokenizers" },
+    { name = "usearch" },
 ]
 watch = [
     { name = "watchdog" },
@@ -587,6 +596,7 @@ requires-dist = [
     { name = "opencv-python-headless", marker = "extra == 'faces'", specifier = ">=4.10,<5" },
     { name = "photocull", extras = ["faces", "watch", "transcript"], marker = "extra == 'insights'" },
     { name = "photocull", extras = ["ml"], marker = "extra == 'faces'" },
+    { name = "photocull", extras = ["ml"], marker = "extra == 'transcript'" },
     { name = "photocull", extras = ["worker"], marker = "extra == 'ml'" },
     { name = "pillow", marker = "extra == 'worker'", specifier = ">=12" },
     { name = "pillow-heif", marker = "extra == 'worker'", specifier = ">=1.1" },

@@ -7,6 +7,7 @@ import numpy as np
 from photocull.config import MLSettings
 from photocull.db import connect
 from photocull.worker.ml.grouping import SimilarityGroups
+from photocull.worker.ml.model import ModelUnavailable
 from photocull.worker.ml.process import MAX_INFERENCE_BATCH
 from photocull.worker.ml.vectors import STORAGE_DTYPE, blob_vector, exact_search, normalized
 
@@ -39,26 +40,36 @@ class Engine:
 
         key = (revision, offline, threads)
         if self.face_key != key:
-            self.face_model = FaceModel(self.cache, *key)
+            try:
+                self.face_model = FaceModel(self.cache, *key)
+            except Exception as error:
+                if isinstance(error, MemoryError):
+                    raise
+                raise ModelUnavailable(f"Face model unavailable: {error}") from error
             self.face_key = key
         return self.face_model.detect(path)
 
     def transcript(self, data: bytes, model_id: str, revision: str, offline: bool, threads: int):
-        from faster_whisper import WhisperModel
-
-        from photocull.worker.insights.models import whisper_folder
-
         key = model_id, revision, offline, threads
         if self.whisper_key != key:
             self.whisper = None
-            directory = whisper_folder(self.cache, model_id, revision, offline)
-            self.whisper = WhisperModel(
-                str(directory),
-                device="cpu",
-                compute_type="int8",
-                cpu_threads=threads,
-                num_workers=1,
-            )
+            try:
+                from faster_whisper import WhisperModel
+
+                from photocull.worker.insights.model_cache import whisper_folder
+
+                directory = whisper_folder(self.cache, model_id, revision, offline)
+                self.whisper = WhisperModel(
+                    str(directory),
+                    device="cpu",
+                    compute_type="int8",
+                    cpu_threads=threads,
+                    num_workers=1,
+                )
+            except Exception as error:
+                if isinstance(error, MemoryError):
+                    raise
+                raise ModelUnavailable(f"Transcription model unavailable: {error}") from error
             self.whisper_key = key
         samples = np.frombuffer(data[: len(data) // 2 * 2], dtype="<i2").astype(np.float32) / 32768
         if not len(samples) or np.max(np.abs(samples)) < 0.005:

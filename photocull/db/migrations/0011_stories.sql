@@ -77,3 +77,17 @@ BEGIN
     INSERT INTO story_dirty(day) SELECT day FROM assets WHERE id = NEW.asset_id
     ON CONFLICT(day) DO UPDATE SET generation = generation + 1;
 END;
+
+CREATE TRIGGER story_burst_insert AFTER INSERT ON burst_members
+WHEN (SELECT key IS NOT NULL FROM story_state)
+BEGIN
+    INSERT INTO story_dirty(day) SELECT day FROM assets WHERE id = NEW.asset_id
+    ON CONFLICT(day) DO UPDATE SET generation = generation + 1;
+END;
+
+CREATE TRIGGER story_burst_delete AFTER DELETE ON burst_members
+WHEN (SELECT key IS NOT NULL FROM story_state)
+BEGIN
+    INSERT INTO story_dirty(day) SELECT day FROM assets WHERE id = OLD.asset_id
+    ON CONFLICT(day) DO UPDATE SET generation = generation + 1;
+END;

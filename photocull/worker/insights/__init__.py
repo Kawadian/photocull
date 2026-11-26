@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import logging
 import time
-from pathlib import Path
 
 from photocull.db import write
 from photocull.db.catalog import mark_catalog_updated
 from photocull.db.insights import configure_stage, discard, finish, register, stage_key
 from photocull.insights import AESTHETIC_PROMPTS, models, taste_input
 from photocull.media.cache import cache_path
+from photocull.worker.insights.model_cache import cache_bytes
 from photocull.worker.insights.people import FaceGroups
+from photocull.worker.ml.model import ModelUnavailable
 
 LOG = logging.getLogger(__name__)
 MAX_ATTEMPTS = 3
@@ -30,6 +31,7 @@ class Insights:
         self.cursor = 0
         self.stages = [*self.identities]
         self.last_taste = 0.0
+        self.model_retry: dict[str, float] = {}
 
     @property
     def taste_enabled(self):
@@ -64,17 +66,7 @@ class Insights:
                 weights = self.inference.call(
                     "aesthetic_head", (AESTHETIC_PROMPTS,), self.worker.pulse
                 )
-                target.parent.mkdir(parents=True, exist_ok=True)
-                import tempfile
-
-                with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as handle:
-                    temporary = Path(handle.name)
-                    try:
-                        handle.write(weights)
-                        handle.flush()
-                        temporary.replace(target)
-                    finally:
-                        temporary.unlink(missing_ok=True)
+                cache_bytes(target, weights)
             self.head = np.frombuffer(weights, dtype="<f4")
         projection = float(blob_vector(vector) @ self.head)
         return float(1 / (1 + np.exp(-8 * projection)))
@@ -105,7 +97,7 @@ class Insights:
         try:
             from photocull.worker.insights.taste import train
 
-            return train(self.db, self.settings, pulse)
+            return train(self.db, self.settings, self.worker.state.name, pulse)
         except (OSError, ValueError, ImportError, MemoryError) as error:
             with write(self.db):
                 self.db.execute(
@@ -130,7 +122,27 @@ class Insights:
                 return True
         return False
 
+    def clean_video(self) -> bool:
+        rows = self.db.execute(
+            """SELECT c.asset_id, a.content_hash, a.active FROM video_cleanup AS c
+               JOIN assets AS a ON a.id = c.asset_id LIMIT 32"""
+        ).fetchall()
+        if not rows:
+            return False
+        directory = self.worker.state / "video"
+        for asset_id, digest, active in rows:
+            for target in directory.glob(f"{asset_id}-*.mp4"):
+                if not active or not target.name.startswith(f"{asset_id}-{digest}-"):
+                    target.unlink(missing_ok=True)
+        with write(self.db):
+            self.db.executemany(
+                "DELETE FROM video_cleanup WHERE asset_id=?", ((row[0],) for row in rows)
+            )
+        return True
+
     def _process(self, stage, pulse):
+        if time.monotonic() < self.model_retry.get(stage, 0.0):
+            return False
         key = stage_key(self.db, stage)
         if key is None:
             return False
@@ -178,6 +190,8 @@ class Insights:
 
                 payload = run_stage(self.worker, stage, row, key, pulse)
         except (OSError, RuntimeError, ValueError, ImportError, MemoryError) as exc:
+            if isinstance(exc, (ModelUnavailable, ImportError)):
+                self.model_retry[stage] = time.monotonic() + 60
             error = str(exc) or type(exc).__name__
             LOG.warning("Insight %s for asset %s failed: %s", stage, row["id"], error)
         with write(self.db):

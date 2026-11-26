@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from urllib.request import urlopen
 
-from photocull.insights import FACE_REVISION
+from photocull.config import DEFAULT_FACE_REVISION
 
 FACE_FILES = {
     "face_detection_yunet/face_detection_yunet_2023mar.onnx": (
@@ -20,6 +20,18 @@ FACE_FILES = {
 }
 
 
+def cache_bytes(target: Path, content: bytes) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            handle.write(content)
+            handle.flush()
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 def face_files(cache: Path, revision: str, offline: bool) -> list[Path]:
     def verified(path: Path, expected: str, size: int) -> bool:
         if not path.is_file() or path.stat().st_size != size:
@@ -30,7 +42,7 @@ def face_files(cache: Path, revision: str, offline: bool) -> list[Path]:
     results = []
     for name, (digest, size) in FACE_FILES.items():
         target = cache / "opencv-faces" / revision / Path(name).name
-        if revision != FACE_REVISION:
+        if revision != DEFAULT_FACE_REVISION:
             # Custom revisions are manually provisioned, with a new immutable identity.
             if not target.is_file():
                 raise ValueError(f"Install the custom face model in {target}")

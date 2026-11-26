@@ -38,6 +38,7 @@ function Workspace({ libraries, library, selectLibrary }: {
   const base = `/api/libraries/${library}`
   const { progress, connected } = useProgress(base)
   const [view, setView] = useState<View>('review')
+  const [videoStart, setVideoStart] = useState<number>()
   const [insightFilter, setInsightFilter] = useState<{ params: string; label: string; assetId?: number }>()
   const [by, setBy] = useState<GroupBy>('folder')
   const [group, setGroup] = useState<string | null>(null)
@@ -58,7 +59,7 @@ function Workspace({ libraries, library, selectLibrary }: {
   const similarButton = useRef<HTMLButtonElement>(null)
   const reviewHeading = useRef<HTMLHeadingElement>(null)
   const version = (progress?.catalog_revision ?? 0) + refresh
-  const capabilities = useRemote<InsightCapabilities>(`${base}/insights`, version)
+  const capabilities = useRemote<InsightCapabilities>(`${base}/insights`, view === 'review' ? refresh : version)
   const reviewFilters = new URLSearchParams(insightFilter?.params ?? filters)
   if (tag && progress?.ml.tags_enabled) reviewFilters.set('tag', tag)
 
@@ -66,6 +67,7 @@ function Workspace({ libraries, library, selectLibrary }: {
     setInsightFilter({ params, label, assetId })
     setBy('folder')
     setGroup(null)
+    setFilters('')
     setLookup(undefined)
     setTag('')
     setView('review')
@@ -252,7 +254,7 @@ function Workspace({ libraries, library, selectLibrary }: {
       )}
       <nav className="insight-nav" aria-label="Library views">
         {views.map(({ id, label, icon: Icon }) => <button key={id}
-          aria-current={view === id ? 'page' : undefined} onClick={() => setView(id)}>
+          aria-current={view === id ? 'page' : undefined} onClick={() => { if (id === 'video') setVideoStart(undefined); setView(id) }}>
           <Icon size={15} aria-hidden="true" /> {label}
         </button>)}
         {view !== 'review' && libraries.length > 1 && <label className="view-library">
@@ -263,7 +265,7 @@ function Workspace({ libraries, library, selectLibrary }: {
       </nav>
       {view !== 'review' ? <InsightsScreen key={view} view={view} base={base}
         capability={capabilities?.data} version={version} openReview={openReview}
-        error={capabilities?.error} retry={() => setRefresh((value) => value + 1)} /> : <>
+        videoStart={videoStart} error={capabilities?.error} retry={() => setRefresh((value) => value + 1)} /> : <>
       {insightFilter && <div className="status-banner" role="status">
         {insightFilter.label}
         <button className="button quiet" onClick={() => setInsightFilter(undefined)}>Clear insight filter</button>
@@ -308,7 +310,10 @@ function Workspace({ libraries, library, selectLibrary }: {
           filters={String(reviewFilters)} onChooseBest={chooseBest} onRejectRest={rejectRest}
           lookup={lookup} onCloseLookup={closeLookup} ml={progress?.ml}
           workerOnline={!!progress?.worker_online} headingRef={reviewHeading} similarRef={similarButton}
-          onVideo={capabilities?.data?.video ? () => setView('video') : undefined}
+          onVideo={capabilities?.data?.video ? (asset) => {
+            setVideoStart(asset.id)
+            setView('video')
+          } : undefined}
           onTag={selectTag} activeTag={tag}
           onSimilar={(asset) => setLookup({
             title: `Similar to ${assetName(asset)}`,

@@ -82,7 +82,13 @@ class Watch:
                 jail = MediaJail(self.worker.library, self.worker.settings.state_dir)
                 snapshot = {entry.path: source_key(entry.stat) for entry in jail.walk(pulse)}
                 if snapshot != self.snapshot:
-                    self.notify()
+                    indexed = dict(
+                        self.worker.db.execute(
+                            "SELECT path, source_key FROM assets WHERE active = 1"
+                        )
+                    )
+                    if indexed != snapshot:
+                        self.notify()
                 self.snapshot = snapshot
             except (OSError, ValueError, RuntimeError) as error:
                 LOG.warning("Watch polling failed: %s", error)

@@ -6,9 +6,6 @@ from dataclasses import dataclass
 
 from photocull.config import Settings, _fingerprint
 
-FACE_REVISION = "48b10fa505aeb51fbd127fc60a5c660040e823b7"
-WHISPER_ID = "Systran/faster-whisper-base"
-WHISPER_REVISION = "ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66"
 AESTHETIC_PROMPTS = (
     "an aesthetically pleasing photograph with beautiful composition",
     "a polished professional photograph with expressive lighting",
@@ -54,4 +51,11 @@ def models(settings: Settings) -> dict[str, ModelIdentity]:
 
 def taste_input(settings: Settings) -> str:
     aesthetic = models(settings).get("aesthetic")
-    return _fingerprint((1, settings.ml.model_key, aesthetic.key if aesthetic else None))
+    return _fingerprint(
+        (
+            1,
+            settings.ml.model_key,
+            aesthetic.key if aesthetic else None,
+            settings.insights.taste_min_per_class,
+        )
+    )

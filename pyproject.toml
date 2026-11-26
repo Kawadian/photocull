@@ -40,7 +40,7 @@ faces = [
   "opencv-python-headless>=4.10,<5",
 ]
 watch = ["watchdog>=6,<7"]
-transcript = ["faster-whisper>=1.2,<2"]
+transcript = ["photocull[ml]", "faster-whisper>=1.2,<2"]
 insights = ["photocull[faces,watch,transcript]"]
 
 [dependency-groups]

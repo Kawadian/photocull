@@ -17,7 +17,7 @@ const scoreStates = {
 type InspectorProps = {
   base: string
   asset: Asset | undefined
-  onVideo?: () => void
+  onVideo?: (asset: Asset) => void
   busy: boolean
   undoAvailable: boolean
   onRating: (asset: Asset, rating: number, rejected?: boolean) => void
@@ -189,7 +189,7 @@ export function Inspector({ base, asset, busy, undoAvailable, onRating, onUndo, 
               Recommendation {Math.round(asset.insights.taste.score * 100)}%
             </p>}
             {asset.kind === 'video' && onVideo &&
-              <button className="button secondary" onClick={onVideo}>Open video analysis</button>}
+              <button className="button secondary" onClick={() => onVideo(asset)}>Open video analysis</button>}
             {(asset.sharpness !== null || asset.auto_reject) && <ScoreBadges asset={asset} />}
             {asset.kind === 'video' ? <p className="score-state">Scores apply to still images.</p>
               : (asset.sharpness === null || (asset.score_status && asset.score_status !== 'done')) && (

@@ -86,18 +86,31 @@ class Segment:
     anchor: tuple[float, float] | None = None
     count: int = 0
     best: list = field(default_factory=list)
+    burst_best: dict = field(default_factory=dict)
 
     def add(self, row, clock, point):
         self.count += 1
         self.first = self.first or clock
         self.last = clock or self.last
         self.anchor = self.anchor or point
-        if row["ready"] and not row["rejected"]:
-            item = (row["quality"], -row["id"], row["burst_id"], row["dhash"], row["vector"], clock)
-            if len(self.best) < CANDIDATES:
-                heapq.heappush(self.best, item)
-            elif item > self.best[0]:
-                heapq.heapreplace(self.best, item)
+        if not row["ready"] or row["rejected"]:
+            return
+        burst = row["burst_id"]
+        item = (row["quality"], -row["id"], burst, row["dhash"], row["vector"], clock)
+        existing = self.burst_best.get(burst)
+        if existing:
+            if item <= existing:
+                return
+            self.best.remove(existing)
+            heapq.heapify(self.best)
+        elif len(self.best) == CANDIDATES:
+            if item <= self.best[0]:
+                return
+            removed = heapq.heappop(self.best)
+            self.burst_best.pop(removed[2], None)
+        heapq.heappush(self.best, item)
+        if burst is not None:
+            self.burst_best[burst] = item
 
     def covers(self):
         import numpy as np
@@ -119,7 +132,6 @@ class Segment:
             return 0
 
         selected = []
-        bursts = set()
         while candidates and len(selected) < REPRESENTATIVES:
             index = max(
                 range(len(candidates)),
@@ -130,9 +142,6 @@ class Segment:
                 ),
             )
             item = candidates.pop(index)
-            if item[2] is not None and item[2] in bursts:
-                continue
-            bursts.add(item[2])
             selected.append(item)
         return [-item[1] for item in selected]
 

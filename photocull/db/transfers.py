@@ -111,17 +111,14 @@ def select_assets(config: Selection, keys: dict):
             values.append(value.isoformat() if isinstance(value, date) else value)
     joins = "LEFT JOIN asset_scores AS s ON s.asset_id = a.id"
     if config.person_id is not None:
-        clauses.append("""EXISTS (SELECT 1 FROM faces AS f WHERE f.asset_id = a.id
-                        AND f.person_id = ? AND f.key = ?)""")
+        clauses.append("""a.id IN (SELECT f.asset_id FROM faces AS f
+                        WHERE f.person_id = ? AND f.key = ?)""")
         values.extend((config.person_id, keys.get("faces", "")))
     if config.dead is not None:
         joins += """ LEFT JOIN video_flags AS f ON f.asset_id=a.id AND f.content_hash=a.content_hash
                      LEFT JOIN insight_results AS i ON i.asset_id=a.id
                        AND i.content_hash=a.content_hash AND i.stage='video' AND i.key=?"""
-        clauses.append(
-            "a.kind='video' AND COALESCE(f.dead, "
-            "json_array_length(i.payload,'$.reasons') > 0, 0) = ?"
-        )
+        clauses.append("COALESCE(f.dead, json_array_length(i.payload,'$.reasons') > 0, 0) = ?")
         values.insert(0, keys.get("video", ""))
         values.append(config.dead)
     return (

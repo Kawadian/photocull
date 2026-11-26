@@ -102,15 +102,27 @@ BEGIN
     UPDATE taste_state SET requested = requested + 1;
 END;
 
-CREATE TRIGGER insights_taste_scores AFTER UPDATE ON asset_scores
-WHEN EXISTS (SELECT 1 FROM assets WHERE id = NEW.asset_id AND (rating > 0 OR rejected = 1))
-BEGIN
-    UPDATE taste_state SET requested = requested + 1;
-END;
-
 CREATE TRIGGER insights_taste_retired AFTER UPDATE OF content_hash, active ON assets
 WHEN (OLD.content_hash <> NEW.content_hash OR OLD.active <> NEW.active)
  AND (NEW.rating > 0 OR NEW.rejected = 1)
 BEGIN
     UPDATE taste_state SET requested = requested + 1;
+END;
+
+CREATE TRIGGER insights_taste_scored_insert AFTER INSERT ON asset_scores BEGIN
+    INSERT OR IGNORE INTO insight_work(stage, asset_id)
+        SELECT stage, NEW.asset_id FROM insight_stages WHERE stage = 'taste';
+    UPDATE taste_state SET requested = requested + 1
+        WHERE EXISTS (SELECT 1 FROM assets WHERE id = NEW.asset_id AND (rating > 0 OR rejected = 1));
+END;
+
+CREATE TRIGGER insights_taste_feature_update
+AFTER UPDATE OF sharpness, exposure, clipped_highlights, clipped_shadows ON asset_scores
+WHEN OLD.sharpness <> NEW.sharpness OR OLD.exposure <> NEW.exposure
+ OR OLD.clipped_highlights <> NEW.clipped_highlights OR OLD.clipped_shadows <> NEW.clipped_shadows
+BEGIN
+    INSERT OR IGNORE INTO insight_work(stage, asset_id)
+        SELECT stage, NEW.asset_id FROM insight_stages WHERE stage = 'taste';
+    UPDATE taste_state SET requested = requested + 1
+        WHERE EXISTS (SELECT 1 FROM assets WHERE id = NEW.asset_id AND (rating > 0 OR rejected = 1));
 END;

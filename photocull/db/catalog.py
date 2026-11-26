@@ -126,13 +126,17 @@ def asset_page_query(
             params.append(cursor)
         order = "t.asset_id"
     if person_id is not None:
-        filters.append("""EXISTS (SELECT 1 FROM faces AS f WHERE f.person_id = ?
-            AND f.key = ? AND f.asset_id = a.id)""")
-        params.extend((person_id, face_key or ""))
+        filters.append("""a.id IN (SELECT f.asset_id FROM faces AS f
+            WHERE f.person_id = ? AND f.key = ? AND f.asset_id > ?)""")
+        params.extend((person_id, face_key or "", 0 if sort_score else cursor))
     if min_aesthetic is not None:
-        filters.append("""EXISTS (SELECT 1 FROM insight_results AS i WHERE i.stage = 'aesthetic'
-            AND i.asset_id = a.id AND i.key = ? AND i.score >= ?)""")
-        params.extend((aesthetic_key or "", min_aesthetic))
+        if sort_score and sort_score[:2] == ("aesthetic", aesthetic_key):
+            filters.append("ranked.score >= ?")
+            params.append(min_aesthetic)
+        else:
+            filters.append("""(SELECT i.score FROM insight_results AS i WHERE i.stage = 'aesthetic'
+                AND i.asset_id = a.id AND i.key = ?) >= ?""")
+            params.extend((aesthetic_key or "", min_aesthetic))
     if sort_score:
         stage, key, previous = sort_score
         # Starting from the score index permits keyset pagination on large catalogs.

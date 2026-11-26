@@ -8,6 +8,7 @@ from photocull.db import write
 from photocull.db.catalog import mark_catalog_updated
 from photocull.db.insights import configure_stage, register
 from photocull.insights import ModelIdentity, models, taste_input
+from photocull.worker.insights.model_cache import cache_bytes
 from photocull.worker.ml.vectors import blob_vector
 
 FEATURE_NAMES = (
@@ -62,7 +63,7 @@ def coefficients(matrix, labels, pulse):
     return np.array([intercept, *weights], dtype="<f4")
 
 
-def train(db, settings, pulse) -> bool:
+def train(db, settings, library, pulse) -> bool:
     state = db.execute("SELECT * FROM taste_state").fetchone()
     input_key = taste_input(settings)
     if state["input_key"] == input_key and state["requested"] == state["completed"]:
@@ -93,12 +94,15 @@ def train(db, settings, pulse) -> bool:
         matrix = np.stack([features(row) for row in rows])
         labels = np.repeat([0, 1], counts)
         fit = coefficients(matrix, labels, pulse).tobytes()
+    directory = settings.model_cache / "taste" / library
+    identity = None
+    if fit is not None:
+        revision = hashlib.sha256(fit).hexdigest()
+        identity = ModelIdentity("photocull/taste-logistic", revision, (input_key,))
+        cache_bytes(directory / f"{identity.key}.f32", fit)
     with write(db):
-        if fit is not None:
-            revision = hashlib.sha256(fit).hexdigest()
-            model_key = register(
-                db, ModelIdentity("photocull/taste-logistic", revision, (input_key,))
-            )
+        if identity is not None:
+            model_key = register(db, identity)
         configure_stage(db, "taste", model_key)
         db.execute(
             """UPDATE taste_state SET completed = ?, status = ?, positives = ?, negatives = ?,
@@ -114,6 +118,9 @@ def train(db, settings, pulse) -> bool:
             ),
         )
         mark_catalog_updated(db)
+    for old in directory.glob("*.f32"):
+        if old.stem != model_key:
+            old.unlink(missing_ok=True)
     return True
 
 

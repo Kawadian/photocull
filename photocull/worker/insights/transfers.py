@@ -7,7 +7,7 @@ import shutil
 import stat
 import time
 import zipfile
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from html import escape
 from pathlib import Path
 
@@ -22,7 +22,7 @@ from photocull.media.walk import MediaJail, SourceChanged, open_directory, sourc
 COPY_BYTES = 1024 * 1024
 REPORT_HEADER = """<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<meta http-equiv="Content-Security-Policy" 
+<meta http-equiv="Content-Security-Policy"
  content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
 <title>Photocull trip report</title><style>
 body{font:1rem/1.5 system-ui;max-width:70rem;margin:auto;padding:1rem;
@@ -75,19 +75,16 @@ def remove_private(root_fd, name):
 def sidecar(jail, path):
     parent = Path(path).parent
     stem = Path(path).stem
-    for extension in (".xmp", ".XMP"):
-        candidate = (parent / f"{stem}{extension}").as_posix()
-        try:
-            source = jail.open_media(candidate)
-            fd, _ = source.__enter__()
-        except FileNotFoundError:
-            continue
-        try:
+    with ExitStack() as stack:
+        for extension in (".xmp", ".XMP"):
+            candidate = (parent / f"{stem}{extension}").as_posix()
+            try:
+                fd, _ = stack.enter_context(jail.open_media(candidate))
+            except FileNotFoundError:
+                continue
             yield fd
-        finally:
-            source.__exit__(None, None, None)
-        return
-    yield None
+            return
+        yield None
 
 
 class Transfers:
@@ -148,9 +145,10 @@ class Transfers:
         if not (config.export or config.report):
             return False
         args = (config.export, config.report and config.story)
-        condition = (
-            """status='pending' AND ((kind IN ('zip','copy') AND ?) OR (kind='report' AND ?))"""
-        )
+        condition = """status='pending' AND (
+            (kind IN ('zip','copy') AND ?)
+            OR (kind='report' AND ? AND NOT EXISTS (SELECT 1 FROM story_dirty))
+        )"""
         row = self.db.execute(
             f"SELECT id FROM transfers WHERE {condition} ORDER BY created_at, id LIMIT 1",
             args,
@@ -354,6 +352,7 @@ class Transfers:
             output.write(REPORT_HEADER.encode())
             days = self.db.execute(f"SELECT day {condition} ORDER BY day", args)
             count = 0
+            used_geonames = False
             for (day,) in days:
                 self.check(job_id, pulse)
                 output.write(f"<section><h2>{escape(day)}</h2>".encode())
@@ -362,6 +361,7 @@ class Transfers:
                     for item in items:
                         self.check(job_id, pulse)
                         self.report_segment(output, item)
+                        used_geonames |= item["title"] is not None
                         position = item["position"]
                 output.write(b"</section>\n")
                 count += 1
@@ -371,6 +371,10 @@ class Transfers:
                 )
             if not count:
                 output.write(b"<p>No indexed stories in this date range.</p>")
+            if used_geonames:
+                output.write(
+                    b"<footer>Place names from GeoNames (geonames.org), CC BY 4.0.</footer>"
+                )
             output.write(b"</main>\n")
 
     def report_segment(self, output, item):

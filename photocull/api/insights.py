@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+from html import escape
 from typing import Annotated, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi import Path as RoutePath
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, StringConstraints
 
 from photocull.config import Settings
@@ -43,6 +44,22 @@ class SplitPerson(BaseModel):
 
 class VideoFlag(BaseModel):
     dead: bool | None
+
+
+def vtt_timestamp(seconds: float) -> str:
+    minutes, millis = divmod(round(max(0, seconds) * 1000), 60_000)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02d}:{minutes:02d}:{millis // 1000:02d}.{millis % 1000:03d}"
+
+
+def captions(segments: list[dict]) -> str:
+    lines = ["WEBVTT", ""]
+    for item in segments:
+        start = vtt_timestamp(item["start"])
+        end = vtt_timestamp(item["end"])
+        if end > start:
+            lines.extend((f"{start} --> {end}", escape(" ".join(item["text"].split())), ""))
+    return "\n".join(lines) + "\n"
 
 
 def get_video(db, asset_id):
@@ -239,8 +256,9 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
                 (body.source, person_id),
             )
             db.execute("DELETE FROM people WHERE id = ?", (body.source,))
+            name = db.execute("SELECT name FROM people WHERE id=?", (person_id,)).fetchone()[0]
             mark_catalog_updated(db)
-            return {"id": person_id, "moved": moved}
+            return {"id": person_id, "moved": moved, "name": name}
 
     @app.post(PREFIX + "/people/{person_id}/split")
     def split(library: str, person_id: Id, body: SplitPerson):
@@ -283,7 +301,9 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
             db.execute("BEGIN")
             asset = get_video(db, asset_id)
             keys = public_keys(db, settings)
-            output = {"override": asset["dead"]}
+            output = {
+                "override": None if asset["dead"] is None else bool(asset["dead"]),
+            }
             for stage in ("video", "transcript"):
                 if stage not in keys:
                     continue
@@ -324,6 +344,24 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
             raise HTTPException(404, "Video preview unavailable")
         return FileResponse(
             target, media_type="video/mp4", headers={"Cache-Control": "private, no-cache"}
+        )
+
+    @app.get(PREFIX + "/assets/{asset_id}/video/captions")
+    def video_captions(library: str, asset_id: Id):
+        require(config.video and config.transcript, "Transcription")
+        with connect(library_path(library)) as db:
+            asset = get_video(db, asset_id)
+            key = public_keys(db, settings)["transcript"]
+            row = db.execute(
+                """SELECT payload FROM insight_results WHERE asset_id=? AND stage='transcript'
+                   AND key=? AND content_hash=? AND payload IS NOT NULL""",
+                (asset_id, key, asset["content_hash"]),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(404, "Captions unavailable")
+        output = captions(json.loads(row["payload"])["segments"])
+        return Response(
+            output, media_type="text/vtt", headers={"Cache-Control": "private, no-cache"}
         )
 
     @app.patch(PREFIX + "/assets/{asset_id}/video")
@@ -401,6 +439,7 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
             headers={
                 "Cache-Control": "private, no-store",
                 "X-Content-Type-Options": "nosniff",
+                "X-Accel-Buffering": "no",
                 "Content-Security-Policy": (
                     "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'"
                 ),

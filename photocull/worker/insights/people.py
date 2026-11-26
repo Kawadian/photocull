@@ -30,7 +30,9 @@ class FaceGroups:
         if key != self.key:
             self.key, self.index, self.last_id = key, Index(ndim=128, metric="cos", dtype="f16"), 0
         source = db.execute(
-            "SELECT id, vector FROM faces WHERE key = ? AND id > ? ORDER BY id", (key, self.last_id)
+            """SELECT f.id, f.vector FROM faces AS f JOIN assets AS a ON a.id = f.asset_id
+               WHERE f.key = ? AND f.id > ? AND a.active = 1 AND f.quality >= 0.12 ORDER BY f.id""",
+            (key, self.last_id),
         )
         while rows := list(islice(source, 512)):
             pulse()
@@ -47,7 +49,8 @@ class FaceGroups:
         self.prepare(db, key, pulse)
         with write(db):
             prior = db.execute(
-                f"SELECT id, person_id, manual, {COLUMNS} FROM faces WHERE asset_id = ?",
+                f"""SELECT f.id, f.person_id, f.manual, {COLUMNS}, f.key, p.name
+                    FROM faces AS f JOIN people AS p ON p.id = f.person_id WHERE f.asset_id = ?""",
                 (asset["id"],),
             ).fetchall()
             db.execute("DELETE FROM faces WHERE asset_id = ?", (asset["id"],))
@@ -55,9 +58,10 @@ class FaceGroups:
             # Preserve deliberate assignments first, including on a model upgrade.
             overlaps = sorted(
                 (
-                    (row["manual"], overlap(box, row[3:]), index, row["id"], row["person_id"])
+                    (row["manual"], overlap(box, row[3:7]), index, row["id"], row["person_id"])
                     for index, (box, *_) in enumerate(detections)
                     for row in prior
+                    if row["manual"] or row["name"] or row["key"] == key
                 ),
                 reverse=True,
             )

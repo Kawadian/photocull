@@ -180,7 +180,7 @@ def metrics(source, fd, threads, duration, has_audio, pulse):
             + 0.10 * min(1, scene * 4)
             - 0.8 * darkness
         )
-        if score >= 0.22:
+        if score >= 0.22 and (motion >= 0.012 or volume >= 0.02 or scene > 0):
             item = (score, -(count - len(batch)) / FRAME_RATE, count / FRAME_RATE)
             if len(candidates) < 40:
                 heapq.heappush(candidates, item)

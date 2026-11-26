@@ -19,6 +19,9 @@ TagLabel = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1,
 TagLabels = Annotated[tuple[TagLabel, ...], Field(min_length=1, max_length=4)]
 DEFAULT_MODEL = "onnx-community/siglip2-base-patch16-224-ONNX"
 DEFAULT_REVISION = "ba1f3b0843f24bc5417d38e19c37b287d719b2f4"
+DEFAULT_FACE_REVISION = "48b10fa505aeb51fbd127fc60a5c660040e823b7"
+DEFAULT_TRANSCRIPT_MODEL = "Systran/faster-whisper-base"
+DEFAULT_TRANSCRIPT_REVISION = "ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66"
 DEFAULT_TAGS = {
     "cat": ("Cat", "猫"),
     "dog": ("Dog", "犬"),
@@ -150,21 +153,17 @@ class InsightSettings(BaseModel):
     report: bool = False
     offline: bool = False
     threads: int = Field(default=2, ge=1, le=8)
-    face_revision: str = Field(
-        default="48b10fa505aeb51fbd127fc60a5c660040e823b7", pattern=r"^[a-f0-9]{40}$"
-    )
+    face_revision: str = Field(default=DEFAULT_FACE_REVISION, pattern=r"^[a-f0-9]{40}$")
     face_threshold: Ratio = 0.45
     taste_min_per_class: int = Field(default=8, ge=2, le=1000)
     story_gap_minutes: int = Field(default=90, ge=1, le=1440)
     story_distance_km: float = Field(default=15, gt=0, le=1000)
     story_geonames: Path | None = None
     transcript_model: str = Field(
-        default="Systran/faster-whisper-base",
+        default=DEFAULT_TRANSCRIPT_MODEL,
         pattern=r"^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+$",
     )
-    transcript_revision: str = Field(
-        default="ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66", pattern=r"^[a-f0-9]{40}$"
-    )
+    transcript_revision: str = Field(default=DEFAULT_TRANSCRIPT_REVISION, pattern=r"^[a-f0-9]{40}$")
     watch_mode: Literal["auto", "poll"] = "auto"
     watch_interval: float = Field(default=60, ge=1, le=86400)
     watch_debounce: float = Field(default=3, ge=0.1, le=300)

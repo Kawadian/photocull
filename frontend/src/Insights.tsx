@@ -103,8 +103,8 @@ function FacePicture({ base, face, alt = '' }: {
 
 const personName = (person: Person) => person.name ?? `Person ${person.id}`
 
-function PersonDetail({ base, initial, version, openReview, beginMerge, close }: ScreenProps & {
-  initial: Person; beginMerge: (person: Person) => void; close: () => void
+function PersonDetail({ base, initial, version, openReview, beginMerge, openPerson, close }: ScreenProps & {
+  initial: Person; beginMerge: (person: Person) => void; openPerson: (person: Person) => void; close: () => void
 }) {
   const [person, setPerson] = useState(initial)
   const [name, setName] = useState(initial.name ?? '')
@@ -146,10 +146,8 @@ function PersonDetail({ base, initial, version, openReview, beginMerge, close }:
         </label>)}
       </div>
       <button className="button primary" disabled={!selected.length || work.busy} onClick={() => {
-        void work.action(`${url}/split`, json('POST', { faces: selected }), () => {
-          setSelected([])
-          cursor.reset()
-        }).catch(() => {})
+        void work.action<{ id: number; moved: number }>(`${url}/split`, json('POST', { faces: selected }),
+          ({ id, moved }) => openPerson({ ...person, id, name: null, count: moved })).catch(() => {})
       }}>Split {selected.length || ''} selected faces</button>
     </fieldset>}
     <Paging {...cursor} next={result?.data?.next_cursor}
@@ -167,7 +165,7 @@ function People(props: ScreenProps) {
   const url = `${base}/insights/people`
   const result = useRemote<Page<Person>>(person ? null : `${url}?cursor=${cursor.cursor}`, work.version)
   const people = result?.data?.items ?? []
-  if (person) return <PersonDetail key={person.id} {...props} initial={person} close={() => setPerson(undefined)}
+  if (person) return <PersonDetail key={person.id} {...props} initial={person} openPerson={setPerson} close={() => setPerson(undefined)}
     beginMerge={(entry) => { setSource(entry); setPerson(undefined) }} />
   return <>
     {source && <div className="insight-actions" role="status">
@@ -189,10 +187,10 @@ function People(props: ScreenProps) {
     {target && source && <ConfirmAction title={`Merge into ${personName(target)}?`}
       description={`Move all faces from ${personName(source)} into ${personName(target)}.`}
       action="Merge people" onClose={() => setTarget(undefined)} onConfirm={() =>
-        work.action(`${url}/${target.id}/merge`, json('POST', { source: source.id }), () => {
+        work.action<{ name: string | null }>(`${url}/${target.id}/merge`, json('POST', { source: source.id }), ({ name }) => {
           setTarget(undefined)
           setSource(undefined)
-          setPerson(target)
+          setPerson({ ...target, name, count: target.count + source.count })
         })} />}
   </>
 }
@@ -278,6 +276,8 @@ function StoryDetail({ base, version, day, openReview, close }: ScreenProps & {
       <MediaCards base={base} assets={item.representatives}
         open={(asset) => openReview(`day=${day}`, day, asset.id)} />
     </article>)}
+    {items.some(({ title }) => title) &&
+      <p className="insight-muted">Place names from GeoNames (geonames.org), CC BY 4.0.</p>}
     <Paging {...cursor} next={result?.data?.next_cursor} forward={() => cursor.forward(result?.data?.next_cursor)} />
   </div>
 }
@@ -357,7 +357,10 @@ function VideoDetail({ base, version, asset, enabled }: {
           video.current.pause()
           stop.current = null
         }
-      }} />}
+      }}>
+      {!!transcript?.data?.segments.length &&
+        <track kind="captions" label="Local transcript" srcLang="und" src={`${url}/captions`} />}
+    </video>}
     <Status error={playError || analysis?.data?.preview_error}
       retry={analysis?.data?.preview_error ? () => retry('video') : undefined} />
     {analysis?.data && <section>
@@ -399,8 +402,8 @@ function VideoDetail({ base, version, asset, enabled }: {
   </section>
 }
 
-function Videos({ base, version, capability }: ScreenProps) {
-  const cursor = usePageCursor(0)
+function Videos({ base, version, capability, start }: ScreenProps & { start?: number }) {
+  const cursor = usePageCursor(start ? start - 1 : 0)
   const work = useAction(version)
   const result = useRemote<Page<Asset>>(`${base}/assets?kind=video&limit=30&cursor=${cursor.cursor}`, work.version)
   const assets = result?.data?.items ?? []
@@ -599,9 +602,9 @@ function Transfers({ base, version, capability, report }: ScreenProps & { report
   </>
 }
 
-export function InsightsScreen({ view, base, capability, version, openReview, error, retry }: {
+export function InsightsScreen({ view, base, capability, version, openReview, error, retry, videoStart }: {
   view: Exclude<View, 'review'>; base: string; capability?: InsightCapabilities; version: number
-  openReview: OpenReview; error?: string; retry: () => void
+  openReview: OpenReview; error?: string; retry: () => void; videoStart?: number
 }) {
   const heading = useRef<HTMLHeadingElement>(null)
   useEffect(() => { heading.current?.focus() }, [view])
@@ -617,7 +620,7 @@ export function InsightsScreen({ view, base, capability, version, openReview, er
     {enabled && props && (
       view === 'faces' ? <People {...props} /> :
       view === 'story' ? <Stories {...props} /> :
-      view === 'video' ? <Videos {...props} /> :
+      view === 'video' ? <Videos {...props} start={videoStart} /> :
       view === 'taste' ? <Recommendations {...props} /> :
       <Transfers {...props} report={view === 'report'} />
     )}

@@ -92,10 +92,11 @@ def asset_insights(db: Connection, keys: dict, assets: list[dict]) -> None:
     by_id = {asset["id"]: asset for asset in assets}
     for row in db.execute(
         """SELECT r.asset_id, r.stage, r.score, r.payload, r.error
-           FROM insight_results AS r JOIN json_each(?) AS k ON r.stage = k.key AND r.key = k.value
-           JOIN json_each(?) AS ids ON ids.value = r.asset_id
-           JOIN assets AS a ON a.id = r.asset_id AND r.content_hash = a.content_hash""",
-        (json.dumps(keys), json.dumps(list(by_id))),
+           FROM json_each(?) AS ids CROSS JOIN json_each(?) AS k
+           CROSS JOIN insight_results AS r ON r.stage = k.key AND r.asset_id = ids.value
+           JOIN assets AS a ON a.id = r.asset_id AND r.content_hash = a.content_hash
+           WHERE r.key = k.value""",
+        (json.dumps(list(by_id)), json.dumps(keys)),
     ):
         stage = row["stage"]
         data = {"score": row["score"], "error": row["error"]}

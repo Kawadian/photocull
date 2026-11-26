@@ -7,7 +7,7 @@ class FaceModel:
     def __init__(self, cache: Path, revision: str, offline: bool, threads: int):
         import cv2
 
-        from photocull.worker.insights.models import face_files
+        from photocull.worker.insights.model_cache import face_files
 
         detector, recognizer = face_files(cache, revision, offline)
         cv2.setNumThreads(threads)

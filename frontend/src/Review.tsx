@@ -14,7 +14,7 @@ import { useShortcuts } from './shortcuts'
 type ReviewProps = {
   base: string
   startAsset?: number
-  onVideo?: () => void
+  onVideo?: (asset: Asset) => void
   group: string | null
   by: GroupBy
   version: number
@@ -304,7 +304,10 @@ export function Review(props: ReviewProps) {
             </div>
           )}
           {loadError && <div className="review-retry">
-            <button className="button secondary" onClick={() => setRetry((value) => value + 1)}>
+            <button className="button secondary" onClick={() => {
+              if (!lookup && params.has('sort')) setCursors([0])
+              setRetry((value) => value + 1)
+            }}>
               {lookup ? 'Retry search' : 'Retry review'}
             </button>
           </div>}

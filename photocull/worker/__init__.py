@@ -123,6 +123,9 @@ class LibraryWorker:
         if self.ml is not None:
             self.ml.configure()
         if self.insights is not None:
+            for staged in (self.state / "video").glob(".video-*"):
+                self.pulse()
+                staged.unlink(missing_ok=True)
             self.insights.configure()
         if self.stories is not None:
             self.stories.configure(self.pulse)
@@ -148,7 +151,7 @@ class LibraryWorker:
                 settle_seconds=self.settings.insights.watch_debounce
                 if self.settings.insights.watch
                 else 0,
-                defer=self.watch.notify if self.watch else None,
+                defer=self.watch.notify if self.watch and self.settings.insights.watch else None,
             )
             self.scan = (scan_id, batches)
         scan_id, batches = self.scan
@@ -295,6 +298,8 @@ class LibraryWorker:
         between_work()
         tagged = ml.process_tags() if ml else False
         busy = bool(scanned or jobs or embedded or tagged)
+        if self.insights and self.insights.clean_video():
+            return True
         if not busy and self.transfers and self.transfers.step(between_work):
             return True
         if self.insights and self.insights.step(between_work, idle=not busy):
