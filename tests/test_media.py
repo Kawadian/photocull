@@ -169,3 +169,40 @@ def test_video_poster_and_duration(tmp_path):
     assert (dimensions.width, dimensions.height) == (64, 48)
     assert dimensions.duration == pytest.approx(1.0)
     assert Path(cache_path(tmp_path / "state", "thumbs", 1, "hash")).is_file()
+
+
+def test_dng_demosaic_without_an_embedded_jpeg(tmp_path):
+    from PIL.TiffImagePlugin import ImageFileDirectory_v2
+
+    path = tmp_path / "fixture.DNG"
+    tags = ImageFileDirectory_v2()
+    # A small, uncompressed Bayer sensor with an identity color matrix.
+    for tag, field_type, value in (
+        (262, 3, 32803),
+        (271, 2, "Fixture"),
+        (272, 2, "Synthetic camera"),
+        (306, 2, "2025:03:04 05:06:07"),
+        (33421, 3, (2, 2)),
+        (33422, 1, b"\x00\x01\x01\x02"),
+        (50706, 1, b"\x01\x04\x00\x00"),
+        (50707, 1, b"\x01\x01\x00\x00"),
+        (50708, 2, "Photocull synthetic Bayer"),
+        (50710, 1, b"\x00\x01\x02"),
+        (50711, 3, 1),
+        (50714, 3, 64),
+        (50717, 4, 4095),
+        (50721, 10, (1, 0, 0, 0, 1, 0, 0, 0, 1)),
+        (50728, 5, (1, 1, 1)),
+        (50778, 3, 21),
+    ):
+        tags.tagtype[tag] = field_type
+        tags[tag] = value
+    Image.new("I;16", (64, 64), 512).save(path, format="TIFF", tiffinfo=tags)
+    state = tmp_path / "state"
+    jail = MediaJail(Library(root=tmp_path), state)
+    with jail.open_media(path.name) as (fd, _):
+        info = exif.read_metadata(f"/proc/self/fd/{fd}")
+        dimensions = decode(fd, "raw", state, 7, "fixture")
+    assert info == exif.Metadata("2025-03-04T05:06:07", "Fixture", "Synthetic camera")
+    assert (dimensions.width, dimensions.height) == (32, 32)
+    assert cache_path(state, "thumbs", 7, "fixture").is_file()

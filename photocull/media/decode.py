@@ -17,7 +17,7 @@ PREVIEW_EDGE = 2560
 THUMB_EDGE = 320
 DETAIL_EDGE = 1600
 MAX_PIXELS = 100_000_000
-VIDEO_FORMATS = "mov,matroska,webm"
+VIDEO_FORMATS = "mov,matroska,webm,m4v"
 
 
 @dataclass(frozen=True)
@@ -65,6 +65,8 @@ def _raw(path: str) -> Image.Image:
             OSError,
         ):
             pass
+        if raw.sizes.raw_width * raw.sizes.raw_height > MAX_PIXELS:
+            raise ValueError(f"RAW sensor exceeds the {MAX_PIXELS:,} pixel decode limit")
         return Image.fromarray(raw.postprocess(half_size=True, output_bps=8, use_camera_wb=True))
 
 

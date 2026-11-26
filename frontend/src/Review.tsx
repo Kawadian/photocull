@@ -175,7 +175,7 @@ export function Review(props: ReviewProps) {
         <div className="review-bar">
           <div className="review-title">
             <h1 title={heading}>{heading}</h1>
-            <p>{asset ? assetName(asset) : 'Review'}</p>
+            {asset && <p>{assetName(asset)}</p>}
           </div>
           <div className="review-tools">
             <div className="segment zoom" aria-label="Preview zoom">
@@ -213,7 +213,7 @@ export function Review(props: ReviewProps) {
         <div className="filmstrip-panel">
           <div className="filmstrip-bar">
             <span>Filmstrip</span>
-            {!!assets.length && <span>{100 * (cursors.length - 1) + index + 1}</span>}
+            {!!assets.length && <span>{index + 1} / {assets.length}</span>}
             {(cursors.length > 1 || nextCursor !== null) && (
               <div className="filmstrip-pages">
                 <button className="icon-button" aria-label="Previous asset page"

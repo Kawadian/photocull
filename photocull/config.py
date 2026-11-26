@@ -87,6 +87,8 @@ def load_settings() -> Settings:
         for field in ("state_dir", "token_file", "static_dir", "bind_host", "bind_port")
         if (key := f"PHOTOCULL_{field.upper()}") in env and env[key] is not None
     }
+    if env_values.get("token_file") == "":
+        env_values["token_file"] = None
     _paths(env_values, ("state_dir", "token_file", "static_dir"), cwd)
     values.update(env_values)
 
