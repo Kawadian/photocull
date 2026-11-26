@@ -6,6 +6,7 @@ import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 from secrets import compare_digest
 from typing import Annotated, Literal
@@ -22,6 +23,7 @@ from photocull.db.catalog import ASSET_COLUMNS, ASSET_JOINS, RatingConflict, ass
 from photocull.db.catalog import set_rating as save_rating
 from photocull.db.jobs import progress, request_scan, retry_job
 from photocull.media.cache import cache_path
+from photocull.media.xmp import XMPConflict, XMPError, export_xmp
 
 TOKEN_HEADER = "x-photocull-token"
 VARIANTS = {"thumb": "thumbs", "preview": "previews", "detail": "details"}
@@ -37,6 +39,17 @@ class RatingUpdate(BaseModel):
     def reject_with_rating(self) -> RatingUpdate:
         if self.rejected and self.rating:
             raise ValueError("Set rating to 0 when rejecting an asset")
+        return self
+
+
+class XMPUpdate(BaseModel):
+    dry_run: bool = True
+    confirmation: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def require_confirmation(self) -> XMPUpdate:
+        if not self.dry_run and self.confirmation is None:
+            raise ValueError("Preview the XMP update and supply its confirmation")
         return self
 
 
@@ -182,6 +195,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if rating is None:
                 raise HTTPException(404, "Unknown asset")
             return rating
+
+    @app.post("/api/libraries/{library}/assets/{asset_id}/xmp")
+    def xmp(library: str, asset_id: int, update: XMPUpdate):
+        library_path(library)
+        try:
+            return asdict(export_xmp(settings, library, asset_id, **update.model_dump()))
+        except LookupError as error:
+            raise HTTPException(404, str(error)) from error
+        except XMPConflict as error:
+            raise HTTPException(409, str(error)) from error
+        except XMPError as error:
+            raise HTTPException(422, str(error)) from error
 
     @app.get("/api/libraries/{library}/assets/{asset_id}/media/{variant}")
     def media(library: str, asset_id: int, variant: Literal["thumb", "preview", "detail"]):
