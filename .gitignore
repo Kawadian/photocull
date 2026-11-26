@@ -1,2 +1,16 @@
 # Local Codex CLI settings (model/effort only; do not commit)
 .codex/
+.venv/
+.tools/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+build/
+dist/
+node_modules/
+.env
+photocull.yaml
+.photocull/

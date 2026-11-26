@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "photocull"
+version = "0.1.0"
+description = "Local photo and video culling with a separate indexing worker"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+  "defusedxml>=0.7.1",
+  "fastapi>=0.120",
+  "python-dotenv>=1.1",
+  "pyyaml>=6.0.2",
+  "uvicorn>=0.35",
+]
+
+[project.optional-dependencies]
+worker = [
+  "pillow>=12",
+  "pillow-heif>=1.1",
+  "pyexiv2>=2.15",
+  "rawpy>=0.25",
+]
+ml = []
+
+[dependency-groups]
+dev = ["httpx>=0.28", "pytest>=8", "ruff>=0.13"]
+
+[project.scripts]
+photocull = "photocull.cli:main"
+photocull-api = "photocull.api:main"
+photocull-worker = "photocull.worker:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
