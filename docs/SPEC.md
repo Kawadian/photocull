@@ -106,7 +106,9 @@ EXIF:
 
 - The worker adds a resumable `score` stage for still images with previews. It stores normalized Laplacian sharpness, mean luminance, clipped highlights and clipped shadows. Thresholds set reversible auto-reject flags with reasons. Ratings and explicit sidecar export are independent.
 - Burst grouping uses EXIF capture times and 64-bit dHash, with configurable time and Hamming-distance thresholds. The catalog stores membership, a score-based recommendation and the user's best selection across regrouping.
-- The API supports cursor-paginated score and burst filters, flag dismissal, best selection and atomic burst reject/undo. The review UI shows scores, offers side-by-side burst comparison and retains the Phase 1 shortcuts. See the [configuration and sizing guide](../README.md#scores-and-bursts).
+- The API supports cursor-paginated score and burst filters, flag dismissal, best selection and atomic burst reject/undo. The review UI shows scores, offers side-by-side burst comparison and has shortcuts for navigating bursts, selecting the best shot, confirming rejects and undoing a batch. See the [configuration and sizing guide](../README.md#scores-and-bursts).
+- Grouping reads the capture-time index in order and compares only active anchors within the time window. Persist changed capture times with job results and update the time-connected ranges after indexing. Rebuild the full catalog when grouping settings change. Keep SQL filters bound to values and use cursor indexes for asset, folder/day and burst member lists.
+- Validate browse latency with 50,000–100,000 synthetic catalog rows and target p95 under 200 ms. Preview decoding is a separate CPU and storage cost. See the [benchmark commands and measurements](../README.md#catalog-performance).
 
 **Phase 3:**
 
@@ -138,8 +140,8 @@ Home deploy will be handled by a separate Cursor agent on the files-worker (CT 2
 - `pytest` for walk rules (`.hif`, skip `edit/`, symlink jail), EXIF log-level behavior, XMP sidecar write/update (temp dirs, Unicode names), job resume (interrupt mid-stage, restart, no double work), API does not import ML, SQLite writer concurrency (API rating + worker job update must not raise `database is locked`).
 - `ruff check` (and format if you add it).
 - Frontend: `lint` + `build` (strict TS).
-- Optional Playwright smoke: API + UI against a tiny fixture library, **no ML weights**.
-- GitHub Actions: lint + unit tests + frontend build on `ubuntu-latest` for every PR/push to `main`. Do not download multi-GB models in CI. Add ffmpeg only if video tests need it.
+- Playwright smoke runs the API and worker against generated still images. It covers keyboard review, reversible flags, errors and a 375 px layout.
+- GitHub Actions runs lint, unit tests, a small catalog benchmark, frontend build and Chromium smoke on `ubuntu-latest` for PRs and pushes to `main`. The Python tests use FFmpeg for video fixtures.
 
 ## Repo layout (suggested)
 

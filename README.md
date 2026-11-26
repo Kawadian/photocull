@@ -58,6 +58,11 @@ Photocull scans DNG, ARW and common RAW formats, HEIF/HEIC/HIF, JPEG, PNG, WebP,
 | `X` / `0` | Reject / clear rating and reject flag |
 | `U` or `Ctrl/⌘+Z` | Undo the most recent rating change in this library view |
 | `Z` | Toggle fit and 100% |
+| `[` / `]` | Previous / next burst, including across pages |
+| `B` | Set the current photo as best in its burst |
+| `R` | Open the burst reject confirmation |
+| `Shift+U` | Undo the most recent burst rejection in this library view |
+| `?` | Open keyboard shortcuts |
 
 Ratings are saved in SQLite. **Write XMP…** shows the destination and rating before making any change. You can also preview or write selected asset IDs from the CLI:
 
@@ -76,7 +81,7 @@ For a proprietary RAW file such as ARW, select it in Lightroom Classic and use *
 - **Clear auto-reject** dismisses one flag. **Clear all auto-rejects…** dismisses current flags across the library. Dismissals persist when a photo is rescored or thresholds change. Ratings and XMP export use the manual review controls.
 - **Bursts** lists groups of similar photos taken close together. Filters find bursts with at least one matching member. Open a burst to see all its members, use **Compare with best** for a side-by-side view and **Set as best** to choose a different keeper. **Reject rest…** confirms and flags the others in one action. **Undo burst reject** restores only the flags changed by that action.
 
-The worker scores still-image previews using grayscale luminance and Laplacian variance on a resampled image of up to 512 pixels per side. The 64-bit dHash is compared by Hamming distance. A member must be within both thresholds of its burst's first photo. Burst membership requires an EXIF capture time. Capture subseconds are used when available in the indexed metadata. The best recommendation balances sharpness (60%), distance from mid-gray exposure (25%) and unclipped pixels (15%). A manually selected best follows its photo when groups are recalculated.
+The worker scores still-image previews using grayscale luminance and Laplacian variance on a resampled image of up to 512 pixels per side. This includes RAW previews. The inspector shows queued, running, skipped and failed scoring states. Videos have poster previews and duration. The 64-bit dHash is compared by Hamming distance. A member must be within both thresholds of its burst's first photo. Burst membership requires an EXIF capture time. Capture subseconds are used when available in the indexed metadata. The best recommendation balances sharpness (60%), distance from mid-gray exposure (25%) and unclipped pixels (15%). A manually selected best follows its photo when groups are recalculated.
 
 | Worker environment variable | YAML key | Default |
 | --- | --- | --- |
@@ -93,6 +98,26 @@ Scoring thresholds are inclusive bounds from 0 to 1. Set minimums to 0 and maxim
 Upgrading from Phase 1 schedules one score job per active still image through `0004_scores_and_bursts.sql`. Ensure `score` is in the worker's stage list if you previously set it explicitly. Scoring reads cached previews and adds one compact score row per photo plus membership rows for grouped photos. Allow CPU time and preview reads for the initial backfill. A 512 × 512 float analysis plane occupies 1 MiB, with additional temporary arrays and a decoded preview per worker task. The default worker parallelism of 1 and 1536 MiB restart threshold also cover media decoding. The API uses the existing 500 MiB deployment budget and queries SQLite for results.
 
 The asset and burst lists use integer cursors and accept `min_sharpness`, `min_exposure`, `max_exposure` and `auto_reject`. Pass `burst_id` to the asset list to page through a burst. The OpenAPI schema lists the burst selection, reject, undo and flag-clearing endpoints.
+
+### Catalog performance
+
+`0005_incremental_bursts.sql` adds a durable queue of affected capture times. The worker walks the capture-time index and compares hashes only against anchors in the active window. Dense windows use a hash-band index for distance thresholds up to 12, with exact Hamming comparisons on the resulting candidates. Edits, additions and removals rebuild the affected ranges. A capture gap larger than the window limits how far a change can propagate. Initial indexing, grouping setting changes and batches with at least 2,048 changed capture times use a full pass.
+
+The benchmark inserts synthetic SQLite rows with five photos per burst, then measures requests through FastAPI with 100 results per page and 40 samples per case. The figures below use a Ryzen 5 5500U and SQLite 3.54.1 with the default grouping settings. They cover catalog and grouping work on one process. Preview generation, network latency and simultaneous clients add their own costs.
+
+| Assets | Highest browse p95 across nine cases | Full grouping | One-photo incremental update | SQLite catalog |
+| ---: | ---: | ---: | ---: | ---: |
+| 50,000 | 16.5 ms | 0.80 s | 1.07 ms | 40.7 MiB |
+| 100,000 | 29.0 ms | 2.59 s | 2.36 ms | 82.3 MiB |
+
+SQLite uses the active asset ID, folder/day and burst membership indexes for keyset pagination. Selective filters can still visit the remaining IDs to find enough matches. Keep the database, WAL and SQLite temporary files on local writable storage. Generated previews and thumbnails are stored separately and require additional space.
+
+```sh
+uv run --locked python scripts/benchmark_catalog.py --assets 50000
+uv run --locked python scripts/benchmark_catalog.py --assets 100000
+```
+
+The script prints p50, p95 and `EXPLAIN QUERY PLAN` for each case, including filters with zero matches. It exits with an error if any p95 reaches 200 ms.
 
 ## SQLite and service health
 
@@ -151,9 +176,11 @@ uv run --locked --extra worker pytest
 npm --prefix frontend ci
 npm --prefix frontend run lint
 npm --prefix frontend run build
+uv run --locked python scripts/benchmark_catalog.py --assets 2000 --requests 8
+(cd frontend && npx playwright install --with-deps --only-shell chromium && npm run test:e2e)
 ```
 
-[GitHub Actions](.github/workflows/ci.yml) runs these checks for pull requests and pushes to `main`, including API tests in an environment with the base package and no worker decoders. The [specification](docs/SPEC.md) describes later phases.
+[GitHub Actions](.github/workflows/ci.yml) runs these checks for pull requests and pushes to `main`, including API tests with the base package. Playwright starts the API and worker with a temporary synthetic library and exercises keyboard review, filter and error states, and the 375 px layout. The [specification](docs/SPEC.md) describes later phases.
 
 ## 日本語
 
@@ -164,5 +191,7 @@ Photocull は、LAN または Tailscale 内で写真・動画を選別するた�
 3. `photocull-api` と `photocull-worker` を別々に起動し、`http://127.0.0.1:8000` で **Scan library** を実行します。
 
 左右の矢印キーで移動、`1`〜`5` で評価、`X` で除外、`0` で評価を解除、`U` で直前の評価操作を取り消せます。**Write XMP…** で出力先と評価を確認してから、元ファイルの隣に `STEM.xmp` を書き込みます。元ファイルは変更しません。除外は Photocull 内ではフラグとして保持し、XMP には星 1 として出力します。
+
+**Bursts** では `[` と `]` でバースト間を移動し、`B` でベストを選択、`R` で一括除外の確認、`Shift+U` で一括除外を取り消せます。`?` でショートカット一覧を開けます。自動除外フラグは [スコアとバーストの設定](#scores-and-bursts) から調整できます。
 
 Docker Compose と systemd の設定例は [deploy](deploy/) を参照してください。nginx の許可リストで LAN・Tailscale・ループバックからの接続に制限します。
