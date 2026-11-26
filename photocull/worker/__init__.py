@@ -147,7 +147,8 @@ class LibraryWorker:
                     f"UPDATE assets SET {setters} WHERE id = ?", (*values.values(), job.asset_id)
                 )
             self.db.execute(
-                "UPDATE jobs SET status = ?, error = ? WHERE asset_id = ? AND stage = ?",
+                """UPDATE jobs SET status = ?, error = NULLIF(?, ''), interruptions = 0
+                   WHERE asset_id = ? AND stage = ?""",
                 ("error" if error else "done", error, job.asset_id, job.stage),
             )
             mark_catalog_updated(self.db)
@@ -174,6 +175,7 @@ class LibraryWorker:
 
 
 def run(settings: Settings, stop: Event) -> int:
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
     if not settings.libraries:
         LOG.info("No libraries configured")
     try:

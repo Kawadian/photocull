@@ -47,7 +47,15 @@ def claim_scan(db: sqlite3.Connection) -> int | None:
 def recover(db: sqlite3.Connection) -> None:
     with write(db):
         db.execute("UPDATE scan_requests SET status = 'pending' WHERE status = 'running'")
-        db.execute("UPDATE jobs SET status = 'pending' WHERE status = 'running'")
+        db.execute("""
+            UPDATE jobs SET
+                interruptions = interruptions + 1,
+                status = CASE WHEN interruptions >= 2 THEN 'error' ELSE 'pending' END,
+                error = CASE WHEN interruptions >= 2
+                    THEN 'Worker interrupted this stage three times. Check logs and retry.'
+                    ELSE NULL END
+            WHERE status = 'running'
+            """)
 
 
 def finish_scan(db: sqlite3.Connection, scan_id: int, error: str | None = None) -> None:
@@ -86,7 +94,7 @@ def retry_job(db: sqlite3.Connection, asset_id: int, stage: Stage) -> sqlite3.Ro
         ).fetchone()
         if job and job["status"] in {"done", "error"}:
             job = db.execute(
-                """UPDATE jobs SET status = 'pending', error = NULL
+                """UPDATE jobs SET status = 'pending', error = NULL, interruptions = 0
                    WHERE asset_id = ? AND stage = ? RETURNING *""",
                 (asset_id, stage),
             ).fetchone()

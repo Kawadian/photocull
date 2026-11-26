@@ -114,3 +114,30 @@ def test_worker_stage_configuration_requeues_only_disabled_jobs(tmp_path):
         worker.configure()
         run_queue(worker, pool)
         assert progress(db)["stages"] == {"exif": {"done": 1}, "preview": {"done": 1}}
+
+
+def test_repeated_interruption_releases_queue_for_other_jobs(tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    write_photo(root / "a.jpg", "red")
+    write_photo(root / "b.jpg", "blue")
+    state = tmp_path / "state"
+    library = Library(root=root)
+    settings = Settings(state_dir=state, worker=WorkerSettings(stages=("preview",)))
+    path = state / "index.db"
+    initialize(path)
+    with connect(path) as db, ThreadPoolExecutor(1) as pool:
+        request_scan(db)
+        worker = LibraryWorker(db, library, state, settings, lambda: None)
+        while worker.step_scan():
+            pass
+        for _ in range(3):
+            assert claim_jobs(db, 1)[0].asset_id == 1
+            recover(db)
+        run_queue(worker, pool)
+        assert progress(db)["stages"]["preview"] == {"error": 1, "done": 1}
+        failed = db.execute("SELECT error FROM jobs WHERE asset_id = 1 AND stage = 'preview'")
+        assert "interrupted this stage three times" in failed.fetchone()["error"]
+        retry_job(db, 1, "preview")
+        run_queue(worker, pool)
+        assert progress(db)["stages"]["preview"] == {"done": 2}

@@ -65,7 +65,7 @@ def _record(
                     VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT (asset_id, stage) DO UPDATE SET
                         content_hash = excluded.content_hash, status = excluded.status,
-                        error = excluded.error, attempts = 0
+                        error = excluded.error, attempts = 0, interruptions = 0
                     WHERE jobs.content_hash <> excluded.content_hash
                     RETURNING asset_id
                     """,

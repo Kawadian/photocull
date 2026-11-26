@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 
 from photocull.db import BUSY_TIMEOUT_MS, connect, initialize, write
+from photocull.db.catalog import set_rating
 
 
 def test_database_migrations_and_writer_concurrency(tmp_path):
@@ -24,9 +25,9 @@ def test_database_migrations_and_writer_concurrency(tmp_path):
 
     def ratings():
         with connect(path) as db:
-            for _ in range(100):
-                with write(db):
-                    db.execute("UPDATE assets SET rating = 5, revision = revision + 1")
+            for revision in range(100):
+                result = set_rating(db, 1, 4 + revision % 2, False, revision)
+                assert result["revision"] == revision + 1
 
     def jobs():
         with connect(path) as db:
