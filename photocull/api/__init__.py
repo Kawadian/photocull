@@ -1,0 +1,249 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+from secrets import compare_digest
+from typing import Annotated, Literal
+
+import uvicorn
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, model_validator
+
+from photocull.config import Settings, Stage, load_settings
+from photocull.db import connect, initialize
+from photocull.db.catalog import ASSET_COLUMNS, ASSET_JOINS, RatingConflict, asset_json, get_asset
+from photocull.db.catalog import set_rating as save_rating
+from photocull.db.jobs import progress, request_scan, retry_job
+from photocull.media.cache import cache_path
+
+TOKEN_HEADER = "x-photocull-token"
+VARIANTS = {"thumb": "thumbs", "preview": "previews", "detail": "details"}
+Limit = Annotated[int, Query(ge=1, le=200)]
+
+
+class RatingUpdate(BaseModel):
+    rating: int = Field(ge=0, le=5)
+    rejected: bool = False
+    expected_revision: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def reject_with_rating(self) -> RatingUpdate:
+        if self.rejected and self.rating:
+            raise ValueError("Set rating to 0 when rejecting an asset")
+        return self
+
+
+def _get_progress(path: Path) -> dict:
+    with connect(path) as db:
+        return progress(db)
+
+
+async def _events(path: Path) -> AsyncIterator[str]:
+    last = ""
+    sent = time.monotonic()
+    while True:
+        payload = json.dumps(await asyncio.to_thread(_get_progress, path))
+        if payload != last:
+            yield f"data: {payload}\n\n"
+            last, sent = payload, time.monotonic()
+        elif time.monotonic() - sent >= 10:
+            yield ": keepalive\n\n"
+            sent = time.monotonic()
+        await asyncio.sleep(1)
+
+
+def _rss_mb() -> float:
+    resident_pages = int(Path("/proc/self/statm").read_text().split()[1])
+    return round(resident_pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024), 1)
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings or load_settings()
+    token: bytes | None = None
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        nonlocal token
+        if settings.token_file:
+            if not (value := settings.token_file.read_bytes().strip()) or any(
+                not 33 <= char <= 126 for char in value
+            ):
+                raise ValueError("Token file must contain a nonempty printable ASCII token")
+            token = value
+        for name in settings.libraries:
+            initialize(settings.library_state(name) / "index.db")
+        yield
+
+    app = FastAPI(title="Photocull", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app.state.settings = settings
+
+    def library_path(library: str) -> Path:
+        if library not in settings.libraries:
+            raise HTTPException(404, "Unknown library")
+        return settings.library_state(library) / "index.db"
+
+    @app.middleware("http")
+    async def access(request: Request, call_next):
+        if token is not None and not compare_digest(
+            request.headers.get(TOKEN_HEADER, "").encode("latin-1"), token
+        ):
+            return JSONResponse({"detail": "Photocull token required"}, status_code=401)
+        if request.method in {"POST", "PATCH", "PUT", "DELETE"}:
+            origin = request.headers.get("origin")
+            host = request.headers.get("host", "").lower()
+            cross_origin = origin and origin.lower() not in {f"http://{host}", f"https://{host}"}
+            if cross_origin or request.headers.get("sec-fetch-site") == "cross-site":
+                return JSONResponse({"detail": "Cross-origin request rejected"}, status_code=403)
+        return await call_next(request)
+
+    @app.get("/api/health")
+    def health():
+        libraries = {}
+        now = time.time()
+        for name in settings.libraries:
+            details = _get_progress(library_path(name))
+            heartbeat = details["worker"]
+            details["worker_online"] = bool(heartbeat and now - heartbeat["heartbeat"] < 30)
+            libraries[name] = details
+        return {"status": "ok", "rss_mb": _rss_mb(), "libraries": libraries}
+
+    @app.get("/api/libraries")
+    def libraries():
+        return {"items": [{"name": name} for name in settings.libraries]}
+
+    @app.get("/api/libraries/{library}/groups")
+    def groups(
+        library: str,
+        by: Literal["folder", "day"] = "folder",
+        cursor: str | None = None,
+        limit: Limit = 100,
+    ):
+        clause = f"AND {by} > ?" if cursor is not None else ""
+        params = (cursor, limit + 1) if cursor is not None else (limit + 1,)
+        with connect(library_path(library)) as db:
+            rows = db.execute(
+                f"""SELECT {by} AS name, count(*) AS count FROM assets
+                    WHERE active = 1 {clause} GROUP BY {by} ORDER BY {by} LIMIT ?""",
+                params,
+            ).fetchall()
+        return {
+            "items": [dict(row) for row in rows[:limit]],
+            "next_cursor": rows[limit - 1]["name"] if len(rows) > limit else None,
+        }
+
+    @app.get("/api/libraries/{library}/assets")
+    def assets(
+        library: str,
+        cursor: Annotated[int, Query(ge=0)] = 0,
+        limit: Limit = 100,
+        folder: str | None = None,
+        day: str | None = None,
+    ):
+        filters = ["a.active = 1", "a.id > ?"]
+        params: list[str | int] = [cursor]
+        for field, value in (("folder", folder), ("day", day)):
+            if value is not None:
+                filters.append(f"a.{field} = ?")
+                params.append(value)
+        params.append(limit + 1)
+        with connect(library_path(library)) as db:
+            items = db.execute(
+                f"""SELECT {ASSET_COLUMNS} {ASSET_JOINS}
+                    WHERE {" AND ".join(filters)} ORDER BY a.id LIMIT ?""",
+                params,
+            ).fetchall()
+        return {
+            "items": [asset_json(row) for row in items[:limit]],
+            "next_cursor": items[limit - 1]["id"] if len(items) > limit else None,
+        }
+
+    @app.get("/api/libraries/{library}/assets/{asset_id}")
+    def asset(library: str, asset_id: int):
+        with connect(library_path(library)) as db:
+            row = get_asset(db, asset_id)
+            if row is None:
+                raise HTTPException(404, "Unknown asset")
+            return asset_json(row)
+
+    @app.patch("/api/libraries/{library}/assets/{asset_id}/rating")
+    def set_rating(library: str, asset_id: int, update: RatingUpdate):
+        with connect(library_path(library)) as db:
+            try:
+                rating = save_rating(db, asset_id, **update.model_dump())
+            except RatingConflict as error:
+                raise HTTPException(409, str(error)) from error
+            if rating is None:
+                raise HTTPException(404, "Unknown asset")
+            return rating
+
+    @app.get("/api/libraries/{library}/assets/{asset_id}/media/{variant}")
+    def media(library: str, asset_id: int, variant: Literal["thumb", "preview", "detail"]):
+        db_path = library_path(library)
+        with connect(db_path) as db:
+            row = get_asset(db, asset_id)
+            if row is None or row["preview_status"] != "done":
+                raise HTTPException(404, "Preview unavailable")
+        target = cache_path(db_path.parent, VARIANTS[variant], asset_id, row["content_hash"])
+        if variant == "detail" and not target.is_file():
+            target = cache_path(db_path.parent, "previews", asset_id, row["content_hash"])
+        if not target.is_file():
+            raise HTTPException(404, "Preview unavailable")
+        return FileResponse(
+            target, media_type="image/jpeg", headers={"Cache-Control": "private, no-cache"}
+        )
+
+    @app.post("/api/libraries/{library}/scans", status_code=202)
+    def enqueue_scan(library: str):
+        with connect(library_path(library)) as db:
+            return dict(request_scan(db))
+
+    @app.get("/api/libraries/{library}/jobs")
+    def job_progress(library: str):
+        return _get_progress(library_path(library))
+
+    @app.post("/api/libraries/{library}/assets/{asset_id}/jobs/{stage}", status_code=202)
+    def rerun(library: str, asset_id: int, stage: Stage):
+        path = library_path(library)
+        if stage not in settings.worker.stages:
+            raise HTTPException(409, "Stage disabled by worker settings")
+        with connect(path) as db:
+            job = retry_job(db, asset_id, stage)
+        if job is None:
+            raise HTTPException(404, "Unknown asset or stage")
+        if job["status"] == "skipped":
+            raise HTTPException(409, job["error"])
+        return dict(job)
+
+    @app.get("/api/libraries/{library}/events")
+    async def events(library: str):
+        return StreamingResponse(
+            _events(library_path(library)),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.get("/", include_in_schema=False)
+    def frontend():
+        index = settings.static_dir / "index.html"
+        if not index.is_file():
+            raise HTTPException(503, "Frontend build unavailable. Build frontend/dist first.")
+        return FileResponse(index, headers={"Cache-Control": "no-cache"})
+
+    if (settings.static_dir / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=settings.static_dir / "assets"), name="frontend")
+    return app
+
+
+app = create_app()
+
+
+def main() -> None:
+    settings = app.state.settings
+    uvicorn.run(app, host=settings.bind_host, port=settings.bind_port, proxy_headers=False)
