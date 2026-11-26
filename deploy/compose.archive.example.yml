@@ -1,0 +1,39 @@
+# Copy these examples into a local Compose override and match the YAML settings.
+# Run with -f docker-compose.yml -f deploy/compose.archive.example.yml.
+x-archive-environment: &archive-environment
+  PHOTOCULL_WRITE_ROOTS:
+  PHOTOCULL_ARCHIVE_THREADS:
+  PHOTOCULL_ARCHIVE_PARALLELISM:
+  PHOTOCULL_ARCHIVE_MEMORY_MB:
+  PHOTOCULL_ARCHIVE_TIMEOUT_SECONDS:
+  PHOTOCULL_ARCHIVE_RETENTION_DAYS:
+
+services:
+  api:
+    environment: *archive-environment
+    volumes:
+      - type: bind
+        source: ${PHOTOCULL_ARCHIVE_EXPORT_HOST_DIR:-./.photocull/archive-exports}
+        target: /srv/photocull-archive
+        read_only: true
+        bind:
+          create_host_path: false
+      # For a separate trash mount, bind it read-only here at the worker's path.
+  worker:
+    environment: *archive-environment
+    volumes:
+      - type: bind
+        source: ${PHOTOCULL_ARCHIVE_EXPORT_HOST_DIR:-./.photocull/archive-exports}
+        target: /srv/photocull-archive
+        bind:
+          create_host_path: false
+      # For destructive operations, uncomment and set PHOTOCULL_WRITE_ROOTS
+      # to /mnt/PhotoLibrary/ArchiveCandidate in both services. Leave the
+      # rest of /mnt/PhotoLibrary mounted read-only in the worker.
+      # - type: bind
+      #   source: ${PHOTOCULL_LIBRARY_DIR:-/mnt/PhotoLibrary}/ArchiveCandidate
+      #   target: /mnt/PhotoLibrary/ArchiveCandidate
+      #   bind:
+      #     create_host_path: false
+      # For a cross-device trash, explicitly mount its writable parent here,
+      # add that parent to PHOTOCULL_WRITE_ROOTS, and use archive.trash_roots.

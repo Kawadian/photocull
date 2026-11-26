@@ -15,3 +15,5 @@ photocull/**/__pycache__/
 !frontend/vite.config.ts
 !frontend/src/
 !frontend/src/**
+!scripts/
+!scripts/install_dnglab.sh

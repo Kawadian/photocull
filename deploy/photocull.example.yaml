@@ -59,3 +59,15 @@ worker:
 #   threads: 2
 #   export_roots:
 #     archive: /srv/photocull-exports
+#
+# archive:
+#   export_roots:
+#     photos: /srv/photocull-archive
+#   # write_roots: [/mnt/PhotoLibrary/ArchiveCandidate]
+#   # trash_roots:
+#   #   photos: /mnt/PhotoLibrary/ArchiveCandidate/.photocull-trash
+#   retention_days: 0
+#   parallelism: 1
+#   threads: 2
+#   memory_mb: 1536
+#   timeout_seconds: 86400

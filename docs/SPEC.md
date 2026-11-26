@@ -6,7 +6,7 @@ Public rewrite of [Selects](https://github.com/bihanikeshav/selects) v0.1.21 as 
 - CT 205 push URL (after the write deploy key is registered): `git@github-photocull:Kawadian/photocull.git`
 - This is a **new codebase**, not a fork. Use Selects as a feature/reference source only; do not copy its tree wholesale.
 - Do not publish to the internet. Do not put secrets, tokens, or webhook URLs in the repo.
-- Never delete, move, or overwrite the user's original photos.
+- Preserve the user's originals by default. Phase 5 permits only explicitly scoped and confirmed changes via the archive worker. [Archive safeguards](ARCHIVE.md)
 
 ## Why rewrite
 

@@ -33,7 +33,7 @@ Environment variables override `.env`, which overrides YAML. Photocull loads `./
 
 - **Direct scan** uses a root such as `/mnt/PhotoLibrary` with a separate writable state directory.
 - **Symlink library** uses a view such as `/srv/photocull-view` whose directories link into explicitly configured `allowed_roots`. The walker verifies resolved paths. Symlink targets outside those roots and directory cycles are skipped.
-- The walker skips `edit`, `.git`, `__pycache__`, `node_modules`, `.photocull`, and the configured state directory at any depth. The named exclusions are case-insensitive.
+- The walker skips `edit`, `.git`, `__pycache__`, `node_modules`, `.photocull`, and the configured state directory at any depth. Archive trash and private staging folders are also excluded. The named exclusions are case-insensitive.
 
 The [YAML example](deploy/photocull.example.yaml) shows both layouts, and [.env.example](.env.example) shows the environment settings. Use `PHOTOCULL_LIBRARY_ROOT` and `PHOTOCULL_LIBRARY_NAME` to configure a single library by environment, with extra jail roots in `PHOTOCULL_ALLOWED_ROOTS` separated by `:` on Linux. YAML supports multiple libraries.
 
@@ -47,7 +47,11 @@ The [YAML example](deploy/photocull.example.yaml) shows both layouts, and [.env.
 | `PHOTOCULL_WORKER_BATCH_SIZE`, `PHOTOCULL_WORKER_PARALLELISM` | `8` assets per scan transaction and `1` decoding task at a time |
 | `PHOTOCULL_WORKER_STAGES`, `PHOTOCULL_WORKER_DEVICE` | `exif,preview,score` and `cpu` |
 
-Photocull scans DNG, ARW and common RAW formats, HEIF/HEIC/HIF, JPEG, PNG, WebP, TIFF, and MP4/MOV/M4V/MKV. RAW previews prefer an embedded JPEG and fall back to a half-size demosaic. Videos display a poster and duration. Capture day uses the best available EXIF timestamp and falls back to the file modification day in UTC. A **100%** view displays decoded pixels at their natural size. If an image exceeds the fit preview limit, **100%** opens a native-size center crop.
+Photocull scans DNG, ARW and common RAW formats, HEIF/HEIC/HIF, AVIF, JPEG, PNG, WebP, TIFF, and MP4/MOV/M4V/MKV. RAW previews prefer an embedded JPEG and fall back to a half-size demosaic. Videos display a poster and duration. Capture day uses the best available EXIF timestamp and falls back to the file modification day in UTC. A **100%** view displays decoded pixels at their natural size. If an image exceeds the fit preview limit, **100%** opens a native-size center crop.
+
+## Archive and storage
+
+The **Archive** view plans lossless RAW/DNG conversion, HEVC/AV1 video reduction, JPEG/HEIC/AVIF conversion, selected-file copy, and batch rename. It also shows duplicate groups and storage by year, folder, format and camera. Jobs default to separate exports. Confirmed replacement and deletion require explicit write roots and use verified staging, recoverable trash and an append-only audit. The CLI uses the same preview and confirmation contract. [Archive guide](docs/ARCHIVE.md)
 
 ## Review and write XMP
 

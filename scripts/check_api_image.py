@@ -42,6 +42,7 @@ app = create_app(
     )
 )
 assert any(route.path.endswith("/search") for route in app.routes)
+assert any(route.path.endswith("/archive/preview") for route in app.routes)
 assert not any(name.startswith("photocull.worker") for name in sys.modules)
 assert set(FORBIDDEN).isdisjoint(name.split(".")[0] for name in sys.modules)
 assert Path("frontend/dist/index.html").is_file()

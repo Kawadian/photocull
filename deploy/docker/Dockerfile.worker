@@ -8,12 +8,20 @@ COPY photocull ./photocull
 ARG PHOTOCULL_WORKER_EXTRA=insights
 RUN uv sync --locked --no-dev --no-editable --no-cache --extra "$PHOTOCULL_WORKER_EXTRA"
 
+FROM python:3.12-slim-bookworm AS dnglab
+COPY scripts/install_dnglab.sh /tmp/install_dnglab.sh
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && /tmp/install_dnglab.sh
+
 FROM python:3.12-slim-bookworm
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg libgomp1 \
+    && apt-get install -y --no-install-recommends ffmpeg libgomp1 libimage-exiftool-perl util-linux \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/photocull
 ENV PATH="/opt/venv/bin:${PATH}" PYTHONUNBUFFERED=1
 COPY --from=dependencies /opt/venv /opt/venv
+COPY --from=dnglab /usr/bin/dnglab /usr/local/bin/dnglab
+COPY --from=dnglab /usr/share/doc/dnglab /usr/share/doc/dnglab
 USER 1000:1000
 CMD ["photocull-worker"]

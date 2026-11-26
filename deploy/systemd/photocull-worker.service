@@ -25,6 +25,10 @@ MemoryMax=2G
 # Prefetch models as the service user before running with PrivateNetwork.
 # For directory exports, add ReadWritePaths=/srv/photocull-exports to the drop-in
 # and set the same destination under insights.export_roots in shared YAML.
+# For Archive, add ReadWritePaths for the separate archive export directory.
+# For destructive Archive jobs, also add only the subtrees listed in
+# PHOTOCULL_WRITE_ROOTS and any explicitly configured trash parent.
+# Match per-child archive.memory_mb and archive.parallelism to MemoryMax.
 NoNewPrivileges=yes
 PrivateNetwork=yes
 PrivateTmp=yes
