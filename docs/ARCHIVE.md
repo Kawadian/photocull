@@ -75,10 +75,13 @@ An example for RAW captures from 2018 through 2024. Run the same request and use
 
 ```sh
 photocull archive photos preview plan.json
-photocull archive photos apply plan.json --confirmation <digest> --yes
-photocull archive photos jobs [job-id]
-photocull archive photos cancel <job-id>
-photocull archive photos recover <job-id>
+confirmation='paste-the-preview-digest-here'
+photocull archive photos apply plan.json --confirmation "$confirmation" --yes
+photocull archive photos jobs
+job_id='paste-the-job-id-here'
+photocull archive photos jobs "$job_id"
+photocull archive photos cancel "$job_id"
+photocull archive photos recover "$job_id"
 photocull archive photos trash
 photocull archive photos audit --after 0
 photocull archive photos storage --by camera
@@ -93,11 +96,11 @@ Use `{"operation":"restore","trash_ids":["<trash-id>"],"collision":"rename"}` fo
 
 | Tool | Reason and license | Runtime sizes |
 | --- | --- | --- |
-| DNGLab 0.8.0 | Native Linux CLI, lossless JPEG-compressed DNG and RAW sample checksums. LGPL-2.1. | Upstream amd64 deb 3.11 MiB; 12.56 MiB installed. |
+| DNGLab 0.8.0 | Native Linux CLI, lossless JPEG-compressed DNG and RAW sample checksums. LGPL-2.1. | Upstream amd64 deb 3.11 MiB, with 12.56 MiB installed. |
 | FFmpeg with x265 and libaom | CPU-only HEVC/AV1 and portable probing. FFmpeg with GPL components is GPL-2.0-or-later, x265 is GPL-2.0, libaom is BSD-2-Clause with the AOMedia patent license. | Already a worker dependency. On the validation CT, FFmpeg package 2.72 MiB, libx265 16.37 MiB, libaom 5.30 MiB installed, excluding other libraries. |
 | ExifTool | Structured transfer and verification of EXIF, GPS, XMP, IPTC and ICC. GPL-1.0-or-later or Artistic-1.0, on the same terms as Perl. | `libimage-exiftool-perl` 27.52 MiB installed on the validation CT. |
-| Pillow and pillow-heif | Reuse locked worker wheels for stills. Pillow MIT-CMU and pillow-heif BSD-3-Clause; bundled libavif BSD-2-Clause, libheif LGPL-3.0 and x265 GPL-2.0. | On x86-64, approximately 4.7 MiB for libavif, 2.9 MiB for libheif and 21.8 MiB for its x265 library. These wheels were already worker dependencies. |
-| util-linux `ionice` | Idle I/O class when supported. Distribution package has multiple licenses; `ionice` is GPL-2.0-or-later. | Included in the Debian base installation. |
+| Pillow and pillow-heif | Reuse locked worker wheels for stills. Pillow MIT-CMU and pillow-heif BSD-3-Clause. Bundled libavif BSD-2-Clause, libheif LGPL-3.0 and x265 GPL-2.0. | On x86-64, approximately 4.7 MiB for libavif, 2.9 MiB for libheif and 21.8 MiB for its x265 library. These wheels were already worker dependencies. |
+| util-linux `ionice` | Idle I/O class when supported. The `ionice` component of the distribution package is GPL-2.0-or-later. | Included in the Debian base installation. |
 
 Tool sources and terms are available upstream. [DNGLab license](https://github.com/dnglab/dnglab/blob/v0.8.0/LICENSE) · [FFmpeg licensing](https://ffmpeg.org/legal.html) · [x265 licensing](https://x265.readthedocs.io/en/2.7/introduction.html) · [libaom license](https://aomedia.googlesource.com/aom/+/refs/heads/main/LICENSE) · [ExifTool](https://exiftool.org/) · [Bundled HEIF terms](https://github.com/bigcat88/pillow_heif/blob/master/LICENSES_bundled.txt) · [libavif license](https://github.com/AOMediaCodec/libavif/blob/main/LICENSE)
 
@@ -117,7 +120,7 @@ The worker verifies original catalog identity, rechecks the confirmed selection 
 
 One confirmed archive job can be active per library. Cancellation stops uncommitted work and allows an already journaled item to reach its recorded end state. Restart replays the durable per-item journal, checking hashes and file identities. An item with a new conflict stops in **recovery**. Inspect the affected names and audit entries, resolve the external conflict and choose **Retry blocked recovery**. Keep the database, private staging directories and trash until the recovery completes. Keep importers and other writers out of the same writable subtree during destructive jobs.
 
-The job records approved actor, reason and time, and append-only audit entries hold before/after SHA-256, byte sizes and trash paths. API actions use the configured local or shared-token principal and the authenticated connection address as observed by the API. A shared proxy credential cannot distinguish individual browser users. CLI actions use the local OS user and UID. SQLite triggers protect append-only records during normal operation; filesystem or database administrators control the underlying storage. Back up the index and keep it with the corresponding trash directories.
+The job records approved actor, reason and time, and append-only audit entries hold before/after SHA-256, byte sizes and trash paths. API actions use the configured local or shared-token principal and the authenticated connection address as observed by the API. A shared proxy credential cannot distinguish individual browser users. CLI actions use the local OS user and UID. SQLite triggers protect append-only records during normal operation. Filesystem or database administrators control the underlying storage. Back up the index and keep it with the corresponding trash directories.
 
 Retention is off by default. Enabling it approves worker-managed purge of expired trash entries. Permanent deletion is ordinary filesystem removal. Snapshots, backups, hard links and storage-provider recycle bins can retain data outside Photocull.
 
