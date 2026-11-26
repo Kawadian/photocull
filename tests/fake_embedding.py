@@ -18,9 +18,19 @@ class FakeEmbedding:
     def text_vectors(self, texts):
         values = []
         for text in texts:
-            if "cat" in text.lower() or "猫" in text:
+            if (
+                "cat" in text.lower()
+                or "猫" in text
+                or any(
+                    phrase in text for phrase in ("aesthetically pleasing", "polished professional")
+                )
+            ):
                 values.append((1, 0, 0))
-            elif "dog" in text.lower() or "犬" in text:
+            elif (
+                "dog" in text.lower()
+                or "犬" in text
+                or any(phrase in text for phrase in ("poorly composed", "unattractive snapshot"))
+            ):
                 values.append((0, 1, 0))
             else:
                 values.append((0, 0, 1))
