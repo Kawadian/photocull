@@ -1,0 +1,82 @@
+x-photocull-config: &config
+  type: bind
+  source: ${PHOTOCULL_CONFIG_FILE:-./deploy/photocull.example.yaml}
+  target: /etc/photocull/photocull.yaml
+  read_only: true
+  bind:
+    create_host_path: false
+
+x-photocull-state: &state
+  type: bind
+  source: ${PHOTOCULL_STATE_HOST_DIR:-./.photocull/state}
+  target: /var/lib/photocull
+  bind:
+    create_host_path: false
+
+x-photocull-library: &library
+  type: bind
+  source: ${PHOTOCULL_LIBRARY_DIR:-/mnt/PhotoLibrary}
+  target: /mnt/PhotoLibrary
+  bind:
+    create_host_path: false
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.api
+    user: "${PHOTOCULL_UID:-1000}:${PHOTOCULL_GID:-1000}"
+    network_mode: host
+    restart: unless-stopped
+    mem_limit: 500m
+    environment:
+      PHOTOCULL_CONFIG: /etc/photocull/photocull.yaml
+      PHOTOCULL_BIND_HOST: 127.0.0.1
+      PHOTOCULL_BIND_PORT: '8000'
+    volumes:
+      - *config
+      - *state
+      - *library
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), timeout=2).close()"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+
+  worker:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.worker
+    user: "${PHOTOCULL_UID:-1000}:${PHOTOCULL_GID:-1000}"
+    network_mode: none
+    restart: unless-stopped
+    stop_grace_period: 90s
+    cpus: 2.0
+    mem_limit: 2g
+    environment:
+      PHOTOCULL_CONFIG: /etc/photocull/photocull.yaml
+      XDG_CACHE_HOME: /models
+    volumes:
+      - *config
+      - *state
+      - <<: *library
+        read_only: true
+      - type: bind
+        source: ${PHOTOCULL_MODELS_DIR:-./.photocull/models}
+        target: /models
+        bind:
+          create_host_path: false
+
+  proxy:
+    image: nginx:stable-alpine
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - api
+    volumes:
+      - type: bind
+        source: ${PHOTOCULL_NGINX_CONFIG:-./deploy/systemd/nginx-photocull.conf}
+        target: /etc/nginx/conf.d/default.conf
+        read_only: true
+        bind:
+          create_host_path: false

@@ -1,0 +1,26 @@
+[Unit]
+Description=Photocull web API and static UI
+After=local-fs.target
+
+[Service]
+Type=simple
+User=photocull
+Group=photocull
+WorkingDirectory=/opt/photocull
+Environment=PHOTOCULL_CONFIG=/etc/photocull/photocull.yaml
+EnvironmentFile=-/etc/photocull/photocull.env
+ExecStart=/opt/photocull/.venv/bin/photocull-api
+Restart=on-failure
+RestartSec=3s
+
+StateDirectory=photocull
+MemoryMax=500M
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+# Writable for sidecars. Match the canonical media roots in the YAML configuration.
+ReadWritePaths=-/mnt/PhotoLibrary
+
+[Install]
+WantedBy=multi-user.target
