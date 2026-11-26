@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import ctypes
+import errno
 import os
 import re
 import shutil
@@ -15,7 +17,8 @@ from photocull.db import write
 from photocull.db.catalog import mark_catalog_updated
 from photocull.db.insights import public_keys
 from photocull.db.stories import segments
-from photocull.db.transfers import ExportRequest, ReportRequest, artifact, select_assets
+from photocull.db.transfers import ExportRequest, ReportRequest, select_assets
+from photocull.media.artifacts import artifact_name, open_regular, transfer_directory
 from photocull.media.cache import cache_path
 from photocull.media.walk import MediaJail, SourceChanged, open_directory, source_key
 
@@ -39,14 +42,34 @@ class Cancelled(Exception):
     pass
 
 
+RENAME_NOREPLACE = 1
+
+
+def rename_output(parent: int, staged: str, name: str) -> None:
+    rename = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+    if rename is None:
+        raise OSError(errno.ENOSYS, "Atomic transfer publication is unavailable")
+    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    rename.restype = ctypes.c_int
+    if rename(parent, os.fsencode(staged), parent, os.fsencode(name), RENAME_NOREPLACE):
+        number = ctypes.get_errno()
+        raise OSError(number, os.strerror(number), name)
+
+
+def identity(info: os.stat_result) -> tuple[int, int]:
+    return info.st_dev, info.st_ino
+
+
 def file_name(asset, *, sidecar=False):
     # A stable ID keeps names unique. Portable filenames also make ZIP extraction safe.
     name = Path(asset["path"]).name
     stem, extension = os.path.splitext(name)
     stem = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", stem).rstrip(". ")
-    while len(stem.encode()) > 180:
-        stem = stem[:-1]
-    return f"{asset['id']}-{stem or 'media'}{'.xmp' if sidecar else extension.lower()}"
+    stem = stem.encode()[:180].decode(errors="ignore")
+    # Preserve supported camera/file extensions. Never copy separators or
+    # control characters from a filesystem name into an archive member.
+    suffix = extension.lower() if re.fullmatch(r"\.[A-Za-z0-9]{1,12}", extension) else ""
+    return f"{asset['id']}-{stem or 'media'}{'.xmp' if sidecar else suffix}"
 
 
 @contextmanager
@@ -95,42 +118,65 @@ class Transfers:
         self.settings = worker.settings
 
     def recover(self):
-        if not self.settings.insights.export and not self.settings.insights.report:
-            return
-        rows = self.db.execute(
+        for job in self.db.execute(
             "SELECT * FROM transfers WHERE status IN ('running','cancelling')"
-        ).fetchall()
-        for job in rows:
+        ).fetchall():
             try:
-                if job["kind"] == "copy":
-                    config = ExportRequest.model_validate_json(job["request"])
-                    with copy_destination(self.settings, config.destination) as root_fd:
-                        # Publication can succeed before the corresponding DB commit.
-                        try:
-                            info = os.stat(job["id"], dir_fd=root_fd, follow_symlinks=False)
-                        except FileNotFoundError:
-                            remove_private(root_fd, f".{job['id']}.part")
-                        else:
-                            if stat.S_ISDIR(info.st_mode):
-                                self.finish(job["id"], "done")
-                                continue
-                            raise ValueError("Copy destination has a conflicting entry")
-                else:
-                    target = artifact(self.state, job["id"], job["kind"])
-                    if target.is_file():
-                        self.finish(job["id"], "done")
-                        continue
-                    target.with_suffix(".part").unlink(missing_ok=True)
-                if job["status"] == "cancelling":
-                    self.finish(job["id"], "cancelled")
-                elif job["attempts"] >= 3:
-                    self.finish(job["id"], "error", "Worker interrupted this transfer three times")
-                else:
+                name = artifact_name(job["id"], job["kind"])
+                if self.recover_output(job, name):
+                    self.finish(job["id"], "done")
+                    continue
+                # A cancel request may arrive from the API during recovery. Decide
+                # its outcome and reset the attempt in the same write transaction.
+                with write(self.db):
                     self.db.execute(
-                        "UPDATE transfers SET status='pending' WHERE id=?", (job["id"],)
+                        """UPDATE transfers SET output_device = NULL, output_inode = NULL,
+                           status = CASE WHEN status='cancelling' THEN 'cancelled'
+                                         WHEN attempts>=3 THEN 'error' ELSE 'pending' END,
+                           finished_at = CASE WHEN status='cancelling' OR attempts>=3 THEN ? END,
+                           error = CASE WHEN status='running' AND attempts>=3
+                                        THEN 'Worker interrupted this transfer three times' END
+                           WHERE id = ?""",
+                        (time.time(), job["id"]),
                     )
+                    mark_catalog_updated(self.db)
             except (OSError, ValueError) as error:
                 self.finish(job["id"], "error", str(error))
+
+    def recover_output(self, job, name):
+        if job["kind"] == "copy":
+            config = ExportRequest.model_validate_json(job["request"])
+            with copy_destination(self.settings, config.destination) as parent:
+                return self.check_output(parent, name, job, directory=True)
+        try:
+            with transfer_directory(self.state) as parent:
+                return self.check_output(parent, name, job)
+        except FileNotFoundError:
+            return False
+
+    def check_output(self, parent, name, job, *, directory=False):
+        try:
+            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            info = None
+        staged = f".{job['id']}.part"
+        if directory:
+            remove_private(parent, staged)
+        else:
+            with suppress(FileNotFoundError):
+                os.unlink(staged, dir_fd=parent)
+            # Staging files from the initial Phase 4 implementation.
+            with suppress(FileNotFoundError):
+                os.unlink(f"{job['id']}.part", dir_fd=parent)
+        if info is None:
+            return False
+        file_type = stat.S_ISDIR if directory else stat.S_ISREG
+        if file_type(info.st_mode) and identity(info) == (
+            job["output_device"],
+            job["output_inode"],
+        ):
+            return True
+        raise ValueError("Transfer destination already has a conflicting entry")
 
     def finish(self, job_id, status, error=None):
         with write(self.db):
@@ -145,12 +191,11 @@ class Transfers:
         if not (config.export or config.report):
             return False
         args = (config.export, config.report and config.story)
-        condition = """status='pending' AND (
-            (kind IN ('zip','copy') AND ?)
-            OR (kind='report' AND ? AND NOT EXISTS (SELECT 1 FROM story_dirty))
-        )"""
         row = self.db.execute(
-            f"SELECT id FROM transfers WHERE {condition} ORDER BY created_at, id LIMIT 1",
+            """SELECT id FROM transfers WHERE status='pending' AND (
+                (kind IN ('zip','copy') AND ?)
+                OR (kind='report' AND ? AND NOT EXISTS (SELECT 1 FROM story_dirty))
+            ) ORDER BY created_at, id LIMIT 1""",
             args,
         ).fetchone()
         if row is None:
@@ -185,27 +230,40 @@ class Transfers:
 
     @contextmanager
     def output(self, job, pulse):
-        job_id = job["id"]
-        target = artifact(self.state, job_id, job["kind"])
-        target.parent.mkdir(mode=0o700, exist_ok=True)
-        staged = target.with_suffix(".part")
-        try:
-            with staged.open("xb") as handle:
-                yield handle
-            # Coordinate publication and cancellation with the API's short transaction.
-            self.publish(job_id, pulse, lambda: staged.replace(target))
-        finally:
-            staged.unlink(missing_ok=True)
+        name = artifact_name(job["id"], job["kind"])
+        staged = f".{job['id']}.part"
+        with transfer_directory(self.state, create=True) as parent:
+            fd = os.open(
+                staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent
+            )
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    yield handle
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    info = os.fstat(handle.fileno())
+                self.publish(job["id"], pulse, parent, staged, name, info)
+            finally:
+                with suppress(FileNotFoundError):
+                    os.unlink(staged, dir_fd=parent)
 
-    def publish(self, job_id, pulse, publication):
-        pulse()
+    def publish(self, job_id, pulse, parent, staged, name, info):
+        self.check(job_id, pulse)
+        # Commit the staged object's identity before rename. If SQLite has to
+        # recover after rename, an unrelated directory can never stand in for it.
+        self.db.execute(
+            "UPDATE transfers SET output_device=?, output_inode=? WHERE id=?",
+            (*identity(info), job_id),
+        )
         with write(self.db):
             if (
                 self.db.execute("SELECT status FROM transfers WHERE id=?", (job_id,)).fetchone()[0]
                 == "cancelling"
             ):
                 raise Cancelled
-            publication()
+            if identity(os.stat(staged, dir_fd=parent, follow_symlinks=False)) != identity(info):
+                raise OSError("Staged output was replaced")
+            rename_output(parent, staged, name)
             self.db.execute(
                 "UPDATE transfers SET status='done', finished_at=? WHERE id=?",
                 (time.time(), job_id),
@@ -256,6 +314,7 @@ class Transfers:
             self.db.execute("DROP TABLE IF EXISTS transfer_plan")
 
     def copy_to(self, root_fd, config, job_id, pulse):
+        name = artifact_name(job_id, "copy")
         staged = f".{job_id}.part"
         os.mkdir(staged, mode=0o700, dir_fd=root_fd)
         try:
@@ -274,20 +333,9 @@ class Transfers:
                     )
 
                 self.copy_files(config, job_id, pulse, open_output)
+                self.publish(job_id, pulse, root_fd, staged, name, os.fstat(fd))
             finally:
                 os.close(fd)
-
-            def publish():
-                # The allowlist folder is operator-controlled. A unique name never
-                # replaces a pre-existing user entry.
-                try:
-                    os.stat(job_id, dir_fd=root_fd, follow_symlinks=False)
-                except FileNotFoundError:
-                    os.rename(staged, job_id, src_dir_fd=root_fd, dst_dir_fd=root_fd)
-                else:
-                    raise ValueError("Copy destination already exists")
-
-            self.publish(job_id, pulse, publish)
         finally:
             remove_private(root_fd, staged)
 
@@ -321,6 +369,9 @@ class Transfers:
                 if source_key(os.fstat(fd)) != asset["source_key"]:
                     raise SourceChanged(f"{asset['path']} changed since indexing; rescan and retry")
                 transfer(fd, file_name(asset), count_bytes=True)
+                with jail.open_media(asset["path"]) as (current, _):
+                    if source_key(os.fstat(current)) != asset["source_key"]:
+                        raise SourceChanged(f"{asset['path']} was replaced while exporting")
             if config.xmp:
                 with sidecar(jail, asset["path"]) as fd:
                     if fd is not None:
@@ -392,9 +443,13 @@ class Transfers:
         for asset in item["representatives"]:
             path = cache_path(self.state, "thumbs", asset["id"], asset["content_hash"])
             try:
-                with path.open("rb") as source:
+                with (
+                    open_directory(self.state.resolve() / "thumbs") as thumbnails,
+                    open_regular(thumbnails, path.name) as (fd, _),
+                    os.fdopen(fd, "rb", closefd=False) as source,
+                ):
                     image = source.read(512 * 1024 + 1)
-            except FileNotFoundError:
+            except OSError:
                 continue
             if len(image) > 512 * 1024:
                 continue

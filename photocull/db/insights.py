@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from sqlite3 import Connection
+from typing import Literal
 
 from photocull.db import write
 from photocull.db.catalog import mark_catalog_updated
@@ -59,18 +60,26 @@ def discard(db: Connection, stage: str, asset_id: int) -> None:
     db.execute("DELETE FROM insight_work WHERE stage = ? AND asset_id = ?", (stage, asset_id))
 
 
-def queue(db: Connection, stage: str, asset_id: int) -> bool:
+def queue(
+    db: Connection, stage: str, key: str, asset_id: int
+) -> Literal["pending", "waiting", "missing", "wrong_kind"]:
     with write(db):
-        if not db.execute(
-            "SELECT 1 FROM assets WHERE id = ? AND active = 1", (asset_id,)
-        ).fetchone():
-            return False
+        if stage_key(db, stage) != key:
+            return "waiting"
+        asset = db.execute(
+            "SELECT kind FROM assets WHERE id = ? AND active = 1", (asset_id,)
+        ).fetchone()
+        if asset is None:
+            return "missing"
+        if (asset["kind"] == "video") != (stage in {"video", "transcript"}):
+            return "wrong_kind"
         db.execute(
             """INSERT INTO insight_work(stage, asset_id) VALUES (?, ?)
                ON CONFLICT(stage, asset_id) DO UPDATE SET attempts = 0""",
             (stage, asset_id),
         )
-        return True
+        mark_catalog_updated(db)
+        return "pending"
 
 
 def public_keys(db: Connection, settings) -> dict[str, str]:

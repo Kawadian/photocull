@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack
 from html import escape
 from typing import Annotated, Literal
 
@@ -14,8 +15,9 @@ from photocull.db import connect, write
 from photocull.db.catalog import mark_catalog_updated
 from photocull.db.insights import public_keys, queue, stage_key
 from photocull.db.stories import days, segments
-from photocull.db.transfers import ExportRequest, ReportRequest, artifact, cancel, enqueue, public
+from photocull.db.transfers import ExportRequest, ReportRequest, cancel, enqueue, public
 from photocull.insights import taste_input
+from photocull.media.artifacts import artifact_name, open_regular, transfer_directory
 from photocull.media.cache import video_path
 
 MAX_ID = 2**63 - 1
@@ -31,15 +33,63 @@ PREFIX = "/api/libraries/{library}/insights"
 
 class PersonName(BaseModel):
     name: Name | None
+    expected_revision: int | None = Field(default=None, ge=0, le=MAX_ID)
 
 
 class MergePeople(BaseModel):
     source: BodyId
+    expected_revision: int | None = Field(default=None, ge=0, le=MAX_ID)
+    expected_source_revision: int | None = Field(default=None, ge=0, le=MAX_ID)
 
 
 class SplitPerson(BaseModel):
     faces: list[BodyId] = Field(min_length=1, max_length=200)
     name: Name | None = None
+
+
+class TransferDownload(Response):
+    def __init__(self, state, job):
+        super().__init__()
+        self.state = state
+        self.name = artifact_name(job["id"], job["kind"])
+        self.report = job["kind"] == "report"
+        self.identity = job["output_device"], job["output_inode"]
+
+    async def __call__(self, scope, receive, send):
+        with ExitStack() as stack:
+            try:
+                parent = stack.enter_context(transfer_directory(self.state))
+                fd, info = stack.enter_context(open_regular(parent, self.name))
+                # Completed transfers prior to the publication migration have no marker.
+                if self.identity != (None, None) and self.identity != (info.st_dev, info.st_ino):
+                    raise OSError("The completed artifact was replaced")
+            except (OSError, RuntimeError):
+                response = Response("The completed artifact is missing", status_code=404)
+            else:
+                response = FileResponse(
+                    f"/proc/self/fd/{fd}",
+                    stat_result=info,
+                    media_type="text/html" if self.report else "application/zip",
+                    filename="photocull-trip.html" if self.report else "photocull-keepers.zip",
+                    headers={
+                        "Cache-Control": "private, no-store",
+                        "X-Content-Type-Options": "nosniff",
+                        "X-Accel-Buffering": "no",
+                        "Content-Security-Policy": (
+                            "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'"
+                        ),
+                    },
+                )
+                # The descriptor must stay open until the response body is sent.
+                scope = {
+                    **scope,
+                    "extensions": {
+                        key: value
+                        for key, value in scope.get("extensions", {}).items()
+                        if key != "http.response.pathsend"
+                    },
+                }
+            await response(scope, receive, send)
 
 
 class VideoFlag(BaseModel):
@@ -89,6 +139,14 @@ def require(enabled: bool, stage: str):
 def face_key(db, settings):
     require(settings.insights.faces, "Face grouping")
     return public_keys(db, settings)["faces"]
+
+
+def check_person(db, person_id, revision):
+    row = db.execute("SELECT revision FROM people WHERE id = ?", (person_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "Unknown person")
+    if revision is not None and row[0] != revision:
+        raise HTTPException(409, "This person changed. Reload and try again.")
 
 
 def submit_transfer(db, kind, body):
@@ -172,10 +230,13 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
         with connect(library_path(library)) as db:
             requested_key = public_keys(db, settings).get(stage)
             require(requested_key is not None, stage)
-            if stage_key(db, stage) != requested_key:
+            status = queue(db, stage, requested_key, asset_id)
+            if status == "waiting":
                 raise HTTPException(409, "Waiting for the worker to configure the stage")
-            if not queue(db, stage, asset_id):
+            if status == "missing":
                 raise HTTPException(404, "Unknown asset")
+            if status == "wrong_kind":
+                raise HTTPException(422, "This stage does not apply to the asset type")
         return {"status": "pending"}
 
     @app.get(PREFIX + "/people")
@@ -206,7 +267,13 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
     @app.get(PREFIX + "/people/{person_id}/faces")
     def person_faces(library: str, person_id: Id, cursor: After = 0, limit: Limit = 40):
         with connect(library_path(library)) as db:
+            db.execute("BEGIN")
             key = face_key(db, settings)
+            person = db.execute(
+                "SELECT id, name, revision FROM people WHERE id=?", (person_id,)
+            ).fetchone()
+            if person is None:
+                raise HTTPException(404, "Unknown person")
             rows = db.execute(
                 """SELECT f.id, f.asset_id, f.left, f.top, f.right, f.bottom, f.quality,
                           f.confidence, a.path, a.content_hash
@@ -215,19 +282,18 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
                    ORDER BY f.id LIMIT ?""",
                 (person_id, key, cursor, limit + 1),
             ).fetchall()
-        return page(rows, limit)
+        return {**page(rows, limit), "person": dict(person)}
 
     @app.patch(PREFIX + "/people/{person_id}")
     def rename(library: str, person_id: Id, body: PersonName):
         with connect(library_path(library)) as db, write(db):
             face_key(db, settings)
+            check_person(db, person_id, body.expected_revision)
             row = db.execute(
                 """UPDATE people SET name = ?, revision = revision + 1 WHERE id = ?
                    RETURNING id, name, revision""",
                 (body.name, person_id),
             ).fetchone()
-            if row is None:
-                raise HTTPException(404, "Unknown person")
             mark_catalog_updated(db)
             return dict(row)
 
@@ -237,13 +303,8 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
             raise HTTPException(422, "Choose two different people")
         with connect(library_path(library)) as db, write(db):
             face_key(db, settings)
-            if (
-                db.execute(
-                    "SELECT count(*) FROM people WHERE id IN (?, ?)", (person_id, body.source)
-                ).fetchone()[0]
-                != 2
-            ):
-                raise HTTPException(404, "Unknown person")
+            check_person(db, person_id, body.expected_revision)
+            check_person(db, body.source, body.expected_source_revision)
             moved = db.execute(
                 "UPDATE faces SET person_id = ?, manual = 1 WHERE person_id = ?",
                 (person_id, body.source),
@@ -255,10 +316,13 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
                    revision = revision + 1 WHERE id = ?""",
                 (body.source, person_id),
             )
+            db.execute("UPDATE faces SET manual = 1 WHERE person_id = ?", (person_id,))
             db.execute("DELETE FROM people WHERE id = ?", (body.source,))
-            name = db.execute("SELECT name FROM people WHERE id=?", (person_id,)).fetchone()[0]
+            person = db.execute(
+                "SELECT id, name, revision FROM people WHERE id = ?", (person_id,)
+            ).fetchone()
             mark_catalog_updated(db)
-            return {"id": person_id, "moved": moved, "name": name}
+            return {**dict(person), "moved": moved}
 
     @app.post(PREFIX + "/people/{person_id}/split")
     def split(library: str, person_id: Id, body: SplitPerson):
@@ -407,7 +471,8 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
         with connect(library_path(library)) as db:
             rows = db.execute(
                 """SELECT * FROM transfers WHERE (kind = 'report') = ?
-                   ORDER BY created_at DESC, id DESC LIMIT ?""",
+                   ORDER BY (status IN ('pending','running','cancelling')) DESC,
+                            created_at DESC, id DESC LIMIT ?""",
                 (kind == "report", limit),
             ).fetchall()
         return {"items": [public(row) for row in rows]}
@@ -428,20 +493,4 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
             row = get_transfer(db, job_id, config)
         if row["status"] != "done" or row["kind"] == "copy":
             raise HTTPException(409, "This transfer has no available download")
-        target = artifact(path.parent, job_id, row["kind"])
-        if not target.is_file():
-            raise HTTPException(404, "The completed artifact is missing")
-        report = row["kind"] == "report"
-        return FileResponse(
-            target,
-            media_type="text/html" if report else "application/zip",
-            filename="photocull-trip.html" if report else "photocull-keepers.zip",
-            headers={
-                "Cache-Control": "private, no-store",
-                "X-Content-Type-Options": "nosniff",
-                "X-Accel-Buffering": "no",
-                "Content-Security-Policy": (
-                    "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'"
-                ),
-            },
-        )
+        return TransferDownload(path.parent, row)

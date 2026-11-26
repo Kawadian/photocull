@@ -273,6 +273,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(409, "Face grouping is disabled")
             if min_aesthetic is not None and "aesthetic" not in keys:
                 raise HTTPException(409, "Aesthetic scoring is disabled")
+            if sort == "aesthetic" and "aesthetic" not in keys:
+                raise HTTPException(409, "Aesthetic scoring is disabled")
+            if sort == "taste" and not (settings.insights.taste and ml.enabled):
+                raise HTTPException(409, "Taste learning is disabled")
             sort_score = None
             if sort != "id":
                 key = keys.get(sort, "")

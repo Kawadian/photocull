@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import time
 from datetime import date
-from pathlib import Path
 from typing import Annotated, Literal
 from uuid import uuid4
 
@@ -55,10 +54,6 @@ class ReportRequest(BaseModel):
         return self
 
 
-def artifact(state: Path, job: str, kind: str) -> Path:
-    return state / "transfers" / f"{job}.{'html' if kind == 'report' else 'zip'}"
-
-
 def enqueue(db, kind, body):
     with write(db):
         total = db.execute(
@@ -78,6 +73,7 @@ def enqueue(db, kind, body):
 def public(row):
     result = dict(row)
     options = json.loads(result.pop("request"))
+    del result["output_device"], result["output_inode"]
     result["destination"] = options.get("destination")
     return result
 
@@ -119,7 +115,7 @@ def select_assets(config: Selection, keys: dict):
                      LEFT JOIN insight_results AS i ON i.asset_id=a.id
                        AND i.content_hash=a.content_hash AND i.stage='video' AND i.key=?"""
         clauses.append("COALESCE(f.dead, json_array_length(i.payload,'$.reasons') > 0, 0) = ?")
-        values.insert(0, keys.get("video", ""))
+        values = [keys.get("video", ""), *values]
         values.append(config.dead)
     return (
         f"""SELECT a.id, a.path, a.source_key, a.size FROM assets AS a {joins}

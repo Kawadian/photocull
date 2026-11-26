@@ -19,17 +19,19 @@ def segments(db, day: str, after: int, limit: int):
         (day, after, limit),
     ).fetchall()
     items = [dict(row) for row in rows]
-    ids = {asset for item in items for asset in json.loads(item["representatives"])}
+    for item in items:
+        item["representatives"] = json.loads(item["representatives"])
+    ids = {asset for item in items for asset in item["representatives"]}
     by_id = {
         row["id"]: dict(row)
         for row in db.execute(
-            """SELECT id, path, content_hash FROM assets WHERE active = 1
+            """SELECT id, path, content_hash FROM assets WHERE active = 1 AND day = ?
                AND id IN (SELECT value FROM json_each(?))""",
-            (json.dumps(list(ids)),),
+            (day, json.dumps(list(ids))),
         )
     }
     for item in items:
         item["representatives"] = [
-            by_id[asset] for asset in json.loads(item["representatives"]) if asset in by_id
+            by_id[asset] for asset in item["representatives"] if asset in by_id
         ]
     return items

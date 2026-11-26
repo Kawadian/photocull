@@ -104,8 +104,13 @@ def asset_page_query(
     if similar_group_id is not None:
         joins += " JOIN similar_members AS sm ON sm.asset_id = a.id"
         order = "sm.asset_id"
-    filters = ["a.active = 1", f"{order} > ?", *clauses]
-    params: list[str | int | float] = [cursor, *score_params]
+    filters = ["a.active = 1"]
+    params: list[str | int | float] = []
+    if not sort_score:
+        filters.append(f"{order} > ?")
+        params.append(cursor)
+    filters.extend(clauses)
+    params.extend(score_params)
     for condition, value in (
         ("a.folder = ?", folder),
         ("a.day = ?", day),
@@ -141,8 +146,6 @@ def asset_page_query(
         stage, key, previous = sort_score
         # Starting from the score index permits keyset pagination on large catalogs.
         joins += " JOIN insight_results AS ranked ON ranked.asset_id = a.id"
-        filters.pop(1)
-        params.pop(0)
         filters.extend(("ranked.stage = ?", "ranked.key = ?", "ranked.score IS NOT NULL"))
         params.extend((stage, key))
         if previous is not None:
