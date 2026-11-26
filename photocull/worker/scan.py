@@ -9,7 +9,6 @@ from photocull.db import write
 from photocull.db.catalog import mark_catalog_updated
 from photocull.db.jobs import DISABLED, NO_VIDEO_EXIF, NO_VIDEO_SCORE
 from photocull.media.walk import MediaEntry, MediaJail, hash_file, source_key
-from photocull.worker.analysis import invalidate_burst
 
 
 def fallback_day(mtime_ns: int) -> str:
@@ -55,7 +54,6 @@ def _record(
             ).fetchone()
             asset_id = asset["id"]
             if prior and prior["content_hash"] != digest:
-                invalidate_burst(db, asset_id)
                 db.execute("DELETE FROM asset_scores WHERE asset_id = ?", (asset_id,))
                 db.execute("DELETE FROM burst_choices WHERE asset_id = ?", (asset_id,))
                 db.execute(
@@ -135,8 +133,6 @@ def scan_batches(
         pulse()
         after = rows[-1]["id"]
         with write(db):
-            for row in rows:
-                invalidate_burst(db, row[0])
             db.executemany("UPDATE assets SET active = 0 WHERE id = ?", rows)
             db.executemany("DELETE FROM jobs WHERE asset_id = ?", rows)
             mark_catalog_updated(db)

@@ -30,10 +30,9 @@ from photocull.db.jobs import (
 )
 from photocull.media.cache import cache_path
 from photocull.media.walk import MediaJail, SourceChanged, source_key
-from photocull.worker.analysis import (
+from photocull.worker.bursts import refresh_bursts
+from photocull.worker.rejections import (
     configure_scoring,
-    invalidate_burst,
-    refresh_bursts,
     save_scores,
 )
 from photocull.worker.scan import fallback_day, scan_batches
@@ -95,6 +94,8 @@ class LibraryWorker:
                             )""",
                         (status, reason, stage, stage, *params),
                     ).rowcount
+                    if count:
+                        mark_catalog_updated(self.db)
                 if not count:
                     break
         for variant in CACHE_DIRS:
@@ -131,7 +132,12 @@ class LibraryWorker:
             from photocull.worker.scoring import score_preview
 
             preview = cache_path(self.state, "previews", job.asset_id, job.content_hash)
-            return asdict(score_preview(preview)), None
+            try:
+                return asdict(score_preview(preview)), None
+            except FileNotFoundError as error:
+                raise RuntimeError(
+                    "Cached preview is missing. Rerun preview and scoring."
+                ) from error
 
         jail = MediaJail(self.library, self.settings.state_dir)
         with jail.open_media(job.path) as (fd, _):
@@ -170,16 +176,18 @@ class LibraryWorker:
         with write(self.db):
             if job.stage == "score" and values:
                 save_scores(self.db, job.asset_id, values, self.settings.scoring)
-            elif values:
-                if job.stage == "exif":
-                    captured_at = self.db.execute(
-                        "SELECT captured_at FROM assets WHERE id = ?", (job.asset_id,)
-                    ).fetchone()[0]
-                    if captured_at != values["captured_at"]:
-                        invalidate_burst(self.db, job.asset_id)
-                setters = ", ".join(f"{name} = ?" for name in values)
+            elif job.stage == "exif" and values:
                 self.db.execute(
-                    f"UPDATE assets SET {setters} WHERE id = ?", (*values.values(), job.asset_id)
+                    """UPDATE assets SET captured_at = :captured_at, day = :day,
+                        make = :make, model = :model, latitude = :latitude, longitude = :longitude,
+                        metadata_error = :metadata_error WHERE id = :id""",
+                    {**values, "id": job.asset_id},
+                )
+            elif values:
+                self.db.execute(
+                    """UPDATE assets SET width = :width, height = :height, duration = :duration
+                       WHERE id = :id""",
+                    {**values, "id": job.asset_id},
                 )
             self.db.execute(
                 """UPDATE jobs SET status = ?, error = NULLIF(?, ''), interruptions = 0

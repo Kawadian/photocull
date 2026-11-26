@@ -1,18 +1,37 @@
 import hashlib
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 from PIL import Image
 from PIL.TiffImagePlugin import IFDRational
 
-from photocull.config import Library
+from photocull.config import Library, Settings
+from photocull.db import connect, initialize
+from photocull.db.catalog import get_asset
+from photocull.db.jobs import request_scan
 from photocull.media import exif
 from photocull.media.cache import cache_path
 from photocull.media.decode import decode
 from photocull.media.images import register_heif
 from photocull.media.walk import MediaJail, OutsideLibrary, hash_file
+from photocull.worker import LibraryWorker
+
+
+def _index_media(root):
+    library = Library(root=root)
+    state = root / "state"
+    path = state / "index.db"
+    initialize(path)
+    with connect(path) as db, ThreadPoolExecutor(1) as pool:
+        worker = LibraryWorker(db, library, state, Settings(state_dir=state), lambda: None)
+        request_scan(db)
+        for _ in range(20):
+            if not worker.step(pool, worker.beat):
+                return get_asset(db, 1)
+    raise AssertionError("Media queue did not finish")
 
 
 def test_walk_filters_and_symlink_jail(tmp_path):
@@ -169,6 +188,9 @@ def test_video_poster_and_duration(tmp_path):
     assert (dimensions.width, dimensions.height) == (64, 48)
     assert dimensions.duration == pytest.approx(1.0)
     assert Path(cache_path(tmp_path / "state", "thumbs", 1, "hash")).is_file()
+    video = _index_media(tmp_path)
+    assert video["preview_status"] == "done" and video["score_status"] == "skipped"
+    assert video["burst_id"] is None and video["sharpness"] is None
 
 
 def test_dng_demosaic_without_an_embedded_jpeg(tmp_path):
@@ -206,3 +228,6 @@ def test_dng_demosaic_without_an_embedded_jpeg(tmp_path):
     assert info == exif.Metadata("2025-03-04T05:06:07", "Fixture", "Synthetic camera")
     assert (dimensions.width, dimensions.height) == (32, 32)
     assert cache_path(state, "thumbs", 7, "fixture").is_file()
+    raw = _index_media(tmp_path)
+    assert raw["kind"] == "raw" and raw["score_status"] == "done"
+    assert 0 <= raw["sharpness"] <= 1 and 0 <= raw["exposure"] <= 1

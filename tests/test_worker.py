@@ -11,7 +11,7 @@ from photocull.db.jobs import NO_PREVIEW, claim_jobs, progress, recover, request
 from photocull.media.cache import cache_path
 from photocull.worker import LibraryWorker
 from photocull.worker import scan as scanner
-from photocull.worker.analysis import mark_bursts_dirty, refresh_bursts
+from photocull.worker.bursts import refresh_bursts
 
 
 def write_photo(path: Path, color: str) -> None:
@@ -256,7 +256,7 @@ def test_bursts_match_hash_and_capture_window_and_keep_chosen_best(tmp_path):
         chosen = choose_best(db, anchor, alternate, burst["membership_key"])
         assert chosen["best_id"] == alternate
         revision = progress(db)["catalog_revision"]
-        mark_bursts_dirty(db)
+        db.execute("INSERT INTO burst_changes VALUES (?)", (burst["captured_at"],))
         assert refresh_bursts(db, settings.burst, lambda: None)
         assert get_burst(db, anchor) == chosen
         assert progress(db)["catalog_revision"] == revision
@@ -274,3 +274,34 @@ def test_bursts_match_hash_and_capture_window_and_keep_chosen_best(tmp_path):
         run_queue(worker, pool)
         assert get_burst(db, anchor)["member_count"] == 3
         assert get_burst(db, anchor)["user_best_id"] is None
+
+
+def test_replaced_photo_clears_stale_group_choice_and_keeps_manual_rating(tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    library = Library(root=root)
+    state = tmp_path / "state"
+    settings = Settings(state_dir=state, burst=BurstSettings(max_hamming_distance=0))
+    gradient = Image.linear_gradient("L").rotate(90)
+    time_tags = Image.Exif()
+    time_tags[306] = "2024:01:02 03:04:05"
+    gradient.save(root / "a.jpg", exif=time_tags)
+    gradient.save(root / "b.jpg", exif=time_tags)
+    gradient.save(root / "c.jpg", exif=time_tags)
+    path = state / "index.db"
+    initialize(path)
+    with connect(path) as db, ThreadPoolExecutor(1) as pool:
+        worker = LibraryWorker(db, library, state, settings, lambda: None)
+        request_scan(db)
+        run_queue(worker, pool)
+        burst = get_burst(db, 1)
+        choose_best(db, 1, 2, burst["membership_key"])
+        db.execute("UPDATE assets SET rating = 4 WHERE id = 2")
+        gradient.transpose(Image.Transpose.FLIP_LEFT_RIGHT).save(root / "b.jpg", exif=time_tags)
+        request_scan(db)
+        run_queue(worker, pool)
+        burst = get_burst(db, 1)
+        assert burst["user_best_id"] is None and burst["member_count"] == 2
+        assert get_asset(db, 2)["burst_id"] is None
+        assert get_asset(db, 2)["rating"] == 4
+        assert get_asset(db, 2)["sharpness"] is not None

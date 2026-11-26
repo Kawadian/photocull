@@ -21,7 +21,8 @@ def score_preview(path: Path) -> Scores:
         fingerprint = np.asarray(gray.resize((9, 8), Image.Resampling.LANCZOS))
         bits = np.packbits((fingerprint[:, 1:] > fingerprint[:, :-1]).ravel())
         gray.thumbnail((512, 512), Image.Resampling.LANCZOS)
-        pixels = np.asarray(gray, dtype=np.float32) / 255.0
+        luminance = np.asarray(gray)
+        pixels = luminance.astype(np.float32) / 255.0
 
     sharpness = 0.0
     if min(pixels.shape) >= 3:
@@ -34,8 +35,8 @@ def score_preview(path: Path) -> Scores:
 
     return Scores(
         sharpness=sharpness,
-        exposure=float(pixels.mean(dtype=np.float64)),
-        clipped_highlights=float(np.mean(pixels >= 250 / 255)),
-        clipped_shadows=float(np.mean(pixels <= 5 / 255)),
+        exposure=float(luminance.mean() / 255.0),
+        clipped_highlights=float(np.mean(luminance >= 250)),
+        clipped_shadows=float(np.mean(luminance <= 5)),
         dhash=bits.tobytes().hex(),
     )
