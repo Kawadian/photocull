@@ -1,11 +1,15 @@
-import { Aperture, Images } from 'lucide-react'
+import { Aperture, Images, Keyboard } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { ApiError, json, message, request, useProgress, useRemote } from './api'
 import type { Asset, Burst, GroupBy, Library, Rating } from './api'
+import { ShortcutHelp } from './Dialog'
 import { LibraryNav } from './LibraryNav'
 import { Review } from './Review'
+import { useShortcuts } from './shortcuts'
 
-function Header({ connected, heartbeat }: { connected?: boolean; heartbeat?: number }) {
+function Header({ connected, heartbeat, onHelp }: {
+  connected?: boolean; heartbeat?: number; onHelp?: () => void
+}) {
   const [now, setNow] = useState(() => Date.now() / 1000)
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now() / 1000), 5000)
@@ -16,12 +20,16 @@ function Header({ connected, heartbeat }: { connected?: boolean; heartbeat?: num
   return (
     <header className="app-header">
       <div className="wordmark"><Aperture size={24} strokeWidth={1.9} /><span>Photocull</span></div>
-      {connected !== undefined && (
-        <div className="worker-indicator" role="status">
-          <span className={online ? 'online' : undefined} />
-          {!connected ? 'Connecting to API' : online ? 'Worker online' : 'Worker offline'}
-        </div>
-      )}
+      <div className="header-actions">
+        {connected !== undefined && (
+          <div className="worker-indicator" role="status">
+            <span className={online ? 'online' : undefined} />
+            {!connected ? 'Connecting to API' : online ? 'Worker online' : 'Worker offline'}
+          </div>
+        )}
+        {onHelp && <button className="icon-button" aria-label="Keyboard shortcuts"
+          aria-keyshortcuts="?" title="Keyboard shortcuts (?)" onClick={onHelp}><Keyboard size={17} /></button>}
+      </div>
     </header>
   )
 }
@@ -43,6 +51,7 @@ function Workspace({ libraries, library, selectLibrary }: {
   const [refresh, setRefresh] = useState(0)
   const [burstUndo, setBurstUndo] = useState<{ token: string; count: number }>()
   const [notice, setNotice] = useState<string>()
+  const [help, setHelp] = useState(false)
   const inFlight = useRef(false)
   const version = (progress?.catalog_revision ?? 0) + refresh
 
@@ -136,9 +145,22 @@ function Workspace({ libraries, library, selectLibrary }: {
     }
   }
 
+  useShortcuts((key, event) => {
+    if (event.ctrlKey || event.metaKey || event.altKey || event.repeat) return
+    if (key === '?') {
+      event.preventDefault()
+      setHelp(true)
+    }
+    if (key === 'u' && event.shiftKey && burstUndo && !busy) {
+      event.preventDefault()
+      void undoBurstRejection()
+    }
+  })
+
   return (
     <div className="app">
-      <Header connected={connected} heartbeat={progress?.worker?.heartbeat} />
+      <Header connected={connected} heartbeat={progress?.worker?.heartbeat} onHelp={() => setHelp(true)} />
+      {help && <ShortcutHelp onClose={() => setHelp(false)} />}
       {error && (
         <div className="status-banner" role="alert">
           {error} <button className="button quiet" onClick={() => setError(undefined)}>Dismiss</button>
@@ -152,7 +174,8 @@ function Workspace({ libraries, library, selectLibrary }: {
       {burstUndo && (
         <div className="status-banner" role="status">
           Flagged {burstUndo.count} {burstUndo.count === 1 ? 'photo' : 'photos'} in the burst.
-          <button className="button quiet" disabled={busy} onClick={undoBurstRejection}>Undo burst reject</button>
+          <button className="button quiet" aria-keyshortcuts="Shift+U" disabled={busy}
+            onClick={undoBurstRejection}>Undo burst reject <kbd aria-hidden="true">⇧U</kbd></button>
         </div>
       )}
       <div className="workspace">
@@ -167,7 +190,9 @@ function Workspace({ libraries, library, selectLibrary }: {
           analysisBusy={busy} onClearAll={clearAll}
         />
         {by === 'burst' && group === null ? (
-          <main className="image-stage empty"><div><Images size={30} /><h2>Select a burst to review it</h2></div></main>
+          <main className="image-stage empty"><div><Images size={30} /><h2>Select a burst to review it</h2>
+            <p>Use <kbd>[</kbd> and <kbd>]</kbd> to move between bursts.</p>
+          </div></main>
         ) : <Review
           key={JSON.stringify([by, group, by === 'burst' ? '' : filters])}
           base={base} by={by} group={group} version={version} ratings={ratings}
@@ -181,7 +206,8 @@ function Workspace({ libraries, library, selectLibrary }: {
 }
 
 export function App() {
-  const result = useRemote<{ items: Library[] }>('/api/libraries')
+  const [retry, setRetry] = useState(0)
+  const result = useRemote<{ items: Library[] }>('/api/libraries', retry)
   const [chosen, setChosen] = useState<string>()
   const libraries = result?.data?.items ?? []
   const active = libraries.find(({ name }) => name === chosen)?.name ?? libraries[0]?.name
@@ -195,7 +221,10 @@ export function App() {
       <main className="initial-state">
         <Images size={36} />
         <h1>{!result ? 'Loading libraries…' : result.error ? 'Could not load libraries' : 'No libraries configured'}</h1>
-        {result && <p>{result.error || 'Set a library root in the Photocull configuration and restart the API.'}</p>}
+        {result?.error ? <>
+          <p role="alert">{result.error}</p>
+          <button className="button secondary" onClick={() => setRetry((value) => value + 1)}>Retry</button>
+        </> : result && <p>Set a library root in the Photocull configuration and restart the API.</p>}
       </main>
     </div>
   )

@@ -86,7 +86,9 @@ export function useRemote<T>(url: string | null, version = 0) {
     if (url === null) return
     const controller = new AbortController()
     request<T>(url, { signal: controller.signal })
-      .then((data) => setResult({ url, data }))
+      .then((data) => {
+        if (!controller.signal.aborted) setResult({ url, data })
+      })
       .catch((error: unknown) => {
         if (!controller.signal.aborted) {
           setResult((previous) => ({

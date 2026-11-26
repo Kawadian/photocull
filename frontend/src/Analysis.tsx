@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
+import { Dialog } from './Dialog'
 import type { FormEvent } from 'react'
 import type { Asset } from './api'
 
@@ -24,7 +25,7 @@ export function ScoreBadges({ asset }: { asset: Asset }) {
         <span key={label} className="score-badge">{label} <strong>{Math.round(value * 100)}%</strong></span>
       ))}
       {asset.auto_reject_reason && (
-        <span className="score-badge flagged">{rejectReasons[asset.auto_reject_reason]}</span>
+        <span className="score-badge flagged">{rejectReasons[asset.auto_reject_reason] ?? 'Auto-reject'}</span>
       )}
     </div>
   )
@@ -37,13 +38,7 @@ export function ConfirmAction({ title, description, action, onConfirm, onClose }
   onConfirm: () => Promise<void>
   onClose: () => void
 }) {
-  const dialog = useRef<HTMLDialogElement>(null)
   const [busy, setBusy] = useState(false)
-  useEffect(() => {
-    const element = dialog.current
-    element?.showModal()
-    return () => element?.close()
-  }, [])
 
   async function confirm() {
     setBusy(true)
@@ -52,18 +47,13 @@ export function ConfirmAction({ title, description, action, onConfirm, onClose }
   }
 
   return (
-    <dialog className="xmp-dialog" ref={dialog} aria-labelledby="analysis-dialog-title"
-      onCancel={(event) => {
-        event.preventDefault()
-        if (!busy) onClose()
-      }}>
-      <h2 id="analysis-dialog-title">{title}</h2>
+    <Dialog title={title} busy={busy} onClose={onClose}>
       <p>{description}</p>
       <div className="dialog-actions">
         <button autoFocus className="button secondary" disabled={busy} onClick={onClose}>Cancel</button>
         <button className="button primary" disabled={busy} onClick={confirm}>{action}</button>
       </div>
-    </dialog>
+    </Dialog>
   )
 }
 

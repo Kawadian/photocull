@@ -6,6 +6,7 @@ import { assetName, mediaUrl, useRemote } from './api'
 import type { Asset, Burst, GroupBy, Page, Rating } from './api'
 import { ConfirmAction, ScoreBadges } from './Analysis'
 import { Inspector } from './Inspector'
+import { useShortcuts } from './shortcuts'
 
 type ReviewProps = {
   base: string
@@ -105,7 +106,7 @@ function Preview({ base, asset, zoom, error, loading, filtered }: {
   const detail = error || asset?.preview_error || (!asset && !loading && !filtered
     ? 'Run a library scan to add photos and videos.' : '')
   return (
-    <div className="image-stage empty">
+    <div className="image-stage empty" role={error ? 'alert' : 'status'}>
       <div>
         {asset ? <ImageOff size={30} /> : <Images size={30} />}
         <h2>{heading}</h2>
@@ -121,16 +122,19 @@ export function Review(props: ReviewProps) {
   const [cursors, setCursors] = useState([0])
   const [selected, setSelected] = useState<number | 'first' | 'last'>('first')
   const [zoom, setZoom] = useState(false)
+  const [retry, setRetry] = useState(0)
   const [compare, setCompare] = useState(false)
   const [confirmReject, setConfirmReject] = useState<Burst>()
   const isBurst = by === 'burst'
   const params = new URLSearchParams(isBurst ? '' : filters)
   params.set('cursor', String(cursors.at(-1)))
   if (group !== null) params.set(isBurst ? 'burst_id' : by, group)
-  const result = useRemote<Page<Asset>>(`${base}/assets?${params}`, version)
-  const burstResult = useRemote<Burst>(isBurst && group !== null ? `${base}/bursts/${group}` : null, version)
-  const burst = burstResult?.data
-  const assets = (result?.data?.items ?? []).map((asset) => {
+  const result = useRemote<Page<Asset>>(`${base}/assets?${params}`, version + retry)
+  const burstResult = useRemote<Burst>(isBurst && group !== null ? `${base}/bursts/${group}` : null, version + retry)
+  const loadError = burstResult?.error ?? result?.error
+  const loading = !result || (isBurst && !burstResult)
+  const burst = loadError ? undefined : burstResult?.data
+  const assets = (loadError ? [] : result?.data?.items ?? []).map((asset) => {
     const rating = ratings.get(asset.id)
     return rating && rating.revision > asset.revision ? { ...asset, ...rating } : asset
   })
@@ -140,11 +144,12 @@ export function Review(props: ReviewProps) {
   const asset = assets[index]
   const bestInPage = assets.find(({ id }) => id === burst?.best_id)
   const bestResult = useRemote<Asset>(
-    compare && burst && !bestInPage ? `${base}/assets/${burst.best_id}` : null, version,
+    compare && burst && !bestInPage ? `${base}/assets/${burst.best_id}` : null, version + retry,
   )
   const best = bestInPage ?? bestResult?.data
 
   function move(direction: number) {
+    if (loading || (loadError && direction > 0)) return
     const target = assets[index + direction]
     if (target && asset) {
       setSelected(target.id)
@@ -157,38 +162,42 @@ export function Review(props: ReviewProps) {
     }
   }
 
-  useEffect(() => {
-    function keyboard(event: KeyboardEvent) {
-      const target = event.target
-      if (
-        event.defaultPrevented || document.querySelector('dialog[open]') ||
-        (target instanceof HTMLElement &&
-          (target.isContentEditable || ['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName)))
-      ) return
-      const key = event.key.toLowerCase()
-      if (((event.ctrlKey || event.metaKey) && key === 'z') || key === 'u') {
-        if (!event.repeat && undoAvailable && !busy) {
-          event.preventDefault()
-          onUndo()
-        }
-        return
-      }
-      if (event.ctrlKey || event.metaKey || event.altKey) return
-      if (key === 'arrowleft' || key === 'arrowright') {
+  const canChooseBest = !busy && !!burst && !!asset && burst.best_id !== asset.id
+  const canRejectRest = !busy && !!burst && !loading
+
+  useShortcuts((key, event) => {
+    const ratingUndo = !event.shiftKey && !event.altKey &&
+      (((event.ctrlKey || event.metaKey) && key === 'z') ||
+        (!event.ctrlKey && !event.metaKey && key === 'u'))
+    if (ratingUndo) {
+      if (!event.repeat && undoAvailable && !busy) {
         event.preventDefault()
-        move(key === 'arrowleft' ? -1 : 1)
-      } else if (asset && !busy && !event.repeat) {
-        if (/^[0-5]$/.test(key)) onRating(asset, Number(key))
-        if (key === 'x') onRating(asset, 0, true)
-        if (key === 'z' && asset.preview_status === 'done') setZoom((value) => !value)
+        onUndo()
       }
+      return
     }
-    window.addEventListener('keydown', keyboard)
-    return () => window.removeEventListener('keydown', keyboard)
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
+    if (key === 'arrowleft' || key === 'arrowright') {
+      event.preventDefault()
+      move(key === 'arrowleft' ? -1 : 1)
+    } else if (!busy && !event.repeat) {
+      if (key === 'r' && canRejectRest) {
+        event.preventDefault()
+        setConfirmReject(burst)
+      }
+      if (!asset) return
+      if (key === 'b' && canChooseBest) {
+        event.preventDefault()
+        onChooseBest(burst, asset.id)
+      }
+      if (/^[0-5]$/.test(key)) onRating(asset, Number(key))
+      if (key === 'x') onRating(asset, 0, true)
+      if (key === 'z' && asset.preview_status === 'done') setZoom((value) => !value)
+    }
   })
 
-  const previousAvailable = index > 0 || cursors.length > 1
-  const nextAvailable = index + 1 < assets.length || nextCursor !== null
+  const previousAvailable = !loading && (index > 0 || cursors.length > 1)
+  const nextAvailable = !loading && !loadError && (index + 1 < assets.length || nextCursor !== null)
   const heading = isBurst ? 'Burst review' : group === null ? 'All assets' : group || 'Library root'
   const image = (
     <Preview
@@ -196,8 +205,8 @@ export function Review(props: ReviewProps) {
       base={base}
       asset={asset}
       zoom={zoom}
-      error={burstResult?.error || result?.error}
-      loading={!result}
+      error={loadError}
+      loading={loading}
       filtered={!!filters || isBurst}
     />
   )
@@ -212,7 +221,7 @@ export function Review(props: ReviewProps) {
               {asset && <p>{assetName(asset)}</p>}
             </div>
             <div className="review-tools">
-              <div className="segment zoom" aria-label="Preview zoom">
+              <div className="segment zoom" role="group" aria-label="Preview zoom">
                 <button
                   aria-pressed={!zoom}
                   title="Fit image"
@@ -228,20 +237,20 @@ export function Review(props: ReviewProps) {
               </div>
               <div className="arrow-buttons">
                 <button className="icon-button" disabled={!previousAvailable} onClick={() => move(-1)}
-                  aria-label="Previous asset" title="Previous asset (←)"><ArrowLeft size={17} /></button>
+                  aria-label="Previous asset" aria-keyshortcuts="ArrowLeft" title="Previous asset (←)"><ArrowLeft size={17} /></button>
                 <button className="icon-button" disabled={!nextAvailable} onClick={() => move(1)}
-                  aria-label="Next asset" title="Next asset (→)"><ArrowRight size={17} /></button>
+                  aria-label="Next asset" aria-keyshortcuts="ArrowRight" title="Next asset (→)"><ArrowRight size={17} /></button>
               </div>
             </div>
           </div>
           {burst && (
-            <div className="burst-toolbar">
+            <div className="burst-toolbar" role="group" aria-label="Burst actions">
               <button className="button secondary" aria-pressed={compare} disabled={!asset}
                 onClick={() => setCompare(!compare)}>Compare with best</button>
-              <button className="button secondary" disabled={busy || !asset || burst.best_id === asset.id}
-                onClick={() => asset && onChooseBest(burst, asset.id)}>Set as best</button>
-              <button className="button secondary reject" disabled={busy}
-                onClick={() => setConfirmReject(burst)}>Reject rest…</button>
+              <button className="button secondary" disabled={!canChooseBest} aria-keyshortcuts="B"
+                onClick={() => asset && onChooseBest(burst, asset.id)}>Set as best <kbd aria-hidden="true">B</kbd></button>
+              <button className="button secondary reject" disabled={!canRejectRest} aria-keyshortcuts="R"
+                onClick={() => setConfirmReject(burst)}>Reject rest… <kbd aria-hidden="true">R</kbd></button>
               {asset?.id === burst.best_id && <span className="score-badge">
                 {burst.user_best_id === asset.id ? 'Selected best' : 'Recommended best'}
               </span>}
@@ -249,6 +258,9 @@ export function Review(props: ReviewProps) {
                 <span className="score-badge">Recommended</span>}
             </div>
           )}
+          {loadError && <div className="review-retry">
+            <button className="button secondary" onClick={() => setRetry((value) => value + 1)}>Retry review</button>
+          </div>}
         </div>
         {compare && burst && asset && asset.id !== burst.best_id ? (
           <div className="comparison">
@@ -278,7 +290,7 @@ export function Review(props: ReviewProps) {
                 ><ChevronLeft size={16} /></button>
                 <span>Page {cursors.length}</span>
                 <button className="icon-button" aria-label="Next asset page"
-                  disabled={nextCursor === null}
+                  disabled={!nextAvailable || nextCursor === null}
                   onClick={() => {
                     if (nextCursor !== null) { setCursors([...cursors, nextCursor]); setSelected('first') }
                   }}

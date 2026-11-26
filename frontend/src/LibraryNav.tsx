@@ -1,8 +1,9 @@
 import { CalendarDays, ChevronLeft, ChevronRight, Folder, Images, Layers, RefreshCw } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AnalysisFilters, ConfirmAction } from './Analysis'
 import { message, request, useRemote } from './api'
 import type { Burst, Group, GroupBy, Library, Page, Progress } from './api'
+import { useShortcuts } from './shortcuts'
 
 type NavProps = {
   base: string
@@ -24,15 +25,43 @@ type NavProps = {
 function GroupList({ base, by, group, selectGroup, version, filters }: Pick<NavProps,
   'base' | 'by' | 'group' | 'selectGroup' | 'version' | 'filters'>) {
   const [cursors, setCursors] = useState<(string | null)[]>([null])
+  const [retry, setRetry] = useState(0)
+  const pendingBoundary = useRef<'first' | 'last'>(null)
   const cursor = cursors.at(-1) ?? null
   const isBurst = by === 'burst'
   const params = new URLSearchParams(isBurst ? filters : new URLSearchParams({ by }))
   if (cursor !== null) params.set('cursor', cursor)
   const groups = useRemote<Page<Group | Burst, string | number>>(
-    `${base}/${isBurst ? 'bursts' : 'groups'}?${params}`, version,
+    `${base}/${isBurst ? 'bursts' : 'groups'}?${params}`, version + retry,
   )
+  const items = groups?.data?.items
   const next = groups?.data?.next_cursor
   const Icon = isBurst ? Layers : by === 'folder' ? Folder : CalendarDays
+
+  useEffect(() => {
+    if (!groups || pendingBoundary.current === null) return
+    const item = items?.at(pendingBoundary.current === 'first' ? 0 : -1)
+    pendingBoundary.current = null
+    if (item && 'id' in item) selectGroup(String(item.id))
+  }, [groups, items, selectGroup])
+
+  useShortcuts((key, event) => {
+    if (!isBurst || !items || groups?.error || (key !== '[' && key !== ']') ||
+      event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
+    event.preventDefault()
+    const direction = key === '[' ? -1 : 1
+    const index = items.findIndex((item) => 'id' in item && String(item.id) === group)
+    const target = items[index < 0 ? (direction > 0 ? 0 : items.length - 1) : index + direction]
+    if (target && 'id' in target) {
+      selectGroup(String(target.id))
+    } else if (direction < 0 && cursors.length > 1) {
+      pendingBoundary.current = 'last'
+      setCursors(cursors.slice(0, -1))
+    } else if (direction > 0 && next != null) {
+      pendingBoundary.current = 'first'
+      setCursors([...cursors, String(next)])
+    }
+  })
 
   return (
     <>
@@ -45,7 +74,7 @@ function GroupList({ base, by, group, selectGroup, version, filters }: Pick<NavP
           <Images size={16} />
           <span>All assets</span>
         </button>}
-        {groups?.data?.items.map((item) => {
+        {!groups?.error && items?.map((item) => {
           const key = 'id' in item ? String(item.id) : item.name
           const name = 'id' in item ? item.captured_at.replace('T', ' ') : item.name || 'Library root'
           return (
@@ -53,6 +82,7 @@ function GroupList({ base, by, group, selectGroup, version, filters }: Pick<NavP
               key={key}
               className="group-row"
               aria-current={key === group ? 'true' : undefined}
+              aria-label={'id' in item ? `Burst at ${name}, ${item.member_count} photos` : undefined}
               title={name}
               onClick={() => selectGroup(key)}
             >
@@ -62,8 +92,14 @@ function GroupList({ base, by, group, selectGroup, version, filters }: Pick<NavP
             </button>
           )
         })}
-        {isBurst && groups?.data?.items.length === 0 && <p className="group-empty">No bursts on this page</p>}
-        {groups?.error && <p className="inline-error">{groups.error}</p>}
+        {!groups && <p className="group-empty" role="status">Loading {isBurst ? 'bursts' : 'groups'}…</p>}
+        {isBurst && !groups?.error && items?.length === 0 && <p className="group-empty" role="status">
+          {filters ? 'No bursts match these filters.' : cursors.length > 1 ? 'This page is empty.' : 'No bursts yet.'}
+        </p>}
+        {groups?.error && <div className="group-feedback">
+          <p className="inline-error" role="alert">{groups.error}</p>
+          <button className="button quiet" onClick={() => setRetry((value) => value + 1)}>Retry groups</button>
+        </div>}
       </div>
       {(cursors.length > 1 || next != null) && (
         <div className="group-pages">
@@ -79,7 +115,7 @@ function GroupList({ base, by, group, selectGroup, version, filters }: Pick<NavP
             className="icon-button"
             title="Next groups"
             aria-label="Next groups"
-            disabled={next == null}
+            disabled={next == null || !!groups?.error}
             onClick={() => next != null && setCursors((values) => [...values, String(next)])}
           ><ChevronRight size={16} /></button>
         </div>
@@ -151,7 +187,7 @@ export function LibraryNav(props: NavProps) {
       </div>
       <nav className="group-nav" aria-label="Browse assets">
         <div className="section-heading">Browse</div>
-        <div className="segment" aria-label="Group by">
+        <div className="segment" role="group" aria-label="Group by">
           <button aria-pressed={by === 'folder'} onClick={() => selectBy('folder')}>
             <Folder size={15} /> Folders
           </button>

@@ -1,8 +1,17 @@
 import { Check, FileOutput, Star, Undo2, X } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
+import { Dialog } from './Dialog'
 import { assetName, json, message, request } from './api'
 import { ScoreBadges } from './Analysis'
 import type { Asset, XmpPlan } from './api'
+
+const scoreStates = {
+  pending: 'Scoring queued',
+  running: 'Scoring in progress',
+  error: 'Scoring failed',
+  skipped: 'Scoring skipped',
+  done: 'Scores unavailable',
+}
 
 type InspectorProps = {
   base: string
@@ -19,14 +28,8 @@ function XmpDialog({ plan, onClose, onWrite }: {
   onClose: () => void
   onWrite: () => Promise<void>
 }) {
-  const dialog = useRef<HTMLDialogElement>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
-  useEffect(() => {
-    const element = dialog.current
-    if (element && !element.open) element.showModal()
-    return () => { if (element?.open) element.close() }
-  }, [])
 
   async function apply() {
     setBusy(true)
@@ -42,16 +45,8 @@ function XmpDialog({ plan, onClose, onWrite }: {
   }
 
   return (
-    <dialog
-      className="xmp-dialog"
-      ref={dialog}
-      aria-labelledby="xmp-title"
-      onCancel={(event) => {
-        event.preventDefault()
-        if (!busy) onClose()
-      }}
-    >
-      <h2 id="xmp-title">{plan.action === 'unchanged' ? 'Sidecar is up to date' : 'Write XMP sidecar?'}</h2>
+    <Dialog title={plan.action === 'unchanged' ? 'Sidecar is up to date' : 'Write XMP sidecar?'}
+      onClose={onClose} busy={busy}>
       <p>{plan.action === 'create' ? 'Create' : plan.action === 'update' ? 'Update' : 'Current sidecar'}</p>
       <code>{plan.sidecar}</code>
       <p>XMP rating <strong>{plan.rating}</strong></p>
@@ -66,7 +61,7 @@ function XmpDialog({ plan, onClose, onWrite }: {
           </button>
         )}
       </div>
-    </dialog>
+    </Dialog>
   )
 }
 
@@ -155,20 +150,22 @@ export function Inspector({ base, asset, busy, undoAvailable, onRating, onUndo, 
       </div>
       {asset && (
         <>
-          {(asset.score_status || asset.auto_reject) && (
-            <div className="inspector-section">
-              <div className="section-heading">Scores</div>
-              <ScoreBadges asset={asset} />
-              {asset.sharpness === null && asset.score_status && (
-                <p className="score-state" title={asset.score_error ?? undefined}>Scoring {asset.score_status}</p>
+          <div className="inspector-section">
+            <div className="section-heading">Scores</div>
+            {(asset.sharpness !== null || asset.auto_reject) && <ScoreBadges asset={asset} />}
+            {asset.kind === 'video' ? <p className="score-state">Scores apply to still images.</p>
+              : (asset.sharpness === null || (asset.score_status && asset.score_status !== 'done')) && (
+                <p className={asset.score_status === 'error' ? 'inline-error' : 'score-state'} role="status">
+                  {asset.score_status ? scoreStates[asset.score_status] : 'Awaiting scores'}
+                  {asset.score_error && <> · {asset.score_error}</>}
+                </p>
               )}
-              {asset.auto_reject && (
-                <button className="button quiet clear-flag" disabled={busy} onClick={() => onClearFlag(asset)}>
-                  Clear auto-reject
-                </button>
-              )}
-            </div>
-          )}
+            {asset.auto_reject && (
+              <button className="button quiet clear-flag" disabled={busy} onClick={() => onClearFlag(asset)}>
+                Clear auto-reject
+              </button>
+            )}
+          </div>
           <div className="inspector-section file-info">
             <div className="section-heading">File details</div>
             <div className="file-name" title={asset.path}>{filename}</div>

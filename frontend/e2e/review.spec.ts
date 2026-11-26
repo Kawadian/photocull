@@ -1,0 +1,96 @@
+import { expect, test } from '@playwright/test'
+import type { Page } from '@playwright/test'
+
+function burstAt(page: Page, seconds: string) {
+  return page.getByRole('button', { name: new RegExp(`Burst at .*04:05:${seconds}`) })
+}
+
+test('filter and review bursts with keyboard shortcuts and reversible flags', async ({ page }) => {
+  const review = page.getByRole('main', { name: 'Photo review' })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Bursts', exact: true }).click()
+  await expect(page.getByText('No bursts yet.')).toBeVisible()
+  await page.getByRole('button', { name: 'Scan library', exact: true }).click()
+  await expect(burstAt(page, '05')).toBeVisible()
+  await expect(burstAt(page, '15')).toBeVisible()
+
+  await page.keyboard.press(']')
+  await expect(burstAt(page, '05')).toHaveAttribute('aria-current', 'true')
+  await expect(review.getByRole('img', { name: 'a.jpg' })).toBeVisible()
+  await page.keyboard.press('ArrowRight')
+  await expect(review.getByRole('img', { name: 'b.jpg' })).toBeVisible()
+
+  await page.keyboard.press('?')
+  const help = page.getByRole('dialog', { name: 'Keyboard shortcuts' })
+  await expect(help).toBeVisible()
+  await expect(help.getByRole('button', { name: 'Close' })).toBeFocused()
+  await page.keyboard.press('ArrowRight')
+  await page.keyboard.press('Escape')
+  await expect(help).toBeHidden()
+  await expect(review.getByRole('img', { name: 'b.jpg' })).toBeVisible()
+
+  await review.getByRole('button', { name: 'Compare with best' }).click()
+  await expect(review.getByText('Current photo', { exact: true })).toBeVisible()
+  await expect(review.getByText('Best · c.jpg', { exact: true })).toBeVisible()
+  await page.keyboard.press('b')
+  await expect(review.getByText('Selected best', { exact: true })).toBeVisible()
+  await page.keyboard.press('4')
+  await expect(page.getByRole('button', { name: 'Rate 4 stars' })).toHaveAttribute('aria-pressed', 'true')
+
+  await page.keyboard.press('r')
+  const confirm = page.getByRole('dialog', { name: 'Reject the other photos in this burst?' })
+  await expect(confirm.getByRole('button', { name: 'Cancel' })).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(confirm).toBeHidden()
+  await page.keyboard.press('r')
+  await confirm.getByRole('button', { name: 'Flag remaining photos' }).click()
+  await expect(page.getByText('Flagged 2 photos in the burst.')).toBeVisible()
+  await page.keyboard.press('Shift+U')
+  await expect(page.getByText('Removed 2 burst flags.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Rate 4 stars' })).toHaveAttribute('aria-pressed', 'true')
+  await page.keyboard.press('u')
+  await expect(page.getByRole('button', { name: 'Rate 4 stars' })).toHaveAttribute('aria-pressed', 'false')
+
+  await page.keyboard.press(']')
+  await expect(burstAt(page, '15')).toHaveAttribute('aria-current', 'true')
+  await expect(review.getByRole('img', { name: 'd.jpg' })).toBeVisible()
+  await page.keyboard.press('[')
+  await expect(burstAt(page, '05')).toHaveAttribute('aria-current', 'true')
+
+  await page.getByRole('button', { name: 'Folders' }).click()
+  await page.getByText('Score filters', { exact: true }).click()
+  await page.getByLabel('Auto-reject', { exact: true }).selectOption('true')
+  await page.getByRole('button', { name: 'Apply' }).click()
+  await expect(review.getByRole('img', { name: 'white.jpg' })).toBeVisible()
+  await expect(page.getByText('Clipped highlights', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Clear auto-reject', exact: true }).click()
+  await expect(review.getByText('No matching assets')).toBeVisible()
+})
+
+test('375px layout, focus visibility and burst list error recovery', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.goto('/')
+  await page.getByLabel('Library', { exact: true }).selectOption('mobile')
+  const shortcuts = page.getByRole('button', { name: 'Keyboard shortcuts' })
+  await shortcuts.focus()
+  const focus = await shortcuts.evaluate((element) => getComputedStyle(element).outlineStyle)
+  expect(focus).toBe('solid')
+
+  await page.route(/\/api\/libraries\/mobile\/bursts(?:\?.*)?$/, (route) =>
+    route.fulfill({ status: 503, json: { detail: 'Burst list temporarily unavailable' } }),
+  { times: 1 })
+  await page.getByRole('button', { name: 'Bursts', exact: true }).click()
+  await expect(page.getByRole('alert')).toHaveText('Burst list temporarily unavailable')
+  await page.getByRole('button', { name: 'Retry groups' }).click()
+  await expect(page.getByText('No bursts yet.')).toBeVisible()
+  await page.getByRole('button', { name: 'Scan library', exact: true }).click()
+  await burstAt(page, '05').click()
+  const review = page.getByRole('main', { name: 'Photo review' })
+  await expect(review.getByRole('img', { name: 'a.jpg' })).toBeVisible()
+  await review.getByRole('button', { name: 'Compare with best' }).click()
+  await expect(review.getByRole('img', { name: 'c.jpg' })).toBeVisible()
+  const current = await review.getByText('Current photo', { exact: true }).boundingBox()
+  const best = await review.getByText('Best · c.jpg', { exact: true }).boundingBox()
+  expect(best?.y).toBeGreaterThan(current?.y ?? 0)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(375)
+})
