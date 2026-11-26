@@ -529,7 +529,7 @@ function Recommendations({ base, capability, version, openReview }: ScreenProps)
 type Transfer = {
   id: string; kind: 'copy' | 'zip' | 'report'; status: 'pending' | 'running' | 'cancelling' | 'cancelled' | 'error' | 'done'
   destination: string | null; error: string | null; processed: number; total: number
-  total_bytes: number; written_bytes: number
+  total_bytes: number; written_bytes: number; cancellable: boolean
 }
 const bool = (value: FormDataEntryValue | null) => value === 'true' ? true : value === 'false' ? false : null
 
@@ -622,7 +622,7 @@ function Transfers({ base, version, capability, report }: ScreenProps & { report
         <div className="insight-actions">
           {item.status === 'done' && item.kind !== 'copy' && <a className="button secondary"
             href={`${url}/${item.id}/download`} download>Download {item.kind === 'report' ? 'HTML' : 'ZIP'}</a>}
-          {['pending', 'running'].includes(item.status) && <button className="button secondary" disabled={work.busy}
+          {item.cancellable && <button className="button secondary" disabled={work.busy}
             onClick={() => { void work.action(`${url}/${item.id}`, { method: 'DELETE' }).catch(() => {}) }}>Cancel</button>}
         </div>
       </article>)}

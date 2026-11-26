@@ -99,7 +99,7 @@ Hugging Face Hub client.
   original file bytes. **Include existing XMP sidecars** copies an existing
   `.xmp` or `.XMP` file with the matching exported stem. The source is opened read
   only. Progress is reported through SQLite. Cancellation discards temporary
-  output. A worker restart restarts an interrupted transfer from its
+  output until final publication starts. A worker restart restarts an interrupted transfer from its
   selection or recognizes an already published output by its filesystem
   identity. Publication uses an atomic no-replace rename on the destination
   filesystem. An existing destination is an error. The standalone XMP write action

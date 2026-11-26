@@ -136,7 +136,7 @@ test('mobile export reports validation errors and allows a queued transfer to be
   let status = 'pending'
   await page.route('**/insights/transfers?kind=export', (route) => route.fulfill({ json: { items: [{
     id, kind: 'zip', status, destination: null, error: null, processed: 0, total: 0,
-    total_bytes: 0, written_bytes: 0,
+    total_bytes: 0, written_bytes: 0, cancellable: status === 'pending',
   }] } }))
   await page.route(`**/insights/transfers/${id}`, (route) => {
     status = 'cancelled'

@@ -483,7 +483,7 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
             get_transfer(db, job_id, config)
             request = cancel(db, job_id)
         if request is None:
-            raise HTTPException(409, "The transfer has already finished")
+            raise HTTPException(409, "This transfer is being published or has already finished")
         return public(request)
 
     @app.get(PREFIX + "/transfers/{job_id}/download")

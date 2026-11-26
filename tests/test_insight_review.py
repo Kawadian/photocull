@@ -275,6 +275,10 @@ def test_restart_after_publication_checks_output_identity(staged_worker, monkeyp
     publish = transfer_worker.rename_output
 
     def interrupted(*args):
+        # SQLite is writable by the API while the worker publishes into a folder.
+        with connect(worker.state / "index.db") as api:
+            assert cancel(api, job) is None
+            api.execute("UPDATE catalog_status SET revision = revision + 1")
         publish(*args)
         raise SystemExit
 
@@ -282,7 +286,7 @@ def test_restart_after_publication_checks_output_identity(staged_worker, monkeyp
         patch.setattr(transfer_worker, "rename_output", interrupted)
         with pytest.raises(SystemExit):
             worker.step(noop)
-    assert cancel(worker.db, job)["status"] == "cancelling"
+    assert cancel(worker.db, job) is None
     worker.recover()
     assert (
         worker.db.execute("SELECT status FROM transfers WHERE id=?", (job,)).fetchone()[0] == "done"

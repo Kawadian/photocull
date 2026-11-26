@@ -249,26 +249,20 @@ class Transfers:
 
     def publish(self, job_id, pulse, parent, staged, name, info):
         self.check(job_id, pulse)
-        # Commit the staged object's identity before rename. If SQLite has to
-        # recover after rename, an unrelated directory can never stand in for it.
-        self.db.execute(
-            "UPDATE transfers SET output_device=?, output_inode=? WHERE id=?",
+        # This short SQLite update is the cancellation boundary. The filesystem
+        # operation can block on an external destination without holding the DB lock.
+        if not self.db.execute(
+            """UPDATE transfers SET output_device=?, output_inode=?
+               WHERE id=? AND status='running' AND output_inode IS NULL""",
             (*identity(info), job_id),
-        )
-        with write(self.db):
-            if (
-                self.db.execute("SELECT status FROM transfers WHERE id=?", (job_id,)).fetchone()[0]
-                == "cancelling"
-            ):
-                raise Cancelled
-            if identity(os.stat(staged, dir_fd=parent, follow_symlinks=False)) != identity(info):
-                raise OSError("Staged output was replaced")
-            rename_output(parent, staged, name)
-            self.db.execute(
-                "UPDATE transfers SET status='done', finished_at=? WHERE id=?",
-                (time.time(), job_id),
-            )
-            mark_catalog_updated(self.db)
+        ).rowcount:
+            raise Cancelled
+        if identity(os.stat(staged, dir_fd=parent, follow_symlinks=False)) != identity(info):
+            raise OSError("Staged output was replaced")
+        rename_output(parent, staged, name)
+        if identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != identity(info):
+            raise OSError("The destination changed during publication")
+        self.finish(job_id, "done")
 
     def export(self, job, pulse):
         job_id = job["id"]

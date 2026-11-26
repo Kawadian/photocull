@@ -73,7 +73,11 @@ def enqueue(db, kind, body):
 def public(row):
     result = dict(row)
     options = json.loads(result.pop("request"))
-    del result["output_device"], result["output_inode"]
+    result["cancellable"] = result.pop("output_inode") is None and result["status"] in {
+        "pending",
+        "running",
+    }
+    del result["output_device"]
     result["destination"] = options.get("destination")
     return result
 
@@ -84,7 +88,8 @@ def cancel(db, job_id):
             """UPDATE transfers SET status = CASE status WHEN 'pending' THEN 'cancelled'
                                                    ELSE 'cancelling' END,
                       finished_at = CASE WHEN status='pending' THEN ? ELSE NULL END
-               WHERE id = ? AND status IN ('pending','running','cancelling')
+               WHERE id = ? AND output_inode IS NULL
+                 AND status IN ('pending','running','cancelling')
                RETURNING *""",
             (time.time(), job_id),
         ).fetchone()
