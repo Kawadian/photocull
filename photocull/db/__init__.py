@@ -14,15 +14,16 @@ MIGRATIONS = (
     "0004_scores_and_bursts.sql",
     "0005_incremental_bursts.sql",
     "0006_embeddings.sql",
+    "0007_ml_recovery.sql",
+    "0008_incremental_similarity.sql",
 )
 BUSY_TIMEOUT_MS = 10_000
 
 
 @contextmanager
-def connect(path: Path) -> Iterator[sqlite3.Connection]:
-    with closing(sqlite3.connect(path, timeout=BUSY_TIMEOUT_MS / 1000, isolation_level=None)) as db:
+def connect(path: Path, *, timeout_ms: int = BUSY_TIMEOUT_MS) -> Iterator[sqlite3.Connection]:
+    with closing(sqlite3.connect(path, timeout=timeout_ms / 1000, isolation_level=None)) as db:
         db.row_factory = sqlite3.Row
-        db.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
         db.execute("PRAGMA synchronous = NORMAL")
         db.execute("PRAGMA foreign_keys = ON")
         yield db

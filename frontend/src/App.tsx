@@ -1,5 +1,5 @@
 import { Aperture, Images, Keyboard } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { ApiError, assetName, json, message, request, useProgress, useRemote } from './api'
 import type { Asset, Burst, GroupBy, Library, Rating } from './api'
 import { ShortcutHelp } from './Dialog'
@@ -8,16 +8,9 @@ import type { Lookup } from './ML'
 import { Review } from './Review'
 import { useShortcuts } from './shortcuts'
 
-function Header({ connected, heartbeat, onHelp }: {
-  connected?: boolean; heartbeat?: number; onHelp?: () => void
+function Header({ connected, online, onHelp }: {
+  connected?: boolean; online?: boolean; onHelp?: () => void
 }) {
-  const [now, setNow] = useState(() => Date.now() / 1000)
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now() / 1000), 5000)
-    return () => window.clearInterval(timer)
-  }, [])
-  const online = connected && heartbeat !== undefined && now - heartbeat < 30
-
   return (
     <header className="app-header">
       <div className="wordmark"><Aperture size={24} strokeWidth={1.9} /><span>Photocull</span></div>
@@ -56,6 +49,10 @@ function Workspace({ libraries, library, selectLibrary }: {
   const [notice, setNotice] = useState<string>()
   const [help, setHelp] = useState(false)
   const inFlight = useRef(false)
+  const searchInput = useRef<HTMLInputElement>(null)
+  const focusBeforeSearch = useRef<HTMLElement>(null)
+  const similarButton = useRef<HTMLButtonElement>(null)
+  const reviewHeading = useRef<HTMLHeadingElement>(null)
   const version = (progress?.catalog_revision ?? 0) + refresh
   const reviewFilters = new URLSearchParams(filters)
   if (tag && progress?.ml.tags_enabled) reviewFilters.set('tag', tag)
@@ -67,6 +64,30 @@ function Workspace({ libraries, library, selectLibrary }: {
       setBy('folder')
       setGroup(null)
     }
+  }
+
+  function closeLookup() {
+    const fromSimilar = !!lookup?.source
+    setLookup(undefined)
+    window.requestAnimationFrame(() => {
+      const target = fromSimilar ? similarButton.current : searchInput.current
+      if (target && !target.disabled) target.focus()
+      else reviewHeading.current?.focus()
+    })
+  }
+
+  function escapeSearchInput() {
+    if (lookup) {
+      closeLookup()
+      return true
+    }
+    const origin = focusBeforeSearch.current
+    focusBeforeSearch.current = null
+    if (origin?.isConnected) {
+      origin.focus()
+      return true
+    }
+    return false
   }
 
   async function changeRating(assetId: number, rating: number, rejected: boolean, revision: number) {
@@ -161,6 +182,18 @@ function Workspace({ libraries, library, selectLibrary }: {
 
   useShortcuts((key, event) => {
     if (event.ctrlKey || event.metaKey || event.altKey || event.repeat) return
+    if (key === '/' && searchInput.current && !searchInput.current.disabled) {
+      event.preventDefault()
+      const active = document.activeElement
+      focusBeforeSearch.current = active instanceof HTMLElement && active !== document.body
+        ? active : reviewHeading.current
+      searchInput.current.focus()
+      searchInput.current.select()
+    }
+    if (key === 'escape' && lookup) {
+      event.preventDefault()
+      closeLookup()
+    }
     if (key === '?') {
       event.preventDefault()
       setHelp(true)
@@ -173,7 +206,7 @@ function Workspace({ libraries, library, selectLibrary }: {
 
   return (
     <div className="app">
-      <Header connected={connected} heartbeat={progress?.worker?.heartbeat} onHelp={() => setHelp(true)} />
+      <Header connected={connected} online={connected && progress?.worker_online} onHelp={() => setHelp(true)} />
       {help && <ShortcutHelp onClose={() => setHelp(false)} />}
       {error && (
         <div className="status-banner" role="alert">
@@ -213,6 +246,7 @@ function Workspace({ libraries, library, selectLibrary }: {
           tag={tag} selectTag={selectTag} onSearch={(query) => setLookup({
             title: `Search · ${query}`, url: `${base}/search`, body: { query, tag: tag || undefined },
           })}
+          searchInputRef={searchInput} onSearchEscape={escapeSearchInput}
           analysisBusy={busy} onClearAll={clearAll}
         />
         {!lookup && (by === 'burst' || by === 'similar') && group === null ? (
@@ -225,11 +259,12 @@ function Workspace({ libraries, library, selectLibrary }: {
           base={base} by={by} group={group} version={version} ratings={ratings}
           busy={busy} undoAvailable={!!undo} onRating={rate} onUndo={undoRating}
           filters={String(reviewFilters)} onChooseBest={chooseBest} onRejectRest={rejectRest}
-          lookup={lookup} onCloseLookup={() => setLookup(undefined)} ml={progress?.ml}
+          lookup={lookup} onCloseLookup={closeLookup} ml={progress?.ml}
+          workerOnline={!!progress?.worker_online} headingRef={reviewHeading} similarRef={similarButton}
           onTag={selectTag} activeTag={tag}
           onSimilar={(asset) => setLookup({
             title: `Similar to ${assetName(asset)}`,
-            url: `${base}/assets/${asset.id}/similar`, body: { tag: tag || undefined },
+            url: `${base}/assets/${asset.id}/similar`, body: { tag: tag || undefined }, source: asset,
           })}
           onClearFlag={(asset) => analysisAction(`assets/${asset.id}/auto-reject`, { method: 'DELETE' })}
         />}

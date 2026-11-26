@@ -6,7 +6,8 @@ import numpy as np
 
 from photocull.config import MLSettings
 from photocull.db import connect
-from photocull.worker.ml.grouping import rebuild
+from photocull.worker.ml.grouping import SimilarityGroups
+from photocull.worker.ml.process import MAX_INFERENCE_BATCH
 from photocull.worker.ml.vectors import STORAGE_DTYPE, blob_vector, exact_search, normalized
 
 
@@ -19,7 +20,7 @@ class Engine:
         self.tag_vectors = None
         self.tag_work = None
         self.tag_names = tuple(sorted(settings.vocabulary))
-        self.group_work = None
+        self.groups: SimilarityGroups | None = None
 
     def images(self, paths: list[Path]) -> list[tuple[bytes | None, str | None]]:
         vectors, errors = self.model.image_vectors(paths)
@@ -57,7 +58,7 @@ class Engine:
             for label in labels
         ]
         batches = []
-        size = self.settings.batch_size
+        size = min(MAX_INFERENCE_BATCH, self.settings.batch_size)
         try:
             for start in range(0, len(prompts), size):
                 batch = prompts[start : start + size]
@@ -102,10 +103,10 @@ class Engine:
 
     def search(self, path: Path, request: dict) -> list[tuple[int, str, float]]:
         asset_id = request["asset_id"]
+        vector = self.text_vectors([request["query"]])[0] if asset_id is None else None
         with connect(path) as db:
-            if asset_id is None:
-                vector = self.text_vectors([request["query"]])[0]
-            else:
+            db.execute("BEGIN")
+            if asset_id is not None:
                 row = db.execute(
                     """SELECT vector FROM asset_embeddings
                        WHERE asset_id = ? AND model_key = ? AND content_hash = ?""",
@@ -116,7 +117,6 @@ class Engine:
                         "The source photo changed. Try again from its current preview."
                     )
                 vector = blob_vector(row[0])
-            db.execute("BEGIN")
             return exact_search(
                 db,
                 self.key,
@@ -128,33 +128,20 @@ class Engine:
                 tag_key=self.tag_key,
             )
 
-    def group_step(self, path: Path, generation: int) -> bool:
-        if self.group_work is not None:
-            active, revision, _ = self.group_work
-            if path != active:
-                with connect(active) as db:
-                    state = db.execute("SELECT generation, image_error FROM ml_state").fetchone()
-                if state["generation"] == revision and not state["image_error"]:
-                    return False
-                self.drop_group()
-            elif generation != revision:
-                self.drop_group()
-        if self.group_work is None:
-            self.group_work = path, generation, self._group(path, generation)
+    def group_step(self, path: Path) -> bool:
+        if self.groups is not None and self.groups.path != path:
+            with connect(self.groups.path) as active:
+                state = active.execute(
+                    "SELECT generation, grouped_generation, group_error FROM ml_state"
+                ).fetchone()
+            if state["generation"] != state["grouped_generation"] and not state["group_error"]:
+                return False
+        if self.groups is None or self.groups.path != path:
+            self.groups = SimilarityGroups(path, self.key, self.settings.similar_threshold)
         try:
-            next(self.group_work[2])
-        except StopIteration:
-            self.drop_group()
+            with connect(path) as db:
+                return self.groups.step(db)
         except BaseException:
-            self.drop_group()
+            # The durable assignment transaction may have rolled back.
+            self.groups = None
             raise
-        return True
-
-    def _group(self, path: Path, generation: int):
-        with connect(path) as db:
-            yield from rebuild(db, self.key, generation, self.settings.similar_threshold)
-
-    def drop_group(self) -> None:
-        if self.group_work is not None:
-            self.group_work[2].close()
-            self.group_work = None

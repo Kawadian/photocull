@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -14,7 +15,7 @@ from typing import Annotated, Literal
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi import Path as RoutePath
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 
@@ -39,7 +40,15 @@ from photocull.db.catalog import (
 )
 from photocull.db.catalog import set_rating as save_rating
 from photocull.db.jobs import progress, request_scan, retry_job
-from photocull.db.search import QueueFull, QueueUnavailable, enqueue, get_result
+from photocull.db.search import (
+    QueueFull,
+    QueueUnavailable,
+    SearchTimedOut,
+    cancel,
+    enqueue,
+    get_result,
+    worker_online,
+)
 from photocull.media.cache import cache_path
 from photocull.media.xmp import XMPConflict, XMPError, export_xmp
 
@@ -50,6 +59,7 @@ ScoreBound = Annotated[float, Query(ge=0, le=1)]
 SQLITE_MAX_ID = 2**63 - 1
 Cursor = Annotated[int, Query(ge=0, le=SQLITE_MAX_ID)]
 CatalogId = Annotated[int, RoutePath(gt=0, le=SQLITE_MAX_ID)]
+SearchId = Annotated[str, RoutePath(pattern=r"^[a-f0-9]{32}$")]
 TagKey = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")]
 
 
@@ -109,6 +119,7 @@ class XMPUpdate(BaseModel):
 def _get_progress(path: Path, settings: MLSettings | None = None) -> dict:
     with connect(path) as db:
         result = progress(db)
+        result["worker_online"] = worker_online(db, path, time.time())
     if settings is not None:
         ml = result["ml"]
         configured = ml["enabled"] and ml["model_key"] == settings.model_key
@@ -117,7 +128,7 @@ def _get_progress(path: Path, settings: MLSettings | None = None) -> dict:
         ml["search_enabled"] = settings.enabled and settings.search_enabled
         ml["tags_enabled"] = settings.enabled and settings.tags_enabled
         if not (settings.enabled and configured):
-            for field in ("image_error", "text_error", "group_error"):
+            for field in ("image_error", "text_error", "tag_error", "group_error"):
                 ml[field] = None
             ml["grouping"] = False
             result["stages"].pop("embedding", None)
@@ -205,12 +216,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/health")
     def health():
         libraries = {}
-        now = time.time()
         for name in settings.libraries:
-            details = _get_progress(library_path(name), ml)
-            heartbeat = details["worker"]
-            details["worker_online"] = bool(heartbeat and now - heartbeat["heartbeat"] < 30)
-            libraries[name] = details
+            libraries[name] = _get_progress(library_path(name), ml)
         return {"status": "ok", "rss_mb": _rss_mb(), "libraries": libraries}
 
     @app.get("/api/libraries")
@@ -316,10 +323,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         path = library_path(library)
         require_ml(text=query is not None)
         require_tag(params.tag)
-        with connect(path) as db:
+        with connect(path, timeout_ms=500) as db:
             try:
                 search_id = enqueue(
-                    db, ml, query=query, asset_id=asset_id, tag=params.tag, limit=params.limit
+                    db, path, ml, query=query, asset_id=asset_id, tag=params.tag, limit=params.limit
                 )
             except QueueUnavailable as error:
                 raise HTTPException(503, str(error)) from error
@@ -327,6 +334,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(429, str(error)) from error
             except LookupError as error:
                 raise HTTPException(404, str(error)) from error
+            except sqlite3.OperationalError as error:
+                if error.sqlite_errorcode != sqlite3.SQLITE_BUSY:
+                    raise
+                raise HTTPException(503, "The catalog is busy. Try the search again.") from error
         return {"id": search_id}
 
     @app.post("/api/libraries/{library}/search", status_code=202)
@@ -338,18 +349,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return submit_search(library, params, asset_id=asset_id)
 
     @app.get("/api/libraries/{library}/search/{search_id}")
-    def search_result(
-        library: str, search_id: Annotated[str, RoutePath(pattern=r"^[a-f0-9]{32}$")]
-    ):
+    def search_result(library: str, search_id: SearchId):
         path = library_path(library)
         require_ml()
         with connect(path) as db:
             db.execute("BEGIN")
-            result = get_result(db, search_id, model_key, tag_key if ml.tags_enabled else None)
+            try:
+                result = get_result(
+                    db, path, search_id, model_key, tag_key if ml.tags_enabled else None
+                )
+            except QueueUnavailable as error:
+                raise HTTPException(503, str(error)) from error
+            except SearchTimedOut as error:
+                raise HTTPException(504, str(error)) from error
             if result is None:
                 raise HTTPException(404, "Unknown or expired search")
             add_tags(db, result["items"])
             return result
+
+    @app.delete("/api/libraries/{library}/search/{search_id}", status_code=204)
+    def cancel_search(library: str, search_id: SearchId):
+        with connect(library_path(library), timeout_ms=500) as db:
+            try:
+                cancel(db, search_id)
+            except sqlite3.OperationalError as error:
+                if error.sqlite_errorcode != sqlite3.SQLITE_BUSY:
+                    raise
+                raise HTTPException(503, "The catalog is busy.") from error
+        return Response(status_code=204)
 
     @app.get("/api/libraries/{library}/bursts")
     def bursts(

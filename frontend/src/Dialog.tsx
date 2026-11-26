@@ -41,8 +41,14 @@ const burstKeys = [
   ['Shift+U', 'Undo the last burst rejection'],
 ]
 
+const searchKeys = [
+  ['/', 'Focus photo search'],
+  ['Enter', 'Submit the search'],
+  ['Esc', 'Leave the search field or close results'],
+]
+
 export function ShortcutHelp({ onClose }: { onClose: () => void }) {
-  const sections = [['Photo review', reviewKeys], ['Burst review', burstKeys]] as const
+  const sections = [['Photo review', reviewKeys], ['Burst review', burstKeys], ['Photo search', searchKeys]] as const
   return (
     <Dialog title="Keyboard shortcuts" onClose={onClose}>
       {sections.map(([section, keys]) => (

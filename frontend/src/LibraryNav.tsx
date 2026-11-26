@@ -1,5 +1,6 @@
 import { CalendarDays, ChevronLeft, ChevronRight, Folder, Images, Layers, RefreshCw, Scan } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
+import type { Ref } from 'react'
 import { AnalysisFilters, ConfirmAction } from './Analysis'
 import { assetName, message, request, useRemote } from './api'
 import type { Burst, Group, GroupBy, Library, Page, Progress, SimilarGroup } from './api'
@@ -25,6 +26,8 @@ type NavProps = {
   tag: string
   selectTag: (tag: string) => void
   onSearch: (query: string) => void
+  searchInputRef: Ref<HTMLInputElement>
+  onSearchEscape: () => boolean
 }
 
 function GroupList({ base, by, group, selectGroup, version, filters, browsing, progress }: Pick<NavProps,
@@ -169,8 +172,11 @@ export function WorkerProgress({ progress }: { progress?: Progress }) {
           <span>{embedded} / {embeddingTotal}</span></div>
         <progress aria-label="Embedding progress" max={embeddingTotal || 1} value={embedded} />
         {!!embedding?.skipped && <p className="score-state">{embedding.skipped} skipped</p>}
-        {ml.image_error && <p className="inline-error" role="status">{ml.image_error}</p>}
-        {ml.text_error && <p className="inline-error" role="status">{ml.text_error}</p>}
+        {ml.image_error && (!progress?.worker_online || !ml.search_enabled || !!embedded || ml.text_error) &&
+          <p className="inline-error" role="status">{ml.image_error}</p>}
+        {ml.text_error && (!progress?.worker_online || !ml.search_enabled) &&
+          <p className="inline-error" role="status">{ml.text_error}</p>}
+        {ml.tag_error && <p className="inline-error" role="status">{ml.tag_error}</p>}
         {ml.group_error && <p className="inline-error" role="status">{ml.group_error}</p>}
       </div>}
       {!!errors && <p className="inline-error">{errors} {errors === 1 ? 'stage' : 'stages'} failed</p>}
@@ -181,7 +187,7 @@ export function WorkerProgress({ progress }: { progress?: Progress }) {
 
 export function LibraryNav(props: NavProps) {
   const { base, libraries, library, selectLibrary, by, selectBy, progress, filters,
-    setFilters, analysisBusy, onClearAll, tag, selectTag, onSearch } = props
+    setFilters, analysisBusy, onClearAll, tag, selectTag, onSearch, searchInputRef, onSearchEscape } = props
   const [scanning, setScanning] = useState(false)
   const [error, setError] = useState<string>()
   const [confirmClear, setConfirmClear] = useState(false)
@@ -212,7 +218,8 @@ export function LibraryNav(props: NavProps) {
         </button>
         {error && <p className="inline-error" role="alert">{error}</p>}
       </div>
-      <PhotoTools base={base} progress={progress} tag={tag} selectTag={selectTag} onSearch={onSearch} />
+      <PhotoTools base={base} progress={progress} tag={tag} selectTag={selectTag} onSearch={onSearch}
+        inputRef={searchInputRef} onEscape={onSearchEscape} />
       <nav className="group-nav" aria-label="Browse assets">
         <div className="section-heading">Browse</div>
         <div className="segment" role="group" aria-label="Group by">

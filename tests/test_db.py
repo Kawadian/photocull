@@ -115,3 +115,42 @@ def test_incremental_migration_preserves_existing_burst_decisions(tmp_path):
         assert get_burst(db, 1) == original
         assert db.execute("SELECT count(*) FROM burst_changes").fetchone()[0] == 0
         assert undo_burst_reject(db, token) == 1
+
+
+def test_ml_upgrade_preserves_existing_vectors_tags_and_queued_searches(tmp_path):
+    path = tmp_path / "phase-three.db"
+    with connect(path) as db:
+        for name in MIGRATIONS[:6]:
+            db.executescript(files("photocull.db").joinpath("migrations", name).read_text())
+        db.execute("PRAGMA user_version = 6")
+        db.execute("INSERT INTO scan_requests (id, status, created_at) VALUES (1, 'done', 0)")
+        db.executemany(
+            """INSERT INTO assets (id, path, folder, kind, size, mtime_ns, content_hash,
+                                   scan_id, day)
+               VALUES (?, ?, '', 'image', 8, 0, 'digest', 1, '2020-01-01')""",
+            [(1, "a.jpg"), (2, "b.jpg")],
+        )
+        db.execute("INSERT INTO embedding_models VALUES ('model', 'source', 'rev', '{}')")
+        db.execute("UPDATE ml_state SET enabled = 1, model_key = 'model'")
+        db.executemany(
+            "INSERT INTO asset_embeddings VALUES (?, 'model', 'digest', ?, 'tags')",
+            [(1, b"\x00\x3c"), (2, b"\x00\x3c")],
+        )
+        db.execute("INSERT INTO asset_tags VALUES (1, 'cat', 1)")
+        db.execute("INSERT INTO similar_groups VALUES (1, 2)")
+        db.executemany("INSERT INTO similar_members VALUES (?, 1)", [(1,), (2,)])
+        db.execute(
+            """INSERT INTO search_requests
+               (id,model_key,query,limit_results,created_at,status)
+               VALUES ('request', 'model', 'cat', 60, 0, 'pending')"""
+        )
+
+    initialize(path)
+    with connect(path) as db:
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert db.execute("SELECT count(*) FROM asset_embeddings").fetchone()[0] == 2
+        assert db.execute("SELECT tag FROM asset_tags").fetchone()[0] == "cat"
+        assert db.execute("SELECT attempts FROM search_requests").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM similar_groups").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM similar_dirty").fetchone()[0] == 2
+        assert db.execute("SELECT length(anchor_revision) FROM ml_state").fetchone()[0] == 32

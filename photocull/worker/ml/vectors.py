@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import numpy as np
+from numkong import angular
 
-BLOCK = 512
+BLOCK = 2048
 STORAGE_DTYPE = "<f2"
+
+VECTOR_PAGE = """
+    SELECT e.asset_id, e.vector FROM asset_embeddings AS e
+    WHERE e.model_key = ? AND e.asset_id > ?
+    ORDER BY e.asset_id LIMIT ?
+"""
+TAGGED_VECTOR_PAGE = """
+    SELECT t.asset_id, e.vector FROM asset_tags AS t
+    JOIN asset_embeddings AS e USING (asset_id)
+    WHERE t.tag = ? AND t.asset_id > ? AND e.model_key = ? AND e.tag_key = ?
+    ORDER BY t.asset_id LIMIT ?
+"""
 
 
 def normalized(vectors) -> np.ndarray:
@@ -20,34 +34,6 @@ def blob_vector(blob: bytes) -> np.ndarray:
     return normalized(np.frombuffer(blob, dtype=STORAGE_DTYPE))
 
 
-def vector_blocks(
-    db: sqlite3.Connection,
-    key: str,
-    *,
-    block_size: int = BLOCK,
-    tag: str | None = None,
-    tag_key: str | None = None,
-):
-    # Keyset paging gives each block a short read snapshot during grouping. Search
-    # opens its own transaction to see the same catalog across all its blocks.
-    after = 0
-    restriction = ""
-    params: tuple = ()
-    if tag is not None:
-        restriction = """AND e.tag_key = ? AND EXISTS
-            (SELECT 1 FROM asset_tags AS t WHERE t.asset_id = e.asset_id AND t.tag = ?)"""
-        params = (tag_key, tag)
-    while rows := db.execute(
-        f"""SELECT e.asset_id, e.content_hash, e.vector FROM asset_embeddings AS e
-            JOIN assets AS a ON a.id = e.asset_id
-            WHERE e.asset_id > ? AND e.model_key = ? AND a.active = 1 {restriction}
-            ORDER BY e.asset_id LIMIT ?""",
-        (after, key, *params, block_size),
-    ).fetchall():
-        yield rows
-        after = rows[-1]["asset_id"]
-
-
 def exact_search(
     db: sqlite3.Connection,
     key: str,
@@ -59,23 +45,37 @@ def exact_search(
     tag: str | None = None,
     tag_key: str | None = None,
 ) -> list[tuple[int, str, float]]:
-    best: list[tuple[int, str, float]] = []
-    for rows in vector_blocks(db, key, tag=tag, tag_key=tag_key):
-        rows = [row for row in rows if row["asset_id"] != exclude]
+    # The embedding triggers remove inactive and changed assets. Read blocks and
+    # winner digests through the same snapshot as the caller's query vector.
+    best: list[tuple[int, float]] = []
+    query = np.ascontiguousarray(query, dtype=np.float16)
+    last_id = 0
+    while True:
+        if tag is None:
+            rows = db.execute(VECTOR_PAGE, (key, last_id, BLOCK)).fetchall()
+        else:
+            rows = db.execute(TAGGED_VECTOR_PAGE, (tag, last_id, key, tag_key, BLOCK)).fetchall()
         if not rows:
-            continue
-        ids = np.fromiter((row["asset_id"] for row in rows), dtype=np.int64, count=len(rows))
-        data = b"".join(row["vector"] for row in rows)
-        matrix = np.frombuffer(data, dtype=STORAGE_DTYPE).reshape(len(rows), -1).astype(np.float32)
-        scores = np.einsum("ij,j->i", matrix, query)
-        scores /= np.sqrt(np.einsum("ij,ij->i", matrix, matrix))
-        np.clip(scores, -1, 1, out=scores)
-        order = np.lexsort((ids, -scores))[:limit]
-        best.extend(
-            (int(ids[i]), rows[i]["content_hash"], float(scores[i]))
-            for i in order
-            if scores[i] >= minimum
+            break
+        last_id = rows[-1][0]
+        ids = np.fromiter((row[0] for row in rows), dtype=np.int64, count=len(rows))
+        matrix = np.frombuffer(b"".join(row[1] for row in rows), dtype=STORAGE_DTYPE).reshape(
+            len(rows), len(query)
         )
-        best.sort(key=lambda item: (-item[2], item[0]))
+        scores = np.clip(1 - np.asarray(angular(matrix, query, out_dtype="float32")), -1, 1)
+        if exclude is not None:
+            scores[ids == exclude] = -np.inf
+        order = np.lexsort((ids, -scores))[:limit]
+        best.extend((int(ids[i]), float(scores[i])) for i in order if scores[i] >= minimum)
+        best.sort(key=lambda item: (-item[1], item[0]))
         del best[limit:]
-    return best
+    if not best:
+        return []
+    digests = dict(
+        db.execute(
+            """SELECT asset_id, content_hash FROM asset_embeddings
+           WHERE asset_id IN (SELECT value FROM json_each(?))""",
+            (json.dumps([item[0] for item in best]),),
+        ).fetchall()
+    )
+    return [(asset_id, digests[asset_id], score) for asset_id, score in best]

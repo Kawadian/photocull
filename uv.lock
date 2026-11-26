@@ -417,6 +417,7 @@ dependencies = [
 
 [package.optional-dependencies]
 ml = [
+    { name = "numkong" },
     { name = "numpy" },
     { name = "onnxruntime" },
     { name = "pillow" },
@@ -445,6 +446,7 @@ dev = [
 requires-dist = [
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "fastapi", specifier = ">=0.120" },
+    { name = "numkong", marker = "extra == 'ml'", specifier = ">=7.8,<8" },
     { name = "numpy", marker = "extra == 'worker'", specifier = ">=2" },
     { name = "onnxruntime", marker = "extra == 'ml'", specifier = ">=1.22" },
     { name = "photocull", extras = ["worker"], marker = "extra == 'ml'" },

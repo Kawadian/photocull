@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 
@@ -109,10 +110,11 @@ def asset_page_query(
             filters.append(condition)
             params.append(value)
     if tag is not None:
-        filters.append("""a.id IN (SELECT t.asset_id FROM asset_tags AS t
-            JOIN asset_embeddings AS te ON te.asset_id = t.asset_id
-            WHERE t.tag = ? AND te.tag_key = ? AND t.asset_id > ?)""")
+        joins += """ JOIN asset_tags AS t ON t.asset_id = a.id
+                     JOIN asset_embeddings AS te ON te.asset_id = a.id"""
+        filters.extend(("t.tag = ?", "te.tag_key = ?", "t.asset_id > ?"))
         params.extend((tag, tag_key or "", cursor))
+        order = "t.asset_id"
     return (
         f"""SELECT {ASSET_COLUMNS} {joins}
             WHERE {" AND ".join(filters)} ORDER BY {order} LIMIT ?""",
@@ -126,14 +128,13 @@ def attach_tags(db: sqlite3.Connection, assets: list[dict], tag_key: str, vocabu
     by_id = {asset["id"]: asset for asset in assets}
     for asset in assets:
         asset["tags"] = []
-    placeholders = ",".join("?" for _ in by_id)
     for asset_id, tag, score in db.execute(
-        f"""SELECT t.asset_id, t.tag, t.score FROM asset_tags AS t
+        """SELECT t.asset_id, t.tag, t.score FROM asset_tags AS t
             JOIN asset_embeddings AS e ON e.asset_id = t.asset_id
             JOIN assets AS a ON a.id = t.asset_id AND a.content_hash = e.content_hash
-            WHERE t.asset_id IN ({placeholders}) AND e.tag_key = ?
+            WHERE t.asset_id IN (SELECT value FROM json_each(?)) AND e.tag_key = ?
             ORDER BY t.asset_id, t.score DESC, t.tag""",
-        (*by_id, tag_key),
+        (json.dumps(list(by_id)), tag_key),
     ):
         if tag in vocabulary:
             by_id[asset_id]["tags"].append(

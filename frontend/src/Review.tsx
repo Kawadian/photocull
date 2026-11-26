@@ -2,6 +2,7 @@ import {
   ArrowLeft, ArrowRight, ChevronLeft, ChevronRight, ImageOff, Images, Maximize, Scan, Star, Video, X,
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
+import type { RefObject } from 'react'
 import { assetName, mediaUrl, useRemote } from './api'
 import type { Asset, Burst, GroupBy, Page, Progress, Rating } from './api'
 import { ConfirmAction, ScoreBadges } from './Analysis'
@@ -27,6 +28,9 @@ type ReviewProps = {
   lookup?: Lookup
   onCloseLookup: () => void
   ml?: Progress['ml']
+  workerOnline: boolean
+  headingRef: RefObject<HTMLHeadingElement | null>
+  similarRef: RefObject<HTMLButtonElement | null>
   onSimilar: (asset: Asset) => void
   onTag: (tag: string) => void
   activeTag: string
@@ -128,7 +132,7 @@ function Preview({ base, asset, zoom, error, loading, filtered, searching }: {
 export function Review(props: ReviewProps) {
   const { base, group, by, version, ratings, busy, undoAvailable, onRating, onUndo,
     filters, onChooseBest, onRejectRest, onClearFlag, lookup, onCloseLookup, ml,
-    onSimilar, onTag, activeTag } = props
+    onSimilar, onTag, activeTag, workerOnline, headingRef, similarRef } = props
   const [cursors, setCursors] = useState([0])
   const [browseSelection, setBrowseSelection] = useState<number | 'first' | 'last'>('first')
   const [searchSelection, setSearchSelection] = useState<{ lookup: Lookup; id: number }>()
@@ -136,7 +140,6 @@ export function Review(props: ReviewProps) {
   const [retry, setRetry] = useState(0)
   const [compare, setCompare] = useState(false)
   const [confirmReject, setConfirmReject] = useState<Burst>()
-  const headingRef = useRef<HTMLHeadingElement>(null)
   const isBurst = by === 'burst' && !lookup
   const isSimilar = by === 'similar'
   const params = new URLSearchParams(isBurst ? '' : filters)
@@ -165,7 +168,7 @@ export function Review(props: ReviewProps) {
   const best = bestInPage ?? bestResult?.data
   useEffect(() => {
     if (lookup) headingRef.current?.focus()
-  }, [lookup])
+  }, [headingRef, lookup])
 
   function select(asset: Asset) {
     if (lookup) setSearchSelection({ lookup, id: asset.id })
@@ -243,14 +246,14 @@ export function Review(props: ReviewProps) {
         <div className="review-header">
           <div className="review-bar">
             <div className="review-title">
-              <h1 title={heading} ref={headingRef} tabIndex={lookup ? -1 : undefined}>{heading}</h1>
+              <h1 title={heading} ref={headingRef} tabIndex={-1}>{heading}</h1>
               {asset && <p>{assetName(asset)}
                 {asset.similarity !== undefined && <> · Cosine {asset.similarity.toFixed(2)}</>}
               </p>}
             </div>
             <div className="review-tools">
               {lookup && <button className="icon-button" aria-label="Close photo search"
-                title="Close photo search" onClick={onCloseLookup}><X size={16} /></button>}
+                aria-keyshortcuts="Escape" title="Back to review (Esc)" onClick={onCloseLookup}><X size={16} /></button>}
               <div className="segment zoom" role="group" aria-label="Preview zoom">
                 <button
                   aria-pressed={!zoom}
@@ -273,6 +276,16 @@ export function Review(props: ReviewProps) {
               </div>
             </div>
           </div>
+          {lookup?.source && <section className="similar-source" aria-label="Source photo">
+            {lookup.source.preview_status === 'done' &&
+              <img src={mediaUrl(base, lookup.source, 'thumb')} alt="" />}
+            <div><span className="section-heading">Source photo</span>
+              <div title={lookup.source.path}>{assetName(lookup.source)}</div>
+            </div>
+          </section>}
+          {lookup && result?.data && <p className="lookup-count" role="status">
+            {assets.length} {assets.length === 1 ? 'match' : 'matches'}
+          </p>}
           {burst && (
             <div className="burst-toolbar" role="group" aria-label="Burst actions">
               <button className="button secondary" aria-pressed={compare} disabled={!asset}
@@ -336,7 +349,8 @@ export function Review(props: ReviewProps) {
       </main>
       <Inspector base={base} asset={asset} busy={busy} undoAvailable={undoAvailable}
         onRating={onRating} onUndo={onUndo} onClearFlag={onClearFlag}
-        ml={ml} onSimilar={onSimilar} onTag={onTag} activeTag={activeTag} />
+        ml={ml} onSimilar={onSimilar} onTag={onTag} activeTag={activeTag}
+        workerOnline={workerOnline} similarRef={similarRef} />
       {confirmReject && <ConfirmAction
         title="Reject the other photos in this burst?"
         description="Apply a reversible flag to each of the other photos. You can undo this action after confirming."

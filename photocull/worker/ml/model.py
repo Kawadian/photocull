@@ -6,6 +6,7 @@ import os
 from hashlib import sha256
 from pathlib import Path
 from shutil import copyfileobj
+from typing import NoReturn
 from urllib.request import urlopen
 
 from photocull.config import DEFAULT_MODEL, DEFAULT_REVISION, MLSettings
@@ -23,6 +24,15 @@ FILES = {
 
 class ModelUnavailable(RuntimeError):
     pass
+
+
+def _encoder_error(message: str, error: Exception) -> NoReturn:
+    detail = str(error).lower()
+    if isinstance(error, MemoryError) or any(
+        reason in detail for reason in ("bad_alloc", "out of memory", "failed to allocate memory")
+    ):
+        raise MemoryError(message) from error
+    raise ModelUnavailable(f"{message}: {error}") from error
 
 
 def model_file(settings: MLSettings, cache: Path, name: str) -> Path:
@@ -108,7 +118,7 @@ class Siglip:
             if "pooler_output" not in outputs:
                 raise ValueError("Missing ONNX pooler_output")
         except Exception as error:
-            raise ModelUnavailable(f"Could not load {name}: {error}") from error
+            _encoder_error(f"Could not load {name}", error)
         return session
 
     def image_vectors(self, paths: list[Path]) -> tuple[list, list[str | None]]:
@@ -142,7 +152,7 @@ class Siglip:
                 if result.ndim != 2 or len(result) != len(positions):
                     raise ValueError("Unexpected image embedding shape. Check ml.image_size.")
             except Exception as error:
-                raise ModelUnavailable(f"Image encoder failed: {error}") from error
+                _encoder_error("Image encoder failed", error)
             for position, vector in zip(positions, result, strict=True):
                 vectors[position] = vector
         return vectors, errors
@@ -169,7 +179,7 @@ class Siglip:
         except ModelUnavailable:
             raise
         except Exception as error:
-            raise ModelUnavailable(f"Text encoder failed: {error}") from error
+            _encoder_error("Text encoder failed", error)
 
     def release_text(self) -> None:
         self.text = None

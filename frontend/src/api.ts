@@ -54,6 +54,7 @@ export type Progress = {
     embedding?: Partial<Record<StageStatus, number>>
   }
   worker: { heartbeat: number; pid: number } | null
+  worker_online: boolean
   ml: {
     enabled: boolean
     search_enabled: boolean
@@ -62,6 +63,7 @@ export type Progress = {
     grouping: boolean
     image_error: string | null
     text_error: string | null
+    tag_error: string | null
     group_error: string | null
   }
 }

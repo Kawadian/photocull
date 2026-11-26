@@ -161,6 +161,7 @@ def progress(db: sqlite3.Connection) -> dict:
                 "model_key": ml["model_key"],
                 "image_error": ml["image_error"],
                 "text_error": ml["text_error"],
+                "tag_error": ml["tag_error"],
                 "group_error": ml["group_error"],
                 "grouping": bool(ml["enabled"] and ml["grouped_generation"] != ml["generation"]),
             },

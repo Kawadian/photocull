@@ -1,0 +1,2 @@
+ALTER TABLE search_requests ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ml_state ADD COLUMN tag_error TEXT;

@@ -41,3 +41,23 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - run: npx playwright install --with-deps --only-shell chromium
       - run: npm run test:e2e
+
+  images:
+    name: Docker ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [api, worker]
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker build -f deploy/docker/Dockerfile.${{ matrix.image }} -t photocull-${{ matrix.image }}:ci .
+      - if: matrix.image == 'api'
+        run: >-
+          docker run --rm -i --network none --entrypoint python
+          photocull-api:ci - < scripts/check_api_image.py
+      - if: matrix.image == 'worker'
+        run: |
+          docker run --rm --network none --entrypoint python photocull-worker:ci -c \
+            'import onnxruntime, tokenizers, usearch.index, numkong; from photocull.worker import run; assert "CPUExecutionProvider" in onnxruntime.get_available_providers()'
+          docker run --rm --network none --entrypoint ffmpeg photocull-worker:ci -version

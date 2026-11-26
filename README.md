@@ -126,7 +126,7 @@ Keep state on a local writable Linux filesystem so both processes can share SQLi
 
 A scan computes SHA-256 for new and changed media and reuses hashes for files with unchanged source identity, size and timestamps. Jobs track each asset and stage. The worker requeues in-flight jobs on restart and preserves completed work. After three interrupted runs of a stage, the worker marks that job as failed and processes the rest of the queue. A stage can be rerun with `POST /api/libraries/{library}/assets/{asset_id}/jobs/{stage}`. The OpenAPI schema is at `/openapi.json`.
 
-`GET /api/health` reports API RSS, worker last heartbeat and job counts. The API stays healthy while the worker is offline. `GET /api/libraries/{library}/events` streams job and catalog updates via SSE. The worker exits for a supervisor restart if its peak RSS reaches the configured threshold after a batch. Optional ML runs with a separate address-space limit inside that budget. Compose and systemd also apply a hard memory limit to the service.
+`GET /api/health` reports API RSS, worker availability and job counts. The API stays healthy while the worker is offline. `GET /api/libraries/{library}/events` streams job and catalog updates via SSE. The worker exits for a supervisor restart if its peak RSS reaches the configured threshold after a batch. Optional ML runs with a separate address-space limit inside that budget. Compose and systemd also apply a hard memory limit to the service.
 
 ## Photo search, similarity and tags
 
@@ -135,7 +135,7 @@ A scan computes SHA-256 for new and changed media and reuses hashes for files wi
 3. Run `photocull fetch-model` as the worker user to preload the 393 MiB model cache. With outbound network access, the worker can also populate the cache on first use.
 4. Restart the API and worker. Existing still photos with previews are queued automatically. New photos get embeddings after preview generation.
 
-Use **Search photos** with a phrase such as `雪の山` or `snowy mountains`. Use **Find similar photos** in the inspector to search from the current photo, or browse **Similar** groups. Pick a **Photo tag** or click a tag in the inspector to filter the catalog. The ML guide covers all settings, offline deployment steps and measured resource use. [ML guide](docs/ML.md)
+Press **/** to focus **Search photos**, **Enter** to submit and **Esc** to return to review. Search with a phrase such as `雪の山` or `snowy mountains`. Use **Find similar photos** in the inspector to search from the current photo, or browse **Similar** groups. Pick a **Photo tag** or click a tag in the inspector to filter the catalog. The ML guide covers all settings, offline deployment steps and measured resource use. [ML guide](docs/ML.md)
 
 ## Access and deployment examples
 
@@ -190,7 +190,7 @@ uv run --locked --extra ml python scripts/benchmark_catalog.py --assets 2000 --r
 (cd frontend && npx playwright install --with-deps --only-shell chromium && npm run test:e2e)
 ```
 
-GitHub Actions runs these checks for pull requests and pushes to `main`, including API tests with the base package. The ML tests and Playwright use a deterministic encoder. Playwright covers keyboard review, both search languages, tags, similarity, error recovery and the 375 px layout. The opt-in real-model check is documented separately. [CI workflow](.github/workflows/ci.yml) · [ML guide](docs/ML.md#validation) · [Specification](docs/SPEC.md)
+GitHub Actions runs these checks for pull requests and pushes to `main`, including API tests with the base package. The ML tests and Playwright use a deterministic encoder. Playwright covers keyboard review, both search languages, tags, similarity, cancellation, worker errors and the 375 px layout. CI also builds both Docker images and checks the API image for ML packages. The opt-in real-model check is documented separately. [CI workflow](.github/workflows/ci.yml) · [ML guide](docs/ML.md#validation) · [Specification](docs/SPEC.md)
 
 ## 日本語
 

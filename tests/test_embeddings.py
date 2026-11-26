@@ -1,9 +1,9 @@
+import fcntl
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 
 import pytest
 from fastapi.testclient import TestClient
-from PIL import Image
 
 from photocull.api import create_app
 from photocull.config import Library, MLSettings, Settings, WorkerSettings
@@ -15,18 +15,9 @@ from photocull.worker import LibraryWorker
 from photocull.worker.ml import LibraryML
 from photocull.worker.ml.process import InferenceProcess
 from tests.fake_embedding import FakeEmbedding
+from tests.worker_harness import photo
 
 BASE = "/api/libraries/photos"
-
-
-def photo(path, color, stamp, *, gradient=False):
-    exif = Image.Exif()
-    exif[34665] = {36867: f"2025:01:{stamp}"}
-    image = Image.new("RGB", (80, 50), color)
-    if gradient:
-        image.putdata([(180 + x, y, y) for y in range(50) for x in reversed(range(80))])
-    with image:
-        image.save(path, exif=exif)
 
 
 @pytest.fixture
@@ -37,12 +28,17 @@ def settings(tmp_path):
     photo(root / "b.jpg", "blue", "01 00:00:01")
     photo(root / "c.jpg", "red", "05 00:00:01")
     photo(root / "d.jpg", "red", "01 00:00:02", gradient=True)
-    return Settings(
+    config = Settings(
         libraries={"photos": Library(root=root)},
         state_dir=tmp_path / "state",
         worker=WorkerSettings(memory_mb=3072, batch_size=4),
         ml=MLSettings(enabled=True, batch_size=3, tag_top_k=1),
     )
+    state = config.library_state("photos")
+    state.mkdir(parents=True)
+    with (state / "worker.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield config
 
 
 def make_worker(db, settings, inference):
@@ -420,3 +416,130 @@ def test_model_files_download_once_and_publish_only_complete_files(tmp_path, mon
         model.model_file(settings, tmp_path, model.VISION)
     assert not files[0].exists()
     assert not files[0].with_suffix(".part").exists()
+
+
+def test_restart_replays_live_search_once_then_deadline_and_offline_are_reported(settings):
+    from photocull.db import search
+
+    state = settings.library_state("photos")
+    inference = InferenceProcess(settings, FakeEmbedding)
+    try:
+        with (
+            TestClient(create_app(settings)) as client,
+            connect(state / "index.db") as db,
+            ThreadPoolExecutor(1) as pool,
+        ):
+            worker = make_worker(db, settings, inference)
+            request_scan(db)
+            drain(worker, pool)
+
+            def submit():
+                response = client.post(f"{BASE}/search", json={"query": "猫"})
+                assert response.status_code == 202, response.text
+                return f"{BASE}/search/{response.json()['id']}"
+
+            url = submit()
+            assert search.claim(db)["attempts"] == 1
+            worker = make_worker(db, settings, inference)
+            assert client.get(url).json()["status"] == "pending"
+            worker.step(pool, worker.beat)
+            assert client.get(url).json()["items"][0]["path"] == "a.jpg"
+
+            twice = submit()
+            assert search.claim(db)["attempts"] == 1
+            make_worker(db, settings, inference)
+            assert search.claim(db)["attempts"] == 2
+            make_worker(db, settings, inference)
+            assert client.get(twice).json()["status"] == "error"
+
+            expired = submit()
+            db.execute(
+                "UPDATE search_requests SET created_at = created_at - ? WHERE id = ?",
+                (search.SEARCH_TIMEOUT + 1, expired.rsplit("/", 1)[-1]),
+            )
+            assert client.get(expired).status_code == 504
+            assert search.claim(db) is None
+            pending = submit()
+            db.execute("DELETE FROM worker_status")
+            assert client.get(pending).status_code == 503
+            assert client.get(url).json()["status"] == "done"
+    finally:
+        inference.close()
+
+
+def test_concurrent_queue_capacity_and_cancelling_running_search(settings):
+    from collections import Counter
+
+    from photocull.db import search
+
+    state = settings.library_state("photos")
+    inference = InferenceProcess(settings, FakeEmbedding)
+    with TestClient(create_app(settings)) as client, connect(state / "index.db") as db:
+        make_worker(db, settings, inference)
+        with ThreadPoolExecutor(8) as parallel:
+            responses = list(
+                parallel.map(
+                    lambda index: client.post(f"{BASE}/search", json={"query": f"猫 {index}"}),
+                    range(search.MAX_PENDING + 8),
+                )
+            )
+        assert Counter(response.status_code for response in responses) == {
+            202: search.MAX_PENDING,
+            429: 8,
+        }
+        first = search.claim(db)
+        url = f"{BASE}/search/{first['id']}"
+        assert client.delete(url).status_code == 204
+        search.finish(db, first, [])
+        assert client.get(url).status_code == 404
+        assert client.post(f"{BASE}/search", json={"query": "another"}).status_code == 202
+
+
+def test_incremental_similarity_preserves_groups_and_recovers_missing_checkpoint(settings):
+    root = settings.libraries["photos"].root
+    state = settings.library_state("photos")
+    inference = InferenceProcess(settings, FakeEmbedding)
+    try:
+        with (
+            TestClient(create_app(settings)) as client,
+            connect(state / "index.db") as db,
+            ThreadPoolExecutor(1) as pool,
+        ):
+            worker = make_worker(db, settings, inference)
+            request_scan(db)
+            drain(worker, pool)
+            revision = db.execute("SELECT anchor_revision FROM ml_state").fetchone()[0]
+            checkpoint = next(state.glob("*.usearch"))
+            photo(root / "e.jpg", "blue", "06 00:00:01")
+            photo(root / "f.jpg", "red", "07 00:00:01")
+            request_scan(db)
+            drain(worker, pool)
+            assert revision == db.execute("SELECT anchor_revision FROM ml_state").fetchone()[0]
+            assert checkpoint.is_file()
+            assert [
+                item["member_count"]
+                for item in client.get(f"{BASE}/similar-groups").json()["items"]
+            ] == [4, 2]
+
+            (root / "a.jpg").unlink()
+            request_scan(db)
+            drain(worker, pool)
+            assert [
+                tuple(row)
+                for row in db.execute("SELECT id, member_count FROM similar_groups ORDER BY id")
+            ] == [(2, 2), (3, 3)]
+            assert not db.execute("SELECT 1 FROM similar_dirty").fetchone()
+            inference.close()
+            checkpoint = next(state.glob("*.usearch"))
+            checkpoint.write_bytes(b"corrupt")
+
+            worker = make_worker(db, settings, inference)
+            photo(root / "g.jpg", "blue", "08 00:00:01")
+            request_scan(db)
+            drain(worker, pool)
+            assert [
+                tuple(row)
+                for row in db.execute("SELECT id, member_count FROM similar_groups ORDER BY id")
+            ] == [(2, 3), (3, 3)]
+    finally:
+        inference.close()

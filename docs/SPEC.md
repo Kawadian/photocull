@@ -113,8 +113,8 @@ EXIF:
 **Phase 3: CPU embeddings, photo retrieval and open-vocabulary tags**
 
 - Run a resumable `embedding` stage after preview generation for still photos. The opt-in worker uses lazy, split INT8 SigLIP 2 ONNX sessions with an allocation cap. Store the pinned model identity and preprocessing fingerprint with compact float16 vectors. Requeue on model, preprocessing or media changes.
-- Compare burst anchors within the Phase 2 capture-time window using cosine if both embeddings exist and dHash otherwise. Build independent, time-agnostic groups with a bounded-neighbor HNSW pass over anchors.
-- Submit Japanese and English text and image-similarity requests through SQLite. Rank results in the worker in fixed-size vector blocks. The API ships without model runtimes and serves progress, tags, groups and search results from SQLite.
+- Compare burst anchors within the Phase 2 capture-time window using cosine if both embeddings exist and dHash otherwise. Build independent, time-agnostic groups with an incremental HNSW index over durable anchors.
+- Submit Japanese and English text and image-similarity requests through SQLite. Prioritize live requests between bounded inference slices and rank results in float16 vector blocks. The API ships without model runtimes and serves progress, tags, groups and search results from SQLite.
 - Prepare text vectors for the configurable bilingual vocabulary and store top tags with cosine scores. Keep photo review and explicit XMP export available with ML disabled or unavailable.
 - Use fake models in CI and a marked test for real-model checks. Size the cache, worker budget and CPU threads for deployment. [Configuration, deployment and measurements](ML.md)
 

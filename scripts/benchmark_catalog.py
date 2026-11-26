@@ -158,10 +158,16 @@ def percentiles(samples: list[float]) -> tuple[float, float]:
     return ordered[math.ceil(len(ordered) * 0.5) - 1], ordered[math.ceil(len(ordered) * 0.95) - 1]
 
 
-def measure_vectors(db: sqlite3.Connection, settings: MLSettings, size: int, repeats: int) -> None:
+def measure_vectors(
+    db: sqlite3.Connection,
+    path: Path,
+    settings: MLSettings,
+    size: int,
+    repeats: int,
+) -> None:
     import numpy as np
 
-    from photocull.worker.ml.grouping import rebuild
+    from photocull.worker.ml.grouping import SimilarityGroups
     from photocull.worker.ml.vectors import STORAGE_DTYPE, exact_search, normalized
 
     rng = np.random.default_rng(42)
@@ -186,9 +192,9 @@ def measure_vectors(db: sqlite3.Connection, settings: MLSettings, size: int, rep
                     for i, v in zip(map(int, ids), vectors, strict=True)
                 ),
             )
-    generation = db.execute("SELECT generation FROM ml_state").fetchone()[0]
     started = perf_counter()
-    for _ in rebuild(db, key, generation, settings.similar_threshold):
+    group_index = SimilarityGroups(path, key, settings.similar_threshold)
+    while group_index.step(db):
         pass
     groups = db.execute("SELECT count(*) FROM similar_groups").fetchone()[0]
     complete = db.execute("SELECT count(*) FROM similar_groups WHERE member_count = 5").fetchone()[
@@ -209,6 +215,40 @@ def measure_vectors(db: sqlite3.Connection, settings: MLSettings, size: int, rep
             raise RuntimeError("Nearest vector did not match its planted embedding cluster")
     p50, p95 = percentiles(samples)
     print(f"Exact cosine search (top 60)      p50 {p50:7.2f} ms  p95 {p95:7.2f} ms")
+
+    def append(asset_id: int, vector) -> None:
+        with write(db):
+            db.execute(
+                """INSERT INTO assets(id, path, folder, kind, size, mtime_ns, content_hash,
+                                      scan_id, day)
+                   VALUES (?, ?, '', 'image', 1, 0, ?, 1, '2025-01-01')""",
+                (asset_id, f"{asset_id}.jpg", f"{asset_id:064x}"),
+            )
+            db.execute(
+                "INSERT INTO asset_embeddings(asset_id, model_key, content_hash, vector) "
+                "VALUES (?, ?, ?, ?)",
+                (asset_id, key, f"{asset_id:064x}", vector.astype(STORAGE_DTYPE).tobytes()),
+            )
+
+    append(size + 1, centers[0])
+    started = perf_counter()
+    group_index = SimilarityGroups(path, key, settings.similar_threshold)
+    while group_index.step(db):
+        pass
+    matched = db.execute(
+        "SELECT group_id FROM similar_members WHERE asset_id = ?", (size + 1,)
+    ).fetchone()
+    if not matched or (matched[0] - 1) % len(centers) != 0:
+        raise RuntimeError("Incremental grouping missed the planted anchor")
+    print(f"Append matching photo after restart: {(perf_counter() - started) * 1000:.2f} ms")
+    append(size + 2, normalized(rng.normal(size=768)))
+    started = perf_counter()
+    while group_index.step(db):
+        pass
+    assert db.execute("SELECT 1 FROM similar_anchors WHERE asset_id = ?", (size + 2,)).fetchone()
+    print(f"Append a new anchor and checkpoint: {(perf_counter() - started) * 1000:.2f} ms")
+    checkpoint_bytes = sum(file.stat().st_size for file in path.parent.glob("*.usearch"))
+    print(f"Anchor checkpoint: {checkpoint_bytes / 2**20:.1f} MiB")
 
 
 def run(assets: int, repeats: int, budget: float, ml: bool = False) -> bool:
@@ -238,7 +278,7 @@ def run(assets: int, repeats: int, budget: float, ml: bool = False) -> bool:
             )
             print("Grouping plan: " + " | ".join(row["detail"] for row in plans))
             if ml:
-                measure_vectors(db, settings.ml, assets, repeats)
+                measure_vectors(db, path, settings.ml, assets, repeats)
         print(f"Catalog footprint: {path.stat().st_size / 2**20:.1f} MiB (SQLite file)")
 
         passed = True
