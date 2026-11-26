@@ -32,6 +32,10 @@ from photocull.db.jobs import (
 from photocull.media.cache import cache_path
 from photocull.media.walk import MediaJail, SourceChanged, source_key
 from photocull.worker.bursts import refresh_bursts
+from photocull.worker.insights import Insights
+from photocull.worker.insights.story import Stories
+from photocull.worker.insights.transfers import Transfers
+from photocull.worker.insights.watch import Watch
 from photocull.worker.ml import LibraryML
 from photocull.worker.ml.model import Siglip
 from photocull.worker.ml.process import InferenceProcess
@@ -61,6 +65,10 @@ class LibraryWorker:
     heartbeat: float = 0
     scan: tuple[int, Iterator[None]] | None = None
     ml: LibraryML | None = None
+    insights: Insights | None = None
+    stories: Stories | None = None
+    watch: Watch | None = None
+    transfers: Transfers | None = None
 
     def beat(self) -> None:
         if time.monotonic() - self.heartbeat < HEARTBEAT_INTERVAL:
@@ -114,6 +122,10 @@ class LibraryWorker:
         configure_scoring(self.db, self.settings.scoring, self.pulse)
         if self.ml is not None:
             self.ml.configure()
+        if self.insights is not None:
+            self.insights.configure()
+        if self.stories is not None:
+            self.stories.configure(self.pulse)
 
     def step_scan(self, pulse: Callable[[], None] | None = None) -> bool:
         if self.scan is None:
@@ -127,7 +139,16 @@ class LibraryWorker:
                 return True
             key = self.ml.key if self.ml is not None and self.settings.ml.enabled else None
             batches = scan_batches(
-                self.db, scan_id, jail, self.settings.worker, pulse or self.pulse, key
+                self.db,
+                scan_id,
+                jail,
+                self.settings.worker,
+                pulse or self.pulse,
+                key,
+                settle_seconds=self.settings.insights.watch_debounce
+                if self.settings.insights.watch
+                else 0,
+                defer=self.watch.notify if self.watch else None,
             )
             self.scan = (scan_id, batches)
         scan_id, batches = self.scan
@@ -253,6 +274,8 @@ class LibraryWorker:
             if not poll_search or not poll_search():
                 break
             searched = True
+        if self.watch:
+            self.watch.step(between_work)
         scanned = self.step_scan(between_work)
         between_work()
         config = self.settings.worker
@@ -271,17 +294,31 @@ class LibraryWorker:
         embedded = ml.process_images() if ml else False
         between_work()
         tagged = ml.process_tags() if ml else False
-        if scanned or jobs or embedded or tagged:
+        busy = bool(scanned or jobs or embedded or tagged)
+        if not busy and self.transfers and self.transfers.step(between_work):
+            return True
+        if self.insights and self.insights.step(between_work, idle=not busy):
+            return True
+        if busy:
             return True
         if skip_unavailable_previews(self.db):
             return True
         between_work()
-        if refresh_bursts(self.db, self.settings.burst, between_work, ml.key if ml else None):
+        if refresh_bursts(
+            self.db,
+            self.settings.burst,
+            between_work,
+            ml.key if ml else None,
+            aesthetic_key=self.insights.identities["aesthetic"].key
+            if self.insights and "aesthetic" in self.insights.identities
+            else None,
+        ):
             return True
-        return (ml.group() if ml else False) or searched
+        story = self.stories.step(between_work) if self.stories else False
+        return (ml.group() if ml else False) or story or searched
 
 
-def run(settings: Settings, stop: Event, *, model_factory=Siglip) -> int:
+def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=None) -> int:
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     if not settings.libraries:
         LOG.info("No libraries configured")
@@ -337,6 +374,13 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip) -> int:
                     )
                 )
             for worker in workers:
+                worker.insights = Insights(worker, face_factory)
+                worker.stories = Stories(worker)
+                worker.transfers = Transfers(worker)
+                worker.transfers.recover()
+                worker.watch = Watch(worker)
+                worker.watch.start()
+                stack.callback(worker.watch.close)
                 recover(worker.db)
                 worker.configure()
             config = settings.worker

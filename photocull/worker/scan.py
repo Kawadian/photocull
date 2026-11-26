@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 
@@ -8,7 +9,7 @@ from photocull.config import STAGES, WorkerSettings
 from photocull.db import write
 from photocull.db.catalog import mark_catalog_updated
 from photocull.db.jobs import DISABLED, NO_VIDEO_EXIF, NO_VIDEO_SCORE
-from photocull.media.walk import MediaEntry, MediaJail, hash_file, source_key
+from photocull.media.walk import MediaEntry, MediaJail, SourceChanged, hash_file, source_key
 
 
 def fallback_day(mtime_ns: int) -> str:
@@ -116,6 +117,9 @@ def scan_batches(
     settings: WorkerSettings,
     pulse: Callable[[], None],
     model_key: str | None = None,
+    *,
+    settle_seconds: float = 0,
+    defer: Callable[[], None] | None = None,
 ) -> Iterator[None]:
     batch: list[tuple[MediaEntry, str, str]] = []
     for entry in jail.walk(pulse):
@@ -123,11 +127,18 @@ def scan_batches(
         prior = db.execute(
             "SELECT source_key, content_hash FROM assets WHERE path = ?", (entry.path,)
         ).fetchone()
-        digest = (
-            prior["content_hash"]
-            if prior and prior["source_key"] == key
-            else hash_file(jail, entry, pulse)
-        )
+        unchanged = prior and prior["source_key"] == key
+        try:
+            if not unchanged and time.time_ns() - entry.stat.st_ctime_ns < settle_seconds * 1e9:
+                raise SourceChanged(entry.path)
+            digest = prior["content_hash"] if unchanged else hash_file(jail, entry, pulse)
+        except (SourceChanged, FileNotFoundError):
+            if defer is None:
+                raise
+            # An in-flight write must neither replace existing metadata nor retire it.
+            db.execute("UPDATE assets SET scan_id = ? WHERE path = ?", (scan_id, entry.path))
+            defer()
+            continue
         batch.append((entry, key, digest))
         if len(batch) >= settings.batch_size:
             _record(db, scan_id, batch, settings, model_key)
