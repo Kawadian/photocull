@@ -110,11 +110,13 @@ EXIF:
 - Grouping reads the capture-time index in order and compares only active anchors within the time window. Persist changed capture times with job results and update the time-connected ranges after indexing. Rebuild the full catalog when grouping settings change. Keep SQL filters bound to values and use cursor indexes for asset, folder/day and burst member lists.
 - Validate browse latency with 50,000–100,000 synthetic catalog rows and target p95 under 200 ms. Preview decoding is a separate CPU and storage cost. See the [benchmark commands and measurements](../README.md#catalog-performance).
 
-**Phase 3:**
+**Phase 3: CPU embeddings, photo retrieval and open-vocabulary tags**
 
-- Image embeddings (SigLIP 2 or a smaller documented default if memory is tight; record the model id in the DB so a change forces re-embed).
-- Similar-photo grouping; natural-language / tag search.
-- Object / open-vocab tags (start with embedding zero-shot; RAM++ or equivalent is optional and must stay in the worker).
+- Run a resumable `embedding` stage after preview generation for still photos. The opt-in worker uses lazy, split INT8 SigLIP 2 ONNX sessions with an allocation cap. Store the pinned model identity and preprocessing fingerprint with compact float16 vectors. Requeue on model, preprocessing or media changes.
+- Compare burst anchors within the Phase 2 capture-time window using cosine if both embeddings exist and dHash otherwise. Build independent, time-agnostic groups with an incremental HNSW index over durable anchors.
+- Submit Japanese and English text and image-similarity requests through SQLite. Prioritize live requests between bounded inference slices and rank results in float16 vector blocks. The API ships without model runtimes and serves progress, tags, groups and search results from SQLite.
+- Prepare text vectors for the configurable bilingual vocabulary and store top tags with cosine scores. Keep photo review and explicit XMP export available with ML disabled or unavailable.
+- Use fake models in CI and a marked test for real-model checks. Size the cache, worker budget and CPU threads for deployment. [Configuration, deployment and measurements](ML.md)
 
 **Phase 4 (after the above is solid):**
 

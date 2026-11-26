@@ -48,14 +48,14 @@ services:
       context: .
       dockerfile: deploy/docker/Dockerfile.worker
     user: "${PHOTOCULL_UID:-1000}:${PHOTOCULL_GID:-1000}"
-    network_mode: none
+    network_mode: "${PHOTOCULL_WORKER_NETWORK_MODE:-none}"
     restart: unless-stopped
     stop_grace_period: 90s
-    cpus: 2.0
-    mem_limit: 2g
+    cpus: ${PHOTOCULL_WORKER_CPUS:-2.0}
+    mem_limit: ${PHOTOCULL_WORKER_MEM_LIMIT:-2g}
     environment:
       PHOTOCULL_CONFIG: /etc/photocull/photocull.yaml
-      XDG_CACHE_HOME: /models
+      PHOTOCULL_MODEL_DIR: /models
     volumes:
       - *config
       - *state

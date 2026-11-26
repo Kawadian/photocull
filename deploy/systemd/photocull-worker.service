@@ -20,6 +20,9 @@ CacheDirectory=photocull
 CPUQuota=200%
 MemoryHigh=1700M
 MemoryMax=2G
+# For ML, set worker.memory_mb=6144 in shared YAML and override these
+# limits in a systemd drop-in. Example: CPUQuota=600%, MemoryHigh=6G, MemoryMax=8G.
+# Prefetch the model as the service user before running with PrivateNetwork.
 NoNewPrivileges=yes
 PrivateNetwork=yes
 PrivateTmp=yes

@@ -20,17 +20,21 @@ from photocull.db import connect, initialize, write
 from photocull.db.catalog import mark_catalog_updated
 from photocull.db.jobs import (
     DISABLED,
+    NO_EMBEDDING_PREVIEW,
     NO_PREVIEW,
     Job,
     claim_jobs,
     claim_scan,
     finish_scan,
     recover,
-    skip_unavailable_scores,
+    skip_unavailable_previews,
 )
 from photocull.media.cache import cache_path
 from photocull.media.walk import MediaJail, SourceChanged, source_key
 from photocull.worker.bursts import refresh_bursts
+from photocull.worker.ml import LibraryML
+from photocull.worker.ml.model import Siglip
+from photocull.worker.ml.process import InferenceProcess
 from photocull.worker.rejections import (
     configure_scoring,
     save_scores,
@@ -39,6 +43,8 @@ from photocull.worker.scan import fallback_day, scan_batches
 
 LOG = logging.getLogger(__name__)
 CACHE_DIRS = ("thumbs", "previews", "details")
+SEARCH_POLL_SECONDS = 0.05
+HEARTBEAT_INTERVAL = 2
 
 
 class StopWorker(Exception):
@@ -54,9 +60,10 @@ class LibraryWorker:
     pulse: Callable[[], None]
     heartbeat: float = 0
     scan: tuple[int, Iterator[None]] | None = None
+    ml: LibraryML | None = None
 
     def beat(self) -> None:
-        if time.monotonic() - self.heartbeat < 5:
+        if time.monotonic() - self.heartbeat < HEARTBEAT_INTERVAL:
             return
         with write(self.db):
             self.db.execute(
@@ -66,6 +73,9 @@ class LibraryWorker:
                 (time.time(), os.getpid()),
             )
         self.heartbeat = time.monotonic()
+
+    def offline(self) -> None:
+        self.db.execute("DELETE FROM worker_status WHERE id = 1 AND pid = ?", (os.getpid(),))
 
     def configure(self) -> None:
         self.pulse()
@@ -102,8 +112,10 @@ class LibraryWorker:
             for temporary in (self.state / variant).glob(".[0-9]*-*-*"):
                 temporary.unlink(missing_ok=True)
         configure_scoring(self.db, self.settings.scoring, self.pulse)
+        if self.ml is not None:
+            self.ml.configure()
 
-    def step_scan(self) -> bool:
+    def step_scan(self, pulse: Callable[[], None] | None = None) -> bool:
         if self.scan is None:
             scan_id = claim_scan(self.db)
             if scan_id is None:
@@ -113,7 +125,10 @@ class LibraryWorker:
             except (OSError, RuntimeError, ValueError) as error:
                 finish_scan(self.db, scan_id, str(error))
                 return True
-            batches = scan_batches(self.db, scan_id, jail, self.settings.worker, self.pulse)
+            key = self.ml.key if self.ml is not None and self.settings.ml.enabled else None
+            batches = scan_batches(
+                self.db, scan_id, jail, self.settings.worker, pulse or self.pulse, key
+            )
             self.scan = (scan_id, batches)
         scan_id, batches = self.scan
         try:
@@ -201,6 +216,13 @@ class LibraryWorker:
                          AND error = ?""",
                     (job.asset_id, NO_PREVIEW),
                 )
+            if not error and job.stage == "preview" and self.settings.ml.enabled:
+                self.db.execute(
+                    """UPDATE jobs SET status = 'pending', error = NULL
+                       WHERE asset_id = ? AND stage = 'embedding' AND status = 'skipped'
+                         AND error = ?""",
+                    (job.asset_id, NO_EMBEDDING_PREVIEW),
+                )
             mark_catalog_updated(self.db)
         if not error and job.stage == "preview":
             for variant in CACHE_DIRS:
@@ -209,41 +231,89 @@ class LibraryWorker:
                     if old != current:
                         old.unlink(missing_ok=True)
 
-    def step(self, pool: ThreadPoolExecutor, heartbeat: Callable[[], None]) -> bool:
+    def step(
+        self,
+        pool: ThreadPoolExecutor,
+        heartbeat: Callable[[], None],
+        service_search: Callable[[], bool] | None = None,
+    ) -> bool:
         self.pulse()
-        scanned = self.step_scan()
-        self.pulse()
+        ml = self.ml if self.settings.ml.enabled else None
+        poll_search = service_search or (ml.process_search if ml else None)
+        searched = False
+
+        def between_work() -> None:
+            nonlocal searched
+            self.pulse()
+            if poll_search and poll_search():
+                searched = True
+
+        # Serve a short FIFO burst before letting background work make progress.
+        for _ in range(4):
+            if not poll_search or not poll_search():
+                break
+            searched = True
+        scanned = self.step_scan(between_work)
+        between_work()
         config = self.settings.worker
         jobs = claim_jobs(self.db, min(config.batch_size, config.parallelism))
         pending = {pool.submit(self.work, job): job for job in jobs}
         while pending:
             heartbeat()
-            done, _ = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
+            done, _ = wait(
+                pending,
+                timeout=SEARCH_POLL_SECONDS if poll_search else 1,
+                return_when=FIRST_COMPLETED,
+            )
             for future in done:
                 self.finish(pending.pop(future), future)
-        if scanned or jobs:
+            between_work()
+        embedded = ml.process_images() if ml else False
+        between_work()
+        tagged = ml.process_tags() if ml else False
+        if scanned or jobs or embedded or tagged:
             return True
-        if skip_unavailable_scores(self.db):
+        if skip_unavailable_previews(self.db):
             return True
-        return refresh_bursts(self.db, self.settings.burst, self.pulse)
+        between_work()
+        if refresh_bursts(self.db, self.settings.burst, between_work, ml.key if ml else None):
+            return True
+        return (ml.group() if ml else False) or searched
 
 
-def run(settings: Settings, stop: Event) -> int:
+def run(settings: Settings, stop: Event, *, model_factory=Siglip) -> int:
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     if not settings.libraries:
         LOG.info("No libraries configured")
     try:
         with ExitStack() as stack:
             workers: list[LibraryWorker] = []
+            inference = InferenceProcess(settings, model_factory)
+            ready = False
+            search_cursor = 0
+            next_search_probe = 0.0
 
             def heartbeat() -> None:
-                for worker in workers:
-                    worker.beat()
+                if ready:
+                    for worker in workers:
+                        worker.beat()
 
             def pulse() -> None:
                 if stop.is_set():
                     raise StopWorker
                 heartbeat()
+
+            def service_search() -> bool:
+                nonlocal search_cursor, next_search_probe
+                if time.monotonic() < next_search_probe or inference.cooling_down:
+                    return False
+                for offset in range(len(workers)):
+                    index = (search_cursor + offset) % len(workers)
+                    if workers[index].ml.process_search():
+                        search_cursor = (index + 1) % len(workers)
+                        return True
+                next_search_probe = time.monotonic() + SEARCH_POLL_SECONDS
+                return False
 
             for name, library in sorted(settings.libraries.items()):
                 state = settings.library_state(name)
@@ -255,22 +325,38 @@ def run(settings: Settings, stop: Event) -> int:
                 except BlockingIOError as exc:
                     raise RuntimeError(f"A worker already owns library {name}") from exc
                 db = stack.enter_context(connect(path))
-                workers.append(LibraryWorker(db, library, state, settings, pulse))
+                db.execute("DELETE FROM worker_status")
+                workers.append(
+                    LibraryWorker(
+                        db,
+                        library,
+                        state,
+                        settings,
+                        pulse,
+                        ml=LibraryML(db, state, inference, pulse),
+                    )
+                )
             for worker in workers:
                 recover(worker.db)
                 worker.configure()
             config = settings.worker
             pool = stack.enter_context(ThreadPoolExecutor(max_workers=config.parallelism))
+            stack.callback(inference.close)
+            for worker in workers:
+                stack.callback(worker.offline)
+            ready = True
+            heartbeat()
+            poll_search = service_search if settings.ml.enabled else None
             while not stop.is_set():
                 busy = False
                 for worker in workers:
-                    busy = worker.step(pool, heartbeat) or busy
+                    busy = worker.step(pool, heartbeat, poll_search) or busy
                     rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
                     if rss_mb >= config.memory_mb:
                         LOG.warning("Worker reached %.0f MiB RSS and will restart", rss_mb)
                         return 75
                 if not busy:
-                    stop.wait(1)
+                    stop.wait(SEARCH_POLL_SECONDS if poll_search else 1)
     except StopWorker:
         pass
     return 0

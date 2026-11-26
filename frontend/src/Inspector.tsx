@@ -1,9 +1,10 @@
-import { Check, FileOutput, Star, Undo2, X } from 'lucide-react'
+import { Check, FileOutput, Scan, Star, Undo2, X } from 'lucide-react'
 import { useState } from 'react'
+import type { Ref } from 'react'
 import { Dialog } from './Dialog'
 import { assetName, json, message, request } from './api'
 import { ScoreBadges } from './Analysis'
-import type { Asset, XmpPlan } from './api'
+import type { Asset, Progress, XmpPlan } from './api'
 
 const scoreStates = {
   pending: 'Scoring queued',
@@ -21,6 +22,12 @@ type InspectorProps = {
   onRating: (asset: Asset, rating: number, rejected?: boolean) => void
   onUndo: () => void
   onClearFlag: (asset: Asset) => void
+  ml?: Progress['ml']
+  workerOnline: boolean
+  similarRef: Ref<HTMLButtonElement>
+  onSimilar: (asset: Asset) => void
+  onTag: (tag: string) => void
+  activeTag: string
 }
 
 function XmpDialog({ plan, onClose, onWrite }: {
@@ -108,7 +115,8 @@ function ExportButton({ base, asset }: { base: string; asset: Asset }) {
   )
 }
 
-export function Inspector({ base, asset, busy, undoAvailable, onRating, onUndo, onClearFlag }: InspectorProps) {
+export function Inspector({ base, asset, busy, undoAvailable, onRating, onUndo, onClearFlag,
+  ml, onSimilar, onTag, activeTag, workerOnline, similarRef }: InspectorProps) {
   const camera = [asset?.make, asset?.model].filter(Boolean).join(' ')
   const duration = asset?.duration
   const filename = asset ? assetName(asset) : ''
@@ -150,6 +158,27 @@ export function Inspector({ base, asset, busy, undoAvailable, onRating, onUndo, 
       </div>
       {asset && (
         <>
+          {ml?.enabled && asset.kind !== 'video' && <div className="inspector-section photo-analysis">
+            <button className="button secondary" ref={similarRef}
+              disabled={asset.embedding_status !== 'done' || ml.waiting || !workerOnline}
+              onClick={() => onSimilar(asset)}><Scan size={15} /> Find similar photos</button>
+            {asset.embedding_status !== 'done' && <p className="score-state" role="status">
+              {asset.embedding_error ?? (asset.embedding_status === 'running'
+                ? 'Embedding in progress' : 'Awaiting photo embedding')}
+            </p>}
+            {ml.tags_enabled && (
+              <>
+                <div className="section-heading">Photo tags</div>
+                {asset.tags?.length ? <div className="photo-tags">
+                  {asset.tags.map(({ tag, label, score }) => (
+                    <button key={tag} className="button secondary" aria-pressed={tag === activeTag}
+                      title={`Cosine similarity ${score.toFixed(2)}`}
+                      onClick={() => onTag(tag === activeTag ? '' : tag)}>{label}</button>
+                  ))}
+                </div> : <p className="score-state">{ml.tag_error ? 'Tags unavailable' : 'Awaiting tags'}</p>}
+              </>
+            )}
+          </div>}
           <div className="inspector-section">
             <div className="section-heading">Scores</div>
             {(asset.sharpness !== null || asset.auto_reject) && <ScoreBadges asset={asset} />}

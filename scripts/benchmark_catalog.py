@@ -1,4 +1,4 @@
-"""Measure browse endpoints and burst refresh against a disposable synthetic catalog."""
+"""Measure browse, burst refresh, and optional vector retrieval on a synthetic catalog."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from time import perf_counter
 from fastapi.testclient import TestClient
 
 from photocull.api import create_app
-from photocull.config import Library, Settings
+from photocull.config import Library, MLSettings, Settings
 from photocull.db import connect, initialize, write
 from photocull.db.bursts import burst_page_query
 from photocull.db.catalog import ScoreFilters, asset_page_query
@@ -150,15 +150,114 @@ def measure(client: TestClient, case: Case, repeats: int) -> tuple[float, float]
             raise RuntimeError(f"{case.name} returned {len(items)} records")
         if sample >= 3:
             samples.append(elapsed)
-    samples.sort()
-    return samples[math.ceil(len(samples) * 0.5) - 1], samples[math.ceil(len(samples) * 0.95) - 1]
+    return percentiles(samples)
 
 
-def run(assets: int, repeats: int, budget: float) -> bool:
+def percentiles(samples: list[float]) -> tuple[float, float]:
+    ordered = sorted(samples)
+    return ordered[math.ceil(len(ordered) * 0.5) - 1], ordered[math.ceil(len(ordered) * 0.95) - 1]
+
+
+def measure_vectors(
+    db: sqlite3.Connection,
+    path: Path,
+    settings: MLSettings,
+    size: int,
+    repeats: int,
+) -> None:
+    import numpy as np
+
+    from photocull.worker.ml.grouping import SimilarityGroups
+    from photocull.worker.ml.vectors import STORAGE_DTYPE, exact_search, normalized
+
+    rng = np.random.default_rng(42)
+    centers = normalized(rng.normal(size=(size // 5, 768)))
+    key = settings.model_key
+    with write(db):
+        db.execute(
+            "INSERT INTO embedding_models VALUES (?, ?, ?, '{}')",
+            (key, settings.model_id, settings.model_revision),
+        )
+        db.execute("UPDATE ml_state SET enabled = 1, model_key = ?", (key,))
+        for first in range(1, size + 1, 512):
+            ids = np.arange(first, min(first + 512, size + 1))
+            vectors = normalized(
+                centers[(ids - 1) % len(centers)] + rng.normal(0, 0.004, (len(ids), 768))
+            ).astype(STORAGE_DTYPE)
+            db.executemany(
+                """INSERT INTO asset_embeddings(asset_id, model_key, content_hash, vector)
+                   VALUES (?, ?, ?, ?)""",
+                (
+                    (i, key, f"{i:064x}", v.tobytes())
+                    for i, v in zip(map(int, ids), vectors, strict=True)
+                ),
+            )
+    started = perf_counter()
+    group_index = SimilarityGroups(path, key, settings.similar_threshold)
+    while group_index.step(db):
+        pass
+    groups = db.execute("SELECT count(*) FROM similar_groups").fetchone()[0]
+    complete = db.execute("SELECT count(*) FROM similar_groups WHERE member_count = 5").fetchone()[
+        0
+    ]
+    print(f"Similar groups: {groups:,} in {perf_counter() - started:.2f} s (HNSW, 768-D)")
+    if size % 5 == 0 and complete < 0.98 * len(centers):
+        raise RuntimeError(f"Only {complete:,} complete 5-photo groups out of {len(centers):,}")
+    print(f"Complete 5-photo groups: {complete:,} / {len(centers):,} planted")
+    samples = []
+    for sample in range(repeats + 3):
+        center = sample % len(centers)
+        started = perf_counter()
+        hits = exact_search(db, key, centers[center], 60)
+        if sample >= 3:
+            samples.append((perf_counter() - started) * 1000)
+        if not hits or (hits[0][0] - 1) % len(centers) != center:
+            raise RuntimeError("Nearest vector did not match its planted embedding cluster")
+    p50, p95 = percentiles(samples)
+    print(f"Exact cosine search (top 60)      p50 {p50:7.2f} ms  p95 {p95:7.2f} ms")
+
+    def append(asset_id: int, vector) -> None:
+        with write(db):
+            db.execute(
+                """INSERT INTO assets(id, path, folder, kind, size, mtime_ns, content_hash,
+                                      scan_id, day)
+                   VALUES (?, ?, '', 'image', 1, 0, ?, 1, '2025-01-01')""",
+                (asset_id, f"{asset_id}.jpg", f"{asset_id:064x}"),
+            )
+            db.execute(
+                "INSERT INTO asset_embeddings(asset_id, model_key, content_hash, vector) "
+                "VALUES (?, ?, ?, ?)",
+                (asset_id, key, f"{asset_id:064x}", vector.astype(STORAGE_DTYPE).tobytes()),
+            )
+
+    append(size + 1, centers[0])
+    started = perf_counter()
+    group_index = SimilarityGroups(path, key, settings.similar_threshold)
+    while group_index.step(db):
+        pass
+    matched = db.execute(
+        "SELECT group_id FROM similar_members WHERE asset_id = ?", (size + 1,)
+    ).fetchone()
+    if not matched or (matched[0] - 1) % len(centers) != 0:
+        raise RuntimeError("Incremental grouping missed the planted anchor")
+    print(f"Append matching photo after restart: {(perf_counter() - started) * 1000:.2f} ms")
+    append(size + 2, normalized(rng.normal(size=768)))
+    started = perf_counter()
+    while group_index.step(db):
+        pass
+    assert db.execute("SELECT 1 FROM similar_anchors WHERE asset_id = ?", (size + 2,)).fetchone()
+    print(f"Append a new anchor and checkpoint: {(perf_counter() - started) * 1000:.2f} ms")
+    checkpoint_bytes = sum(file.stat().st_size for file in path.parent.glob("*.usearch"))
+    print(f"Anchor checkpoint: {checkpoint_bytes / 2**20:.1f} MiB")
+
+
+def run(assets: int, repeats: int, budget: float, ml: bool = False) -> bool:
     with TemporaryDirectory(prefix="photocull-benchmark-") as directory:
         root = Path(directory)
         settings = Settings(
-            libraries={"benchmark": Library(root=root / "media")}, state_dir=root / "state"
+            libraries={"benchmark": Library(root=root / "media")},
+            state_dir=root / "state",
+            ml=MLSettings(enabled=ml),
         )
         path = settings.library_state("benchmark") / "index.db"
         initialize(path)
@@ -175,14 +274,37 @@ def run(assets: int, repeats: int, budget: float) -> bool:
             print(f"One-photo group update: {(perf_counter() - start) * 1000:,.2f} ms")
             plans = db.execute(
                 "EXPLAIN QUERY PLAN " + CANDIDATES_SQL,
-                {"start": "", "end": "\uffff", "after_time": "", "after_id": 0},
+                {"start": "", "end": "\uffff", "after_time": "", "after_id": 0, "model_key": None},
             )
             print("Grouping plan: " + " | ".join(row["detail"] for row in plans))
+            if ml:
+                measure_vectors(db, path, settings.ml, assets, repeats)
         print(f"Catalog footprint: {path.stat().st_size / 2**20:.1f} MiB (SQLite file)")
 
         passed = True
         with TestClient(create_app(settings)) as client, connect(path) as db:
-            for case in browse_cases(assets):
+            cases = browse_cases(assets)
+            if ml:
+                cases.extend(
+                    [
+                        Case(
+                            "similar groups / first page",
+                            "similar-groups",
+                            {},
+                            (
+                                "SELECT id FROM similar_groups WHERE id > ? ORDER BY id LIMIT ?",
+                                (0, PAGE_SIZE),
+                            ),
+                        ),
+                        Case(
+                            "similar members / cursor",
+                            "assets",
+                            {"similar_group_id": 1, "cursor": 1},
+                            asset_page_query(1, PAGE_SIZE, NO_FILTERS, similar_group_id=1),
+                        ),
+                    ]
+                )
+            for case in cases:
                 sql, params = case.query
                 plan = db.execute("EXPLAIN QUERY PLAN " + sql, params).fetchall()
                 p50, p95 = measure(client, case, repeats)
@@ -197,10 +319,13 @@ def main() -> int:
     parser.add_argument("--assets", type=int, default=50_000)
     parser.add_argument("--requests", type=int, default=40)
     parser.add_argument("--max-p95-ms", type=float, default=200)
+    parser.add_argument(
+        "--ml", action="store_true", help="include 768-D cosine search and similarity groups"
+    )
     args = parser.parse_args()
     if args.assets < 1000 or args.requests < 1 or args.max_p95_ms <= 0:
         parser.error("Use at least 1000 assets, one request and a positive latency budget.")
-    return 0 if run(args.assets, args.requests, args.max_p95_ms) else 1
+    return 0 if run(args.assets, args.requests, args.max_p95_ms, args.ml) else 1
 
 
 if __name__ == "__main__":

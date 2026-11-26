@@ -1,8 +1,10 @@
-import { CalendarDays, ChevronLeft, ChevronRight, Folder, Images, Layers, RefreshCw } from 'lucide-react'
+import { CalendarDays, ChevronLeft, ChevronRight, Folder, Images, Layers, RefreshCw, Scan } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
+import type { Ref } from 'react'
 import { AnalysisFilters, ConfirmAction } from './Analysis'
-import { message, request, useRemote } from './api'
-import type { Burst, Group, GroupBy, Library, Page, Progress } from './api'
+import { assetName, message, request, useRemote } from './api'
+import type { Burst, Group, GroupBy, Library, Page, Progress, SimilarGroup } from './api'
+import { PhotoTools } from './ML'
 import { useShortcuts } from './shortcuts'
 
 type NavProps = {
@@ -20,23 +22,31 @@ type NavProps = {
   setFilters: (filters: string) => void
   analysisBusy: boolean
   onClearAll: () => Promise<void>
+  browsing: boolean
+  tag: string
+  selectTag: (tag: string) => void
+  onSearch: (query: string) => void
+  searchInputRef: Ref<HTMLInputElement>
+  onSearchEscape: () => boolean
 }
 
-function GroupList({ base, by, group, selectGroup, version, filters }: Pick<NavProps,
-  'base' | 'by' | 'group' | 'selectGroup' | 'version' | 'filters'>) {
+function GroupList({ base, by, group, selectGroup, version, filters, browsing, progress }: Pick<NavProps,
+  'base' | 'by' | 'group' | 'selectGroup' | 'version' | 'filters' | 'browsing' | 'progress'>) {
   const [cursors, setCursors] = useState<(string | null)[]>([null])
   const [retry, setRetry] = useState(0)
   const pendingBoundary = useRef<'first' | 'last'>(null)
   const cursor = cursors.at(-1) ?? null
   const isBurst = by === 'burst'
-  const params = new URLSearchParams(isBurst ? filters : new URLSearchParams({ by }))
+  const isSimilar = by === 'similar'
+  const grouped = isBurst || isSimilar
+  const params = new URLSearchParams(isBurst ? filters : isSimilar ? '' : new URLSearchParams({ by }))
   if (cursor !== null) params.set('cursor', cursor)
-  const groups = useRemote<Page<Group | Burst, string | number>>(
-    `${base}/${isBurst ? 'bursts' : 'groups'}?${params}`, version + retry,
+  const groups = useRemote<Page<Group | Burst | SimilarGroup, string | number>>(
+    `${base}/${isBurst ? 'bursts' : isSimilar ? 'similar-groups' : 'groups'}?${params}`, version + retry,
   )
   const items = groups?.data?.items
   const next = groups?.data?.next_cursor
-  const Icon = isBurst ? Layers : by === 'folder' ? Folder : CalendarDays
+  const Icon = isBurst ? Layers : isSimilar ? Scan : by === 'folder' ? Folder : CalendarDays
 
   useEffect(() => {
     if (!groups || pendingBoundary.current === null) return
@@ -46,7 +56,7 @@ function GroupList({ base, by, group, selectGroup, version, filters }: Pick<NavP
   }, [groups, items, selectGroup])
 
   useShortcuts((key, event) => {
-    if (!isBurst || !items || groups?.error || (key !== '[' && key !== ']') ||
+    if (!browsing || !isBurst || !items || groups?.error || (key !== '[' && key !== ']') ||
       event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
     event.preventDefault()
     const direction = key === '[' ? -1 : 1
@@ -66,9 +76,9 @@ function GroupList({ base, by, group, selectGroup, version, filters }: Pick<NavP
   return (
     <>
       <div className="group-list">
-        {!isBurst && <button
+        {!grouped && <button
           className="group-row"
-          aria-current={group === null ? 'true' : undefined}
+          aria-current={browsing && group === null ? 'true' : undefined}
           onClick={() => selectGroup(null)}
         >
           <Images size={16} />
@@ -76,13 +86,16 @@ function GroupList({ base, by, group, selectGroup, version, filters }: Pick<NavP
         </button>}
         {!groups?.error && items?.map((item) => {
           const key = 'id' in item ? String(item.id) : item.name
-          const name = 'id' in item ? item.captured_at.replace('T', ' ') : item.name || 'Library root'
+          const name = 'path' in item ? assetName(item)
+            : 'id' in item ? item.captured_at.replace('T', ' ') : item.name || 'Library root'
           return (
             <button
               key={key}
               className="group-row"
-              aria-current={key === group ? 'true' : undefined}
-              aria-label={'id' in item ? `Burst at ${name}, ${item.member_count} photos` : undefined}
+              aria-current={browsing && key === group ? 'true' : undefined}
+              aria-label={'id' in item
+                ? `${'path' in item ? 'Similar group' : 'Burst at'} ${name}, ${item.member_count} photos`
+                : undefined}
               title={name}
               onClick={() => selectGroup(key)}
             >
@@ -95,6 +108,10 @@ function GroupList({ base, by, group, selectGroup, version, filters }: Pick<NavP
         {!groups && <p className="group-empty" role="status">Loading {isBurst ? 'bursts' : 'groups'}…</p>}
         {isBurst && !groups?.error && items?.length === 0 && <p className="group-empty" role="status">
           {filters ? 'No bursts match these filters.' : cursors.length > 1 ? 'This page is empty.' : 'No bursts yet.'}
+        </p>}
+        {isSimilar && !groups?.error && items?.length === 0 && <p className="group-empty" role="status">
+          {progress?.ml.grouping && !progress.ml.image_error && !progress.ml.group_error
+            ? 'Finding similar photos…' : cursors.length > 1 ? 'This page is empty.' : 'No similar groups yet.'}
         </p>}
         {groups?.error && <div className="group-feedback">
           <p className="inline-error" role="alert">{groups.error}</p>
@@ -132,6 +149,10 @@ export function WorkerProgress({ progress }: { progress?: Progress }) {
   const remaining = counts.reduce((sum, stage) => sum + (stage.pending ?? 0) + (stage.running ?? 0), 0)
   const errors = counts.reduce((sum, stage) => sum + (stage.error ?? 0), 0)
   const scanning = progress?.scan?.status === 'running' || progress?.scan?.status === 'pending'
+  const ml = progress?.ml
+  const embedding = rows?.embedding
+  const embedded = embedding?.done ?? 0
+  const embeddingTotal = Object.values(embedding ?? {}).reduce((sum, count) => sum + count, 0)
 
   return (
     <div className="worker-progress">
@@ -146,6 +167,18 @@ export function WorkerProgress({ progress }: { progress?: Progress }) {
         <span>Previews {rows.preview.done ?? 0}</span>
         <span>Scores {rows.score.done ?? 0}</span>
       </div>}
+      {ml?.enabled && <div className="embedding-progress">
+        <div className="progress-line"><span>Photo embeddings</span>
+          <span>{embedded} / {embeddingTotal}</span></div>
+        <progress aria-label="Embedding progress" max={embeddingTotal || 1} value={embedded} />
+        {!!embedding?.skipped && <p className="score-state">{embedding.skipped} skipped</p>}
+        {ml.image_error && (!progress?.worker_online || !ml.search_enabled || !!embedded || ml.text_error) &&
+          <p className="inline-error" role="status">{ml.image_error}</p>}
+        {ml.text_error && (!progress?.worker_online || !ml.search_enabled) &&
+          <p className="inline-error" role="status">{ml.text_error}</p>}
+        {ml.tag_error && <p className="inline-error" role="status">{ml.tag_error}</p>}
+        {ml.group_error && <p className="inline-error" role="status">{ml.group_error}</p>}
+      </div>}
       {!!errors && <p className="inline-error">{errors} {errors === 1 ? 'stage' : 'stages'} failed</p>}
       {progress?.scan?.error && <p className="inline-error" title={progress.scan.error}>{progress.scan.error}</p>}
     </div>
@@ -154,7 +187,7 @@ export function WorkerProgress({ progress }: { progress?: Progress }) {
 
 export function LibraryNav(props: NavProps) {
   const { base, libraries, library, selectLibrary, by, selectBy, progress, filters,
-    setFilters, analysisBusy, onClearAll } = props
+    setFilters, analysisBusy, onClearAll, tag, selectTag, onSearch, searchInputRef, onSearchEscape } = props
   const [scanning, setScanning] = useState(false)
   const [error, setError] = useState<string>()
   const [confirmClear, setConfirmClear] = useState(false)
@@ -185,6 +218,8 @@ export function LibraryNav(props: NavProps) {
         </button>
         {error && <p className="inline-error" role="alert">{error}</p>}
       </div>
+      <PhotoTools base={base} progress={progress} tag={tag} selectTag={selectTag} onSearch={onSearch}
+        inputRef={searchInputRef} onEscape={onSearchEscape} />
       <nav className="group-nav" aria-label="Browse assets">
         <div className="section-heading">Browse</div>
         <div className="segment" role="group" aria-label="Group by">
@@ -197,6 +232,11 @@ export function LibraryNav(props: NavProps) {
           <button aria-pressed={by === 'burst'} onClick={() => selectBy('burst')}>
             <Layers size={15} /> Bursts
           </button>
+          {progress?.ml.enabled && (
+            <button aria-pressed={by === 'similar'} onClick={() => selectBy('similar')}>
+              <Scan size={15} /> Similar
+            </button>
+          )}
         </div>
         <GroupList key={JSON.stringify([by, by === 'burst' ? filters : ''])} {...props} />
       </nav>

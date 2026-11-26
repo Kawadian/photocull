@@ -20,6 +20,7 @@ def _record(
     scan_id: int,
     batch: list[tuple[MediaEntry, str, str]],
     settings: WorkerSettings,
+    model_key: str | None = None,
 ) -> None:
     with write(db):
         for entry, key, digest in batch:
@@ -53,6 +54,17 @@ def _record(
                 ),
             ).fetchone()
             asset_id = asset["id"]
+            if model_key and entry.kind != "video":
+                db.execute(
+                    """INSERT INTO jobs (asset_id, stage, content_hash, status, model_key)
+                       VALUES (?, 'embedding', ?, 'pending', ?)
+                       ON CONFLICT (asset_id, stage) DO UPDATE SET
+                           content_hash = excluded.content_hash, model_key = excluded.model_key,
+                           status = 'pending', error = NULL, attempts = 0, interruptions = 0
+                       WHERE jobs.content_hash <> excluded.content_hash
+                          OR jobs.model_key IS NOT excluded.model_key""",
+                    (asset_id, digest, model_key),
+                )
             if prior and prior["content_hash"] != digest:
                 db.execute("DELETE FROM asset_scores WHERE asset_id = ?", (asset_id,))
                 db.execute("DELETE FROM burst_choices WHERE asset_id = ?", (asset_id,))
@@ -103,6 +115,7 @@ def scan_batches(
     jail: MediaJail,
     settings: WorkerSettings,
     pulse: Callable[[], None],
+    model_key: str | None = None,
 ) -> Iterator[None]:
     batch: list[tuple[MediaEntry, str, str]] = []
     for entry in jail.walk(pulse):
@@ -117,11 +130,11 @@ def scan_batches(
         )
         batch.append((entry, key, digest))
         if len(batch) >= settings.batch_size:
-            _record(db, scan_id, batch, settings)
+            _record(db, scan_id, batch, settings, model_key)
             batch.clear()
             yield
     if batch:
-        _record(db, scan_id, batch, settings)
+        _record(db, scan_id, batch, settings, model_key)
         yield
 
     # Only retire absent assets after a complete walk. Keep their ratings if they return.
