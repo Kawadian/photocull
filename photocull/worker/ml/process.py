@@ -145,7 +145,7 @@ class InferenceProcess:
         self._receive(pulse, deadline)
 
     def call(self, operation: str, args: tuple, pulse, *, timeout: float = 90):
-        if self.error:
+        if self.error and operation not in {"faces", "transcript"}:
             raise ModelUnavailable(self.error)
         deadline = time.monotonic() + timeout
         try:

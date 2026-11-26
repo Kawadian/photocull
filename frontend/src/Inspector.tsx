@@ -17,6 +17,7 @@ const scoreStates = {
 type InspectorProps = {
   base: string
   asset: Asset | undefined
+  onVideo?: (asset: Asset) => void
   busy: boolean
   undoAvailable: boolean
   onRating: (asset: Asset, rating: number, rejected?: boolean) => void
@@ -116,7 +117,7 @@ function ExportButton({ base, asset }: { base: string; asset: Asset }) {
 }
 
 export function Inspector({ base, asset, busy, undoAvailable, onRating, onUndo, onClearFlag,
-  ml, onSimilar, onTag, activeTag, workerOnline, similarRef }: InspectorProps) {
+  ml, onSimilar, onTag, activeTag, workerOnline, similarRef, onVideo }: InspectorProps) {
   const camera = [asset?.make, asset?.model].filter(Boolean).join(' ')
   const duration = asset?.duration
   const filename = asset ? assetName(asset) : ''
@@ -181,6 +182,14 @@ export function Inspector({ base, asset, busy, undoAvailable, onRating, onUndo, 
           </div>}
           <div className="inspector-section">
             <div className="section-heading">Scores</div>
+            {asset.insights?.aesthetic?.score != null && <p className="score-state">
+              Aesthetic score {Math.round(asset.insights.aesthetic.score * 100)}%
+            </p>}
+            {asset.insights?.taste?.score != null && <p className="score-state">
+              Recommendation {Math.round(asset.insights.taste.score * 100)}%
+            </p>}
+            {asset.kind === 'video' && onVideo &&
+              <button className="button secondary" onClick={() => onVideo(asset)}>Open video analysis</button>}
             {(asset.sharpness !== null || asset.auto_reject) && <ScoreBadges asset={asset} />}
             {asset.kind === 'video' ? <p className="score-state">Scores apply to still images.</p>
               : (asset.sharpness === null || (asset.score_status && asset.score_status !== 'done')) && (

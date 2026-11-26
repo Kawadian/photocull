@@ -137,6 +137,18 @@ A scan computes SHA-256 for new and changed media and reuses hashes for files wi
 
 Press **/** to focus **Search photos**, **Enter** to submit and **Esc** to return to review. Search with a phrase such as `雪の山` or `snowy mountains`. Use **Find similar photos** in the inspector to search from the current photo, or browse **Similar** groups. Pick a **Photo tag** or click a tag in the inspector to filter the catalog. The ML guide covers all settings, offline deployment steps and measured resource use. [ML guide](docs/ML.md)
 
+## Local insights and keeper exports
+
+The optional worker adds aesthetic scores and learned recommendations,
+local face grouping, day and place stories, and video highlights and dead-clip
+flags. It can also watch media folders, copy keepers or create ZIP64 archives,
+and generate standalone HTML trip reports. Video transcription runs locally
+and is independently configurable. The setup guide covers feature settings,
+model licenses, download sizes and CPU-only measurements. For folder copies
+under Compose, set the destination in shared YAML and use the worker-only
+[example override](deploy/compose.insights.example.yml).
+[Phase 4 setup and operation](docs/INSIGHTS.md)
+
 ## Access and deployment examples
 
 Keep the API on loopback and expose the nginx example only on your LAN or Tailscale. The [nginx site](deploy/systemd/nginx-photocull.conf) allows `192.168.0.0/16`, `100.64.0.0/10` and loopback, and denies other peers. The allowlist is configured in the nginx site. Use the real client connection to nginx, and keep WAN port forwarding disabled.

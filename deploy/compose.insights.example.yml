@@ -1,0 +1,10 @@
+# Run with docker compose -f docker-compose.yml -f deploy/compose.insights.example.yml
+# Configure insights.export_roots.archive in the shared Photocull YAML to match the target.
+services:
+  worker:
+    volumes:
+      - type: bind
+        source: ${PHOTOCULL_EXPORT_HOST_DIR:-./.photocull/exports}
+        target: /srv/photocull-exports
+        bind:
+          create_host_path: false

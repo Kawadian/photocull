@@ -18,6 +18,11 @@ export type Burst = {
 }
 export type StageStatus = 'pending' | 'running' | 'done' | 'error' | 'skipped'
 export type Rating = { rating: number; rejected: boolean; revision: number }
+export type InsightScore = {
+  score: number | null
+  error: string | null
+  factors?: { feature: string; contribution: number }[] | null
+}
 export type Asset = Rating & {
   id: number
   path: string
@@ -46,6 +51,7 @@ export type Asset = Rating & {
   auto_reject: boolean
   auto_reject_reason: string | null
   burst_id: number | null
+  insights?: Record<string, InsightScore>
 }
 export type Progress = {
   catalog_revision: number
@@ -87,7 +93,14 @@ export async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init)
   if (!response.ok) {
     const payload: { detail?: unknown } = await response.json().catch(() => ({}))
-    const detail = typeof payload.detail === 'string' ? payload.detail : response.statusText
+    const validation = Array.isArray(payload.detail) ? payload.detail.flatMap((item: unknown) => {
+      if (!item || typeof item !== 'object' || !('msg' in item) || typeof item.msg !== 'string') return []
+      const location = 'loc' in item && Array.isArray(item.loc)
+        ? item.loc.slice(1).filter((segment): segment is string => typeof segment === 'string').join(' / ')
+        : ''
+      return [`${location ? `${location} · ` : ''}${item.msg.replace(/^Value error, /, '')}`]
+    }).slice(0, 3).join('. ') : undefined
+    const detail = typeof payload.detail === 'string' ? payload.detail : validation || response.statusText
     throw new ApiError(response.status, detail || `Request failed (${response.status})`)
   }
   return (await response.json()) as T
@@ -143,6 +156,6 @@ export function assetName(asset: { path: string }): string {
   return asset.path.slice(asset.path.lastIndexOf('/') + 1)
 }
 
-export function mediaUrl(base: string, asset: Asset, variant: 'thumb' | 'preview' | 'detail') {
+export function mediaUrl(base: string, asset: Pick<Asset, 'id' | 'content_hash'>, variant: 'thumb' | 'preview' | 'detail') {
   return `${base}/assets/${asset.id}/media/${variant}?v=${asset.content_hash}`
 }

@@ -1,5 +1,6 @@
 """Run the API and worker against small generated fixtures for browser smoke tests."""
 
+import subprocess
 from multiprocessing import get_context
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,9 +9,17 @@ import uvicorn
 from PIL import Image
 
 from photocull.api import create_app
-from photocull.config import Library, MLSettings, ScoringSettings, Settings, WorkerSettings
+from photocull.config import (
+    InsightSettings,
+    Library,
+    MLSettings,
+    ScoringSettings,
+    Settings,
+    WorkerSettings,
+)
 from photocull.worker import run
 from tests.fake_embedding import FakeEmbedding
+from tests.fake_faces import FakeFaces
 
 
 def write_fixtures(root: Path) -> Library:
@@ -28,6 +37,25 @@ def write_fixtures(root: Path) -> Library:
         levels = [round(px * lightness) for px in range(256)]
         gradient.point(levels).save(root / filename, exif=exif)
     Image.new("L", (128, 96), 255).save(root / "white.jpg")
+    if root.name == "insights":
+        Image.new("RGB", (120, 90), (30, 50, 220)).save(root / "blue.jpg")
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=160x96:r=12",
+                "-t",
+                "6",
+                "-c:v",
+                "mpeg4",
+                str(root / "walk.mov"),
+            ],
+            check=True,
+        )
     return Library(root=root)
 
 
@@ -36,18 +64,31 @@ def main() -> None:
         root = Path(directory)
         settings = Settings(
             libraries={
-                name: write_fixtures(root / name) for name in ("desktop", "mobile", "semantic")
+                name: write_fixtures(root / name)
+                for name in ("desktop", "mobile", "semantic", "insights")
             },
             state_dir=root / "state",
             static_dir=Path(__file__).resolve().parents[1] / "dist",
             scoring=ScoringSettings(min_sharpness=0),
             worker=WorkerSettings(memory_mb=3072),
             ml=MLSettings(enabled=True, tag_top_k=1, offline=True),
+            insights=InsightSettings(
+                aesthetic=True,
+                taste=True,
+                faces=True,
+                story=True,
+                report=True,
+                video=True,
+                export=True,
+                offline=True,
+            ),
         )
         context = get_context("fork")
         stop = context.Event()
         worker = context.Process(
-            target=run, args=(settings, stop), kwargs={"model_factory": FakeEmbedding}
+            target=run,
+            args=(settings, stop),
+            kwargs={"model_factory": FakeEmbedding, "face_factory": FakeFaces},
         )
         worker.start()
         try:

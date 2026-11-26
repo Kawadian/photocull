@@ -150,9 +150,12 @@ def hash_file(jail: MediaJail, entry: MediaEntry, pulse: Callable[[], None]) -> 
             while data := source.read(1024 * 1024):
                 pulse()
                 digest.update(data)
-        after = os.fstat(fd)
-        if source_key(before) != source_key(entry.stat) or source_key(after) != source_key(before):
+        key = source_key(before)
+        if key != source_key(entry.stat) or source_key(os.fstat(fd)) != key:
             raise SourceChanged(f"Media changed during scan: {entry.path}")
+        with jail.open_media(entry.path) as (current, _):
+            if source_key(os.fstat(current)) != key:
+                raise SourceChanged(f"Media was replaced during scan: {entry.path}")
     return digest.hexdigest()
 
 

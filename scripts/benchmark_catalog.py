@@ -11,15 +11,20 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
 from photocull.api import create_app
-from photocull.config import Library, MLSettings, Settings
+from photocull.config import InsightSettings, Library, MLSettings, Settings
 from photocull.db import connect, initialize, write
 from photocull.db.bursts import burst_page_query
 from photocull.db.catalog import ScoreFilters, asset_page_query
+from photocull.db.insights import register
+from photocull.db.transfers import Selection, select_assets
+from photocull.insights import models
 from photocull.worker.bursts import CANDIDATES_SQL, refresh_bursts
+from photocull.worker.insights.story import Stories
 
 BASE = "/api/libraries/benchmark"
 PAGE_SIZE = 100
@@ -251,13 +256,101 @@ def measure_vectors(
     print(f"Anchor checkpoint: {checkpoint_bytes / 2**20:.1f} MiB")
 
 
-def run(assets: int, repeats: int, budget: float, ml: bool = False) -> bool:
+def seed_insights(db, settings, size):
+    identities = models(settings)
+    state = SimpleNamespace(
+        db=db, settings=settings, insights=SimpleNamespace(identities=identities)
+    )
+    with write(db):
+        key = register(db, identities["aesthetic"])
+        face = register(db, identities["faces"])
+        db.execute(
+            """INSERT INTO insight_results(stage, asset_id, key, content_hash, score)
+               SELECT 'aesthetic', id, ?, content_hash, (id % 10001) / 10000.0 FROM assets""",
+            (key,),
+        )
+        db.executemany("INSERT INTO people (id) VALUES (?)", ((group,) for group in range(1, 1201)))
+        db.execute(
+            """INSERT INTO faces(asset_id, person_id, key, content_hash, left, top, right,
+                                 bottom, confidence, quality, vector)
+               SELECT id, (id % 1200) + 1, ?, content_hash, 0.2, 0.2, 0.7, 0.7,
+                      0.98, 0.93, zeroblob(256) FROM assets""",
+            (face,),
+        )
+    story = Stories(state)
+
+    def pulse():
+        pass
+
+    start = perf_counter()
+    story.configure(pulse)
+    while story.step(pulse):
+        pass
+    print(f"Full story build: {perf_counter() - start:,.2f} s")
+    query, arguments = select_assets(Selection(minimum_rating=0, person_id=2), {"faces": face})
+    start = perf_counter()
+    assert len(db.execute(query, arguments).fetchall()) >= 1
+    print(f"Keeper selection by person: {(perf_counter() - start) * 1000:,.2f} ms")
+
+    deep = min(8500, size // 2)
+    previous = (deep % 10001) / 10000
+    return [
+        Case(
+            "aesthetic / deep cursor",
+            "assets",
+            {"sort": "aesthetic", "cursor": deep, "min_aesthetic": 0.01},
+            asset_page_query(
+                deep,
+                PAGE_SIZE,
+                NO_FILTERS,
+                sort_score=("aesthetic", key, previous),
+                aesthetic_key=key,
+                min_aesthetic=0.01,
+            ),
+        ),
+        Case(
+            "people / first page",
+            "insights/people",
+            {},
+            ("SELECT id FROM people ORDER BY id LIMIT ?", (PAGE_SIZE,)),
+        ),
+        Case(
+            "person assets / cursor",
+            "assets",
+            {"person_id": 2},
+            asset_page_query(0, PAGE_SIZE, NO_FILTERS, person_id=2, face_key=face),
+        ),
+        Case(
+            "stories / days",
+            "insights/stories",
+            {},
+            (
+                """SELECT d.day FROM story_days AS d JOIN story_state AS s USING(key)
+                 WHERE d.day < ? ORDER BY d.day DESC LIMIT ?""",
+                ("9999-99-99", PAGE_SIZE),
+            ),
+        ),
+        Case(
+            "stories / stops",
+            "insights/stories/2025-01-01",
+            {},
+            (
+                """SELECT * FROM story_segments WHERE day=? AND position > ?
+                 ORDER BY position LIMIT ?""",
+                ("2025-01-01", 0, PAGE_SIZE),
+            ),
+        ),
+    ]
+
+
+def run(assets: int, repeats: int, budget: float, ml: bool = False, insights: bool = False) -> bool:
     with TemporaryDirectory(prefix="photocull-benchmark-") as directory:
         root = Path(directory)
         settings = Settings(
             libraries={"benchmark": Library(root=root / "media")},
             state_dir=root / "state",
-            ml=MLSettings(enabled=ml),
+            ml=MLSettings(enabled=ml or insights),
+            insights=InsightSettings(aesthetic=insights, faces=insights, story=insights),
         )
         path = settings.library_state("benchmark") / "index.db"
         initialize(path)
@@ -274,16 +367,25 @@ def run(assets: int, repeats: int, budget: float, ml: bool = False) -> bool:
             print(f"One-photo group update: {(perf_counter() - start) * 1000:,.2f} ms")
             plans = db.execute(
                 "EXPLAIN QUERY PLAN " + CANDIDATES_SQL,
-                {"start": "", "end": "\uffff", "after_time": "", "after_id": 0, "model_key": None},
+                {
+                    "start": "",
+                    "end": "\uffff",
+                    "after_time": "",
+                    "after_id": 0,
+                    "model_key": None,
+                    "aesthetic_key": None,
+                    "weight": 0,
+                },
             )
             print("Grouping plan: " + " | ".join(row["detail"] for row in plans))
             if ml:
                 measure_vectors(db, path, settings.ml, assets, repeats)
+            insight_cases = seed_insights(db, settings, assets) if insights else []
         print(f"Catalog footprint: {path.stat().st_size / 2**20:.1f} MiB (SQLite file)")
 
         passed = True
         with TestClient(create_app(settings)) as client, connect(path) as db:
-            cases = browse_cases(assets)
+            cases = browse_cases(assets) + insight_cases
             if ml:
                 cases.extend(
                     [
@@ -322,10 +424,13 @@ def main() -> int:
     parser.add_argument(
         "--ml", action="store_true", help="include 768-D cosine search and similarity groups"
     )
+    parser.add_argument(
+        "--insights", action="store_true", help="include aesthetic ranks, people and day stories"
+    )
     args = parser.parse_args()
     if args.assets < 1000 or args.requests < 1 or args.max_p95_ms <= 0:
         parser.error("Use at least 1000 assets, one request and a positive latency budget.")
-    return 0 if run(args.assets, args.requests, args.max_p95_ms, args.ml) else 1
+    return 0 if run(args.assets, args.requests, args.max_p95_ms, args.ml, args.insights) else 1
 
 
 if __name__ == "__main__":

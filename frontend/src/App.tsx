@@ -3,6 +3,8 @@ import { useRef, useState } from 'react'
 import { ApiError, assetName, json, message, request, useProgress, useRemote } from './api'
 import type { Asset, Burst, GroupBy, Library, Rating } from './api'
 import { ShortcutHelp } from './Dialog'
+import { InsightsScreen, views } from './Insights'
+import type { InsightCapabilities, View } from './Insights'
 import { LibraryNav } from './LibraryNav'
 import type { Lookup } from './ML'
 import { Review } from './Review'
@@ -35,6 +37,9 @@ function Workspace({ libraries, library, selectLibrary }: {
 }) {
   const base = `/api/libraries/${library}`
   const { progress, connected } = useProgress(base)
+  const [view, setView] = useState<View>('review')
+  const [videoStart, setVideoStart] = useState<number>()
+  const [insightFilter, setInsightFilter] = useState<{ params: string; label: string; assetId?: number }>()
   const [by, setBy] = useState<GroupBy>('folder')
   const [group, setGroup] = useState<string | null>(null)
   const [filters, setFilters] = useState('')
@@ -54,8 +59,20 @@ function Workspace({ libraries, library, selectLibrary }: {
   const similarButton = useRef<HTMLButtonElement>(null)
   const reviewHeading = useRef<HTMLHeadingElement>(null)
   const version = (progress?.catalog_revision ?? 0) + refresh
-  const reviewFilters = new URLSearchParams(filters)
+  const capabilities = useRemote<InsightCapabilities>(`${base}/insights`, view === 'review' ? refresh : version)
+  const reviewFilters = new URLSearchParams(insightFilter?.params ?? filters)
   if (tag && progress?.ml.tags_enabled) reviewFilters.set('tag', tag)
+
+  function openReview(params: string, label: string, assetId?: number) {
+    setInsightFilter({ params, label, assetId })
+    setBy('folder')
+    setGroup(null)
+    setFilters('')
+    setLookup(undefined)
+    setTag('')
+    setView('review')
+    requestAnimationFrame(() => reviewHeading.current?.focus())
+  }
 
   function selectTag(value: string) {
     setTag(value)
@@ -182,6 +199,16 @@ function Workspace({ libraries, library, selectLibrary }: {
 
   useShortcuts((key, event) => {
     if (event.ctrlKey || event.metaKey || event.altKey || event.repeat) return
+    if (key === 'escape' && view !== 'review') {
+      event.preventDefault()
+      setView('review')
+      requestAnimationFrame(() => reviewHeading.current?.focus())
+    }
+    if (key === 'i') {
+      event.preventDefault()
+      setView(view === 'review' ? 'faces' : 'review')
+    }
+    if (view !== 'review' && key !== '?') return
     if (key === '/' && searchInput.current && !searchInput.current.disabled) {
       event.preventDefault()
       const active = document.activeElement
@@ -225,28 +252,49 @@ function Workspace({ libraries, library, selectLibrary }: {
             onClick={undoBurstRejection}>Undo burst reject <kbd aria-hidden="true">⇧U</kbd></button>
         </div>
       )}
+      <nav className="insight-nav" aria-label="Library views">
+        {views.map(({ id, label, icon: Icon }) => <button key={id}
+          aria-current={view === id ? 'page' : undefined} onClick={() => { if (id === 'video') setVideoStart(undefined); setView(id) }}>
+          <Icon size={15} aria-hidden="true" /> {label}
+        </button>)}
+        {view !== 'review' && libraries.length > 1 && <label className="view-library">
+          Library <select value={library} onChange={(event) => selectLibrary(event.target.value)}>
+            {libraries.map(({ name }) => <option key={name}>{name}</option>)}
+          </select>
+        </label>}
+      </nav>
+      {view !== 'review' ? <InsightsScreen key={view} view={view} base={base}
+        capability={capabilities?.data} version={version} openReview={openReview}
+        videoStart={videoStart} error={capabilities?.error} retry={() => setRefresh((value) => value + 1)} /> : <>
+      {insightFilter && <div className="status-banner" role="status">
+        {insightFilter.label}
+        <button className="button quiet" onClick={() => setInsightFilter(undefined)}>Clear insight filter</button>
+      </div>}
       <div className="workspace">
         <LibraryNav
           base={base} libraries={libraries} library={library} selectLibrary={selectLibrary}
           by={by} selectBy={(mode) => {
             setLookup(undefined)
+            setInsightFilter(undefined)
             if (by !== mode) {
               setBy(mode)
               setGroup(null)
               if (mode === 'burst') setTag('')
             }
           }}
-          group={group} selectGroup={(value) => { setGroup(value); setLookup(undefined) }}
+          group={group} selectGroup={(value) => { setGroup(value); setLookup(undefined); setInsightFilter(undefined) }}
           version={version} progress={progress} browsing={!lookup}
           filters={filters} setFilters={(value) => {
             if (by === 'burst' && value !== filters) setGroup(null)
             setFilters(value)
+            setInsightFilter(undefined)
             setLookup(undefined)
           }}
           tag={tag} selectTag={selectTag} onSearch={(query) => setLookup({
             title: `Search · ${query}`, url: `${base}/search`, body: { query, tag: tag || undefined },
           })}
           searchInputRef={searchInput} onSearchEscape={escapeSearchInput}
+          watching={capabilities?.data?.watch}
           analysisBusy={busy} onClearAll={clearAll}
         />
         {!lookup && (by === 'burst' || by === 'similar') && group === null ? (
@@ -255,12 +303,17 @@ function Workspace({ libraries, library, selectLibrary }: {
             {by === 'burst' && <p>Use <kbd>[</kbd> and <kbd>]</kbd> to move between bursts.</p>}
           </div></main>
         ) : <Review
-          key={JSON.stringify([by, group, by === 'burst' ? '' : String(reviewFilters)])}
+          key={JSON.stringify([by, group, by === 'burst' ? '' : String(reviewFilters), insightFilter?.assetId])}
+          startAsset={insightFilter?.assetId}
           base={base} by={by} group={group} version={version} ratings={ratings}
           busy={busy} undoAvailable={!!undo} onRating={rate} onUndo={undoRating}
           filters={String(reviewFilters)} onChooseBest={chooseBest} onRejectRest={rejectRest}
           lookup={lookup} onCloseLookup={closeLookup} ml={progress?.ml}
           workerOnline={!!progress?.worker_online} headingRef={reviewHeading} similarRef={similarButton}
+          onVideo={capabilities?.data?.video ? (asset) => {
+            setVideoStart(asset.id)
+            setView('video')
+          } : undefined}
           onTag={selectTag} activeTag={tag}
           onSimilar={(asset) => setLookup({
             title: `Similar to ${assetName(asset)}`,
@@ -269,6 +322,7 @@ function Workspace({ libraries, library, selectLibrary }: {
           onClearFlag={(asset) => analysisAction(`assets/${asset.id}/auto-reject`, { method: 'DELETE' })}
         />}
       </div>
+      </>}
     </div>
   )
 }

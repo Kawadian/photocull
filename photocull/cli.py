@@ -18,6 +18,11 @@ def main() -> None:
     commands.add_parser("scan", help="queue a library scan").add_argument("library")
     commands.add_parser("status", help="show job progress").add_argument("library")
     commands.add_parser("fetch-model", help="prepare the worker's pinned ONNX model cache")
+    insights = commands.add_parser(
+        "fetch-insight-models", help="prefetch enabled face and speech models for offline use"
+    )
+    insights.add_argument("--faces", action="store_true")
+    insights.add_argument("--transcript", action="store_true")
     xmp = commands.add_parser("xmp", help="preview or write XMP ratings for selected asset IDs")
     xmp.add_argument("library")
     xmp.add_argument("asset_ids", type=int, nargs="+")
@@ -38,6 +43,31 @@ def main() -> None:
             for name in FILES:
                 print(model_file(model, settings.model_cache, name))
         except ModelUnavailable as error:
+            parser.exit(1, f"{error}\n")
+        return
+    if args.command == "fetch-insight-models":
+        from photocull.worker.insights.model_cache import face_files, whisper_folder
+
+        config = settings.insights
+        explicit = args.faces or args.transcript
+        fetch_faces = args.faces if explicit else config.faces
+        fetch_speech = args.transcript if explicit else config.video and config.transcript
+        if not fetch_faces and not fetch_speech:
+            parser.error("Enable a face or transcript model, or pass --faces or --transcript")
+        try:
+            if fetch_faces:
+                for path in face_files(settings.model_cache, config.face_revision, offline=False):
+                    print(path)
+            if fetch_speech:
+                print(
+                    whisper_folder(
+                        settings.model_cache,
+                        config.transcript_model,
+                        config.transcript_revision,
+                        offline=False,
+                    )
+                )
+        except (OSError, ValueError, ImportError, RuntimeError) as error:
             parser.exit(1, f"{error}\n")
         return
     if args.library not in settings.libraries:

@@ -17,11 +17,11 @@ jobs:
       - run: uv sync --locked
       - run: uv run --locked pytest tests/test_api.py
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - run: uv sync --locked --extra ml
-      - run: uv run --locked --extra ml ruff check
-      - run: uv run --locked --extra ml ruff format --check
-      - run: uv run --locked --extra ml pytest
-      - run: uv run --locked --extra ml python scripts/benchmark_catalog.py --assets 2000 --requests 8 --ml
+      - run: uv sync --locked --extra insights
+      - run: uv run --locked --extra insights ruff check
+      - run: uv run --locked --extra insights ruff format --check
+      - run: uv run --locked --extra insights pytest
+      - run: uv run --locked --extra insights python scripts/benchmark_catalog.py --assets 2000 --requests 8 --ml --insights
 
   frontend:
     runs-on: ubuntu-latest
@@ -39,6 +39,7 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - uses: astral-sh/setup-uv@v7
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: npx playwright install --with-deps --only-shell chromium
       - run: npm run test:e2e
 
@@ -59,5 +60,5 @@ jobs:
       - if: matrix.image == 'worker'
         run: |
           docker run --rm --network none --entrypoint python photocull-worker:ci -c \
-            'import onnxruntime, tokenizers, usearch.index, numkong; from photocull.worker import run; assert "CPUExecutionProvider" in onnxruntime.get_available_providers()'
+            'import onnxruntime, tokenizers, usearch.index, numkong, cv2, faster_whisper, watchdog; from photocull.worker import run; assert "CPUExecutionProvider" in onnxruntime.get_available_providers()'
           docker run --rm --network none --entrypoint ffmpeg photocull-worker:ci -version

@@ -35,6 +35,14 @@ ml = [
   "usearch>=2.21,<3",
 ]
 
+faces = [
+  "photocull[ml]",
+  "opencv-python-headless>=4.10,<5",
+]
+watch = ["watchdog>=6,<7"]
+transcript = ["photocull[ml]", "faster-whisper>=1.2,<2"]
+insights = ["photocull[faces,watch,transcript]"]
+
 [dependency-groups]
 dev = ["httpx2>=2", "pytest>=8", "ruff>=0.13"]
 
@@ -45,8 +53,11 @@ photocull-worker = "photocull.worker:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not model'"
-markers = ["model: uses the real SigLIP 2 model and may download its weights"]
+addopts = "-m 'not model and not phase4_model'"
+markers = [
+  "model: uses the real SigLIP 2 model and may download its weights",
+  "phase4_model: uses the real SigLIP 2, YuNet, SFace and Whisper models",
+]
 
 [tool.ruff]
 target-version = "py312"
