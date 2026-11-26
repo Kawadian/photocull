@@ -129,7 +129,11 @@ def scan_batches(
         ).fetchone()
         unchanged = prior and prior["source_key"] == key
         try:
-            if not unchanged and time.time_ns() - entry.stat.st_ctime_ns < settle_seconds * 1e9:
+            if (
+                settle_seconds
+                and not unchanged
+                and (time.time_ns() - entry.stat.st_ctime_ns < settle_seconds * 1e9)
+            ):
                 raise SourceChanged(entry.path)
             digest = prior["content_hash"] if unchanged else hash_file(jail, entry, pulse)
         except (SourceChanged, FileNotFoundError):
