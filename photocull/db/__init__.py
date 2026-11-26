@@ -21,6 +21,9 @@ MIGRATIONS = (
     "0011_stories.sql",
     "0012_video.sql",
     "0013_transfers.sql",
+    "0014_face_index.sql",
+    "0015_transfer_publication.sql",
+    "0016_insight_inputs.sql",
 )
 BUSY_TIMEOUT_MS = 10_000
 
