@@ -26,35 +26,45 @@ def _record(
     with write(db):
         for entry, key, digest in batch:
             prior = db.execute(
-                "SELECT content_hash FROM assets WHERE path = ?", (entry.path,)
+                "SELECT id,content_hash FROM assets WHERE path = ?", (entry.path,)
             ).fetchone()
-            asset = db.execute(
-                """
-                INSERT INTO assets (path, folder, kind, size, mtime_ns, content_hash, scan_id,
-                                    day, source_key)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (path) DO UPDATE SET
-                    active = 1, scan_id = excluded.scan_id, size = excluded.size,
-                    mtime_ns = excluded.mtime_ns, source_key = excluded.source_key,
-                    day = CASE WHEN assets.content_hash = excluded.content_hash
-                               THEN COALESCE(substr(assets.captured_at, 1, 10), excluded.day)
-                               ELSE excluded.day END,
-                    content_hash = excluded.content_hash
-                RETURNING id
-                """,
-                (
-                    entry.path,
-                    entry.path.rpartition("/")[0],
-                    entry.kind,
-                    entry.stat.st_size,
-                    entry.stat.st_mtime_ns,
-                    digest,
-                    scan_id,
-                    fallback_day(entry.stat.st_mtime_ns),
-                    key,
-                ),
+            size, mtime = entry.stat.st_size, entry.stat.st_mtime_ns
+            day = fallback_day(mtime)
+            if prior is None:
+                asset_id = db.execute(
+                    """INSERT INTO assets(path,folder,kind,size,mtime_ns,content_hash,
+                                          scan_id,day,source_key)
+                       VALUES (?,?,?,?,?,?,?,?,?) RETURNING id""",
+                    (
+                        entry.path,
+                        entry.path.rpartition("/")[0],
+                        entry.kind,
+                        size,
+                        mtime,
+                        digest,
+                        scan_id,
+                        day,
+                        key,
+                    ),
+                ).fetchone()["id"]
+            else:
+                asset_id = prior["id"]
+                # A plain UPDATE lets nested catalog triggers keep their own conflict policies.
+                db.execute(
+                    """UPDATE assets SET active=1,scan_id=?,size=?,mtime_ns=?,source_key=?,
+                         day=CASE WHEN content_hash=? THEN coalesce(substr(captured_at,1,10),?)
+                                  ELSE ? END, content_hash=?
+                       WHERE id=?""",
+                    (scan_id, size, mtime, key, digest, day, day, digest, asset_id),
+                )
+            rating = db.execute(
+                "DELETE FROM archive_rating_transfer WHERE path=? RETURNING *", (entry.path,)
             ).fetchone()
-            asset_id = asset["id"]
+            if rating and rating["content_hash"] == digest:
+                db.execute(
+                    "UPDATE assets SET rating=?,rejected=?,revision=revision+1 WHERE id=?",
+                    (rating["rating"], rating["rejected"], asset_id),
+                )
             if model_key and entry.kind != "video":
                 db.execute(
                     """INSERT INTO jobs (asset_id, stage, content_hash, status, model_key)

@@ -7,7 +7,7 @@ from pathlib import Path
 from threading import Lock
 
 from photocull.db.jobs import request_scan
-from photocull.media.walk import EXCLUDED, EXTENSIONS, MediaJail, source_key
+from photocull.media.walk import EXTENSIONS, MediaJail, excluded, source_key
 
 LOG = logging.getLogger(__name__)
 
@@ -53,9 +53,7 @@ class Watch:
                     path = Path(value)
                     if path.is_relative_to(state_dir) or not path.is_relative_to(self.root):
                         continue
-                    if any(
-                        part.casefold() in EXCLUDED for part in path.relative_to(self.root).parts
-                    ):
+                    if any(excluded(part) for part in path.relative_to(self.root).parts):
                         continue
                     if event.is_directory or path.suffix[1:].casefold() in EXTENSIONS:
                         watch.notify()

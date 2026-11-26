@@ -327,6 +327,8 @@ class LibraryWorker:
 
 
 def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=None) -> int:
+    from photocull.worker.archive import Archives
+
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     if not settings.libraries:
         LOG.info("No libraries configured")
@@ -394,6 +396,8 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=N
             config = settings.worker
             pool = stack.enter_context(ThreadPoolExecutor(max_workers=config.parallelism))
             stack.callback(inference.close)
+            archives = Archives(settings, stop, stack)
+            stack.callback(stop.set)
             for worker in workers:
                 stack.callback(worker.offline)
             ready = True
@@ -407,6 +411,7 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=N
                     if rss_mb >= config.memory_mb:
                         LOG.warning("Worker reached %.0f MiB RSS and will restart", rss_mb)
                         return 75
+                archives.step(idle=not busy)
                 if not busy:
                     stop.wait(SEARCH_POLL_SECONDS if poll_search else 1)
     except StopWorker:
