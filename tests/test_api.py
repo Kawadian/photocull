@@ -202,6 +202,11 @@ def test_score_filters_burst_best_and_reversible_flags(tmp_path):
         assert not filtered["items"][0]["auto_reject"]
         assert filtered["items"][0]["burst_id"] == 1
         assert client.get(f"{base}/assets", params={"min_sharpness": 1.1}).status_code == 422
+        assert client.get(f"{base}/assets", params={"cursor": 2**63}).status_code == 422
+        assert client.get(f"{base}/assets/{2**63}").status_code == 422
+        assert client.get(f"{base}/bursts/{2**63}").status_code == 422
+        assert client.get(f"{base}/groups", params={"by": "captured_at"}).status_code == 422
+        assert client.get(f"{base}/assets", params={"folder": "Aki's shoot"}).json()["items"] == []
         assert (
             client.get(
                 f"{base}/assets",
@@ -258,6 +263,10 @@ def test_score_filters_burst_best_and_reversible_flags(tmp_path):
         )
         result = client.post(reject, json={"best_id": 2, "membership_key": group_key}).json()
         assert result["changed"] == 2
+        assert client.post(reject, json={"best_id": 2, "membership_key": group_key}).json() == {
+            "changed": 0,
+            "undo_token": None,
+        }
         flagged = client.get(f"{base}/assets", params={"burst_id": 1, "auto_reject": "true"}).json()
         assert [
             (item["id"], item["auto_reject_reason"], item["rating"], item["rejected"])
@@ -270,6 +279,8 @@ def test_score_filters_burst_best_and_reversible_flags(tmp_path):
 
         assert client.delete(f"{base}/assets/4/auto-reject").json() == {"changed": 1}
         undo = f"{base}/burst-rejections/{result['undo_token']}"
+        assert client.delete(f"{base}/burst-rejections/invalid").status_code == 422
+        assert client.delete(f"{base}/burst-rejections/{'0' * 32}").json() == {"changed": 0}
         assert client.delete(undo).json() == {"changed": 1}
         assert client.delete(undo).json() == {"changed": 0}
         assert client.get(f"{base}/assets/3").json()["auto_reject"]

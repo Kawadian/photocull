@@ -22,20 +22,20 @@ ASSET_COLUMNS = f"""
 """
 ASSET_JOINS = """
     FROM assets AS a
+    LEFT JOIN asset_scores AS s ON s.asset_id = a.id
+    LEFT JOIN burst_members AS m ON m.asset_id = a.id
     LEFT JOIN jobs AS p ON p.asset_id = a.id AND p.stage = 'preview'
     LEFT JOIN jobs AS e ON e.asset_id = a.id AND e.stage = 'exif'
     LEFT JOIN jobs AS q ON q.asset_id = a.id AND q.stage = 'score'
-    LEFT JOIN asset_scores AS s ON s.asset_id = a.id
-    LEFT JOIN burst_members AS m ON m.asset_id = a.id
 """
 
 
 @dataclass(frozen=True)
 class ScoreFilters:
-    min_sharpness: float | None
-    min_exposure: float | None
-    max_exposure: float | None
-    auto_reject: bool | None
+    min_sharpness: float | None = None
+    min_exposure: float | None = None
+    max_exposure: float | None = None
+    auto_reject: bool | None = None
 
     def clauses(self) -> tuple[list[str], list[float]]:
         clauses, params = [], []
@@ -48,8 +48,8 @@ class ScoreFilters:
                 clauses.append(condition)
                 params.append(value)
         if self.auto_reject is not None:
-            operator = "IS NOT NULL" if self.auto_reject else "IS NULL"
-            clauses.append(f"({AUTO_REJECT_REASON}) {operator}")
+            clauses.append(f"(({AUTO_REJECT_REASON}) IS NOT NULL) = ?")
+            params.append(self.auto_reject)
         return clauses, params
 
 
@@ -73,6 +73,36 @@ def get_asset(db: sqlite3.Connection, asset_id: int) -> sqlite3.Row | None:
     return db.execute(
         f"SELECT {ASSET_COLUMNS} {ASSET_JOINS} WHERE a.active = 1 AND a.id = ?", (asset_id,)
     ).fetchone()
+
+
+def asset_page_query(
+    cursor: int,
+    limit: int,
+    scores: ScoreFilters,
+    *,
+    folder: str | None = None,
+    day: str | None = None,
+    burst_id: int | None = None,
+) -> tuple[str, tuple]:
+    clauses, score_params = scores.clauses()
+    # Order burst members through the membership index. All SQL fragments are
+    # fixed predicates and external values are bound below.
+    order = "m.asset_id" if burst_id is not None else "a.id"
+    filters = ["a.active = 1", f"{order} > ?", *clauses]
+    params: list[str | int | float] = [cursor, *score_params]
+    for condition, value in (
+        ("a.folder = ?", folder),
+        ("a.day = ?", day),
+        ("m.burst_id = ?", burst_id),
+    ):
+        if value is not None:
+            filters.append(condition)
+            params.append(value)
+    return (
+        f"""SELECT {ASSET_COLUMNS} {ASSET_JOINS}
+            WHERE {" AND ".join(filters)} ORDER BY {order} LIMIT ?""",
+        (*params, limit + 1),
+    )
 
 
 def set_rating(

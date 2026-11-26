@@ -29,11 +29,10 @@ from photocull.db.bursts import (
     undo_burst_reject,
 )
 from photocull.db.catalog import (
-    ASSET_COLUMNS,
-    ASSET_JOINS,
     RatingConflict,
     ScoreFilters,
     asset_json,
+    asset_page_query,
     clear_auto_reject,
     get_asset,
 )
@@ -46,6 +45,9 @@ TOKEN_HEADER = "x-photocull-token"
 VARIANTS = {"thumb": "thumbs", "preview": "previews", "detail": "details"}
 Limit = Annotated[int, Query(ge=1, le=200)]
 ScoreBound = Annotated[float, Query(ge=0, le=1)]
+SQLITE_MAX_ID = 2**63 - 1
+Cursor = Annotated[int, Query(ge=0, le=SQLITE_MAX_ID)]
+CatalogId = Annotated[int, RoutePath(gt=0, le=SQLITE_MAX_ID)]
 
 
 def score_filters(
@@ -60,12 +62,12 @@ def score_filters(
 
 
 class BurstBestUpdate(BaseModel):
-    asset_id: int = Field(gt=0)
+    asset_id: int = Field(gt=0, le=SQLITE_MAX_ID)
     membership_key: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class BurstRejectUpdate(BaseModel):
-    best_id: int = Field(gt=0)
+    best_id: int = Field(gt=0, le=SQLITE_MAX_ID)
     membership_key: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
@@ -194,25 +196,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def assets(
         library: str,
         scores: Annotated[ScoreFilters, Depends(score_filters)],
-        cursor: Annotated[int, Query(ge=0)] = 0,
+        cursor: Cursor = 0,
         limit: Limit = 100,
         folder: str | None = None,
         day: str | None = None,
-        burst_id: Annotated[int, Query(gt=0)] | None = None,
+        burst_id: Annotated[int, Query(gt=0, le=SQLITE_MAX_ID)] | None = None,
     ):
-        clauses, score_params = scores.clauses()
-        filters = ["a.active = 1", "a.id > ?", *clauses]
-        params: list[str | int | float] = [cursor, *score_params]
-        for field, value in (("a.folder", folder), ("a.day", day), ("m.burst_id", burst_id)):
-            if value is not None:
-                filters.append(f"{field} = ?")
-                params.append(value)
-        params.append(limit + 1)
         with connect(library_path(library)) as db:
             items = db.execute(
-                f"""SELECT {ASSET_COLUMNS} {ASSET_JOINS}
-                    WHERE {" AND ".join(filters)} ORDER BY a.id LIMIT ?""",
-                params,
+                *asset_page_query(cursor, limit, scores, folder=folder, day=day, burst_id=burst_id)
             ).fetchall()
         return {
             "items": [asset_json(row) for row in items[:limit]],
@@ -223,14 +215,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def bursts(
         library: str,
         scores: Annotated[ScoreFilters, Depends(score_filters)],
-        cursor: Annotated[int, Query(ge=0)] = 0,
+        cursor: Cursor = 0,
         limit: Limit = 100,
     ):
         with connect(library_path(library)) as db:
             return list_bursts(db, cursor, limit, scores)
 
     @app.get("/api/libraries/{library}/bursts/{burst_id}")
-    def burst(library: str, burst_id: int):
+    def burst(library: str, burst_id: CatalogId):
         with connect(library_path(library)) as db:
             try:
                 return get_burst(db, burst_id)
@@ -238,7 +230,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(404, str(error)) from error
 
     @app.patch("/api/libraries/{library}/bursts/{burst_id}/best")
-    def set_burst_best(library: str, burst_id: int, update: BurstBestUpdate):
+    def set_burst_best(library: str, burst_id: CatalogId, update: BurstBestUpdate):
         with connect(library_path(library)) as db:
             try:
                 return choose_best(db, burst_id, **update.model_dump())
@@ -250,7 +242,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(422, str(error)) from error
 
     @app.post("/api/libraries/{library}/bursts/{burst_id}/reject-rest")
-    def reject_rest(library: str, burst_id: int, update: BurstRejectUpdate):
+    def reject_rest(library: str, burst_id: CatalogId, update: BurstRejectUpdate):
         with connect(library_path(library)) as db:
             try:
                 return reject_burst_rest(db, burst_id, **update.model_dump())
@@ -272,7 +264,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"changed": clear_auto_reject(db)}
 
     @app.delete("/api/libraries/{library}/assets/{asset_id}/auto-reject")
-    def clear_rejection(library: str, asset_id: int):
+    def clear_rejection(library: str, asset_id: CatalogId):
         with connect(library_path(library)) as db:
             try:
                 return {"changed": clear_auto_reject(db, asset_id)}
@@ -280,7 +272,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(404, str(error)) from error
 
     @app.get("/api/libraries/{library}/assets/{asset_id}")
-    def asset(library: str, asset_id: int):
+    def asset(library: str, asset_id: CatalogId):
         with connect(library_path(library)) as db:
             row = get_asset(db, asset_id)
             if row is None:
@@ -288,7 +280,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return asset_json(row)
 
     @app.patch("/api/libraries/{library}/assets/{asset_id}/rating")
-    def set_rating(library: str, asset_id: int, update: RatingUpdate):
+    def set_rating(library: str, asset_id: CatalogId, update: RatingUpdate):
         with connect(library_path(library)) as db:
             try:
                 rating = save_rating(db, asset_id, **update.model_dump())
@@ -299,7 +291,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return rating
 
     @app.post("/api/libraries/{library}/assets/{asset_id}/xmp")
-    def xmp(library: str, asset_id: int, update: XMPUpdate):
+    def xmp(library: str, asset_id: CatalogId, update: XMPUpdate):
         library_path(library)
         try:
             return asdict(export_xmp(settings, library, asset_id, **update.model_dump()))
@@ -311,11 +303,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(422, str(error)) from error
 
     @app.get("/api/libraries/{library}/assets/{asset_id}/media/{variant}")
-    def media(library: str, asset_id: int, variant: Literal["thumb", "preview", "detail"]):
+    def media(library: str, asset_id: CatalogId, variant: Literal["thumb", "preview", "detail"]):
         db_path = library_path(library)
         with connect(db_path) as db:
-            row = get_asset(db, asset_id)
-            if row is None or row["preview_status"] != "done":
+            row = db.execute(
+                """SELECT a.content_hash FROM assets AS a
+                   JOIN jobs AS p ON p.asset_id = a.id AND p.stage = 'preview'
+                   WHERE a.id = ? AND a.active = 1 AND p.status = 'done'""",
+                (asset_id,),
+            ).fetchone()
+            if row is None:
                 raise HTTPException(404, "Preview unavailable")
         target = cache_path(db_path.parent, VARIANTS[variant], asset_id, row["content_hash"])
         if variant == "detail" and not target.is_file():
@@ -336,7 +333,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _get_progress(library_path(library))
 
     @app.post("/api/libraries/{library}/assets/{asset_id}/jobs/{stage}", status_code=202)
-    def rerun(library: str, asset_id: int, stage: Stage):
+    def rerun(library: str, asset_id: CatalogId, stage: Stage):
         path = library_path(library)
         if stage not in settings.worker.stages:
             raise HTTPException(409, "Stage disabled by worker settings")

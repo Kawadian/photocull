@@ -26,7 +26,7 @@ def _burst_json(row: sqlite3.Row) -> dict:
     return result
 
 
-def list_bursts(db: sqlite3.Connection, cursor: int, limit: int, filters: ScoreFilters) -> dict:
+def burst_page_query(cursor: int, limit: int, filters: ScoreFilters) -> tuple[str, tuple]:
     clauses, params = filters.clauses()
     where = ""
     if clauses:
@@ -35,10 +35,14 @@ def list_bursts(db: sqlite3.Connection, cursor: int, limit: int, filters: ScoreF
             LEFT JOIN asset_scores AS s ON s.asset_id = a.id
             WHERE m.burst_id = b.id AND {" AND ".join(clauses)}
         )"""
-    rows = db.execute(
+    return (
         f"{BURST_SELECT} WHERE b.id > ? {where} ORDER BY b.id LIMIT ?",
         (cursor, *params, limit + 1),
-    ).fetchall()
+    )
+
+
+def list_bursts(db: sqlite3.Connection, cursor: int, limit: int, filters: ScoreFilters) -> dict:
+    rows = db.execute(*burst_page_query(cursor, limit, filters)).fetchall()
     return {
         "items": [_burst_json(row) for row in rows[:limit]],
         "next_cursor": rows[limit - 1]["id"] if len(rows) > limit else None,
