@@ -1,0 +1,185 @@
+from __future__ import annotations
+
+import logging
+import time
+from pathlib import Path
+
+from photocull.db import write
+from photocull.db.catalog import mark_catalog_updated
+from photocull.db.insights import configure_stage, discard, finish, register, stage_key
+from photocull.insights import AESTHETIC_PROMPTS, models, taste_input
+from photocull.media.cache import cache_path
+from photocull.worker.insights.people import FaceGroups
+
+LOG = logging.getLogger(__name__)
+MAX_ATTEMPTS = 3
+
+
+class Insights:
+    def __init__(self, worker, face_factory=None):
+        self.worker = worker
+        self.db = worker.db
+        self.settings = worker.settings
+        self.config = self.settings.insights
+        self.inference = worker.ml.inference
+        self.identities = models(self.settings)
+        self.face_factory = face_factory
+        self.face_model = None
+        self.groups = FaceGroups()
+        self.head = None
+        self.cursor = 0
+        self.stages = [*self.identities]
+        self.last_taste = 0.0
+
+    @property
+    def taste_enabled(self):
+        return self.config.taste and self.settings.ml.enabled
+
+    def configure(self):
+        with write(self.db):
+            for stage in ("aesthetic", "faces", "video", "transcript"):
+                model = self.identities.get(stage)
+                configure_stage(self.db, stage, register(self.db, model) if model else None)
+            state = self.db.execute("SELECT input_key, model_key FROM taste_state").fetchone()
+            configure_stage(
+                self.db,
+                "taste",
+                state["model_key"]
+                if self.taste_enabled and state["input_key"] == taste_input(self.settings)
+                else None,
+            )
+
+    def _aesthetic(self, vector: bytes, key: str) -> float:
+        import numpy as np
+
+        from photocull.worker.ml.vectors import blob_vector
+
+        if self.head is None:
+            target = self.settings.model_cache / "aesthetic" / f"{key}.f32"
+            try:
+                weights = target.read_bytes()
+                if len(weights) != 2 * len(vector):
+                    raise ValueError("Invalid cached aesthetic head shape")
+            except (FileNotFoundError, ValueError):
+                weights = self.inference.call(
+                    "aesthetic_head", (AESTHETIC_PROMPTS,), self.worker.pulse
+                )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as handle:
+                    temporary = Path(handle.name)
+                    try:
+                        handle.write(weights)
+                        handle.flush()
+                        temporary.replace(target)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+            self.head = np.frombuffer(weights, dtype="<f4")
+        projection = float(blob_vector(vector) @ self.head)
+        return float(1 / (1 + np.exp(-8 * projection)))
+
+    def _faces(self, asset, key, pulse):
+        path = cache_path(self.worker.state, "previews", asset["id"], asset["content_hash"])
+        if self.face_factory is not None:
+            if self.face_model is None:
+                self.face_model = self.face_factory()
+            detections = self.face_model.detect(path)
+        else:
+            detections = self.inference.call(
+                "faces",
+                (path, self.config.face_revision, self.config.offline, self.config.threads),
+                self.worker.pulse,
+            )
+        self.groups.save(self.db, key, self.config.face_threshold, asset, detections, pulse)
+
+    def _train(self, pulse):
+        if not self.taste_enabled:
+            return False
+        state = self.db.execute("SELECT * FROM taste_state").fetchone()
+        if state["input_key"] == taste_input(self.settings) and (
+            state["requested"] == state["completed"] or time.monotonic() - self.last_taste < 10
+        ):
+            return False
+        self.last_taste = time.monotonic()
+        try:
+            from photocull.worker.insights.taste import train
+
+            return train(self.db, self.settings, pulse)
+        except (OSError, ValueError, ImportError, MemoryError) as error:
+            with write(self.db):
+                self.db.execute(
+                    """UPDATE taste_state SET completed = ?, input_key = ?, status = 'error',
+                       error = ?, model_key = NULL, coefficients = NULL""",
+                    (state["requested"], taste_input(self.settings), str(error)),
+                )
+                configure_stage(self.db, "taste", None)
+                mark_catalog_updated(self.db)
+            return True
+
+    def step(self, pulse, *, idle=False):
+        if idle and self._train(pulse):
+            return True
+        stages = [*self.stages]
+        if self.taste_enabled:
+            stages.append("taste")
+        for offset in range(len(stages)):
+            index = (self.cursor + offset) % len(stages)
+            if self._process(stages[index], pulse):
+                self.cursor = (index + 1) % len(stages)
+                return True
+        return False
+
+    def _process(self, stage, pulse):
+        key = stage_key(self.db, stage)
+        if key is None:
+            return False
+        row = self.db.execute(
+            """SELECT a.id, a.content_hash, a.path, a.source_key, a.kind, a.duration, w.attempts,
+                      p.status AS preview_status, e.vector
+               FROM insight_work AS w JOIN assets AS a ON a.id = w.asset_id
+               LEFT JOIN jobs AS p ON p.asset_id = a.id AND p.stage = 'preview'
+               LEFT JOIN asset_embeddings AS e ON e.asset_id = a.id AND e.model_key = ?
+               WHERE w.stage = ? ORDER BY w.asset_id LIMIT 1""",
+            (self.settings.ml.model_key, stage),
+        ).fetchone()
+        if row is None:
+            return False
+        video = stage in {"video", "transcript"}
+        unavailable = (row["kind"] == "video") != video
+        unavailable |= stage == "faces" and row["preview_status"] != "done"
+        unavailable |= stage in {"aesthetic", "taste"} and row["vector"] is None
+        with write(self.db):
+            if unavailable:
+                discard(self.db, stage, row["id"])
+                return True
+            self.db.execute(
+                "UPDATE insight_work SET attempts = attempts + 1 WHERE stage = ? AND asset_id = ?",
+                (stage, row["id"]),
+            )
+        score = payload = error = None
+        try:
+            pulse()
+            if row["attempts"] >= MAX_ATTEMPTS:
+                raise ValueError("Worker was interrupted three times. Retry this stage.")
+            if stage == "aesthetic":
+                score = self._aesthetic(row["vector"], key)
+            elif stage == "faces":
+                self._faces(row, key, pulse)
+                return True
+            elif stage == "taste":
+                from photocull.worker.insights.taste import predict
+
+                prediction = predict(self.db, self.settings, row["id"])
+                if prediction is not None:
+                    score, payload = prediction
+            else:
+                from photocull.worker.insights.video import run_stage
+
+                payload = run_stage(self.worker, stage, row, key, pulse)
+        except (OSError, RuntimeError, ValueError, ImportError, MemoryError) as exc:
+            error = str(exc) or type(exc).__name__
+            LOG.warning("Insight %s for asset %s failed: %s", stage, row["id"], error)
+        with write(self.db):
+            finish(self.db, stage, key, row, score=score, payload=payload, error=error)
+        return True

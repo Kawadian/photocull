@@ -21,6 +21,56 @@ class Engine:
         self.tag_work = None
         self.tag_names = tuple(sorted(settings.vocabulary))
         self.groups: SimilarityGroups | None = None
+        self.cache = cache
+        self.face_model = None
+        self.face_key = None
+        self.whisper = None
+        self.whisper_key = None
+
+    def aesthetic_head(self, prompts: tuple[str, ...]) -> bytes:
+        vectors = self.text_vectors(list(prompts))
+        weights = vectors[:2].mean(axis=0) - vectors[2:].mean(axis=0)
+        if not np.all(np.isfinite(weights)):
+            raise ValueError("Invalid aesthetic head")
+        return weights.astype("<f4").tobytes()
+
+    def faces(self, path: Path, revision: str, offline: bool, threads: int) -> list:
+        from photocull.worker.insights.face_model import FaceModel
+
+        key = (revision, offline, threads)
+        if self.face_key != key:
+            self.face_model = FaceModel(self.cache, *key)
+            self.face_key = key
+        return self.face_model.detect(path)
+
+    def transcript(self, data: bytes, model_id: str, revision: str, offline: bool, threads: int):
+        from faster_whisper import WhisperModel
+
+        from photocull.worker.insights.models import whisper_folder
+
+        key = model_id, revision, offline, threads
+        if self.whisper_key != key:
+            self.whisper = None
+            directory = whisper_folder(self.cache, model_id, revision, offline)
+            self.whisper = WhisperModel(
+                str(directory),
+                device="cpu",
+                compute_type="int8",
+                cpu_threads=threads,
+                num_workers=1,
+            )
+            self.whisper_key = key
+        samples = np.frombuffer(data[: len(data) // 2 * 2], dtype="<i2").astype(np.float32) / 32768
+        if not len(samples) or np.max(np.abs(samples)) < 0.005:
+            return []
+        segments, _ = self.whisper.transcribe(
+            samples, beam_size=1, condition_on_previous_text=False, vad_filter=False
+        )
+        return [
+            (float(item.start), float(item.end), item.text.strip())
+            for item in segments
+            if item.text.strip()
+        ]
 
     def images(self, paths: list[Path]) -> list[tuple[bytes | None, str | None]]:
         vectors, errors = self.model.image_vectors(paths)

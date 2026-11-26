@@ -14,10 +14,14 @@ from photocull.db.catalog import mark_catalog_updated
 
 CANDIDATES_SQL = """
     SELECT a.id, a.captured_at, a.content_hash, s.dhash, e.vector,
-           0.60 * s.sharpness + 0.25 * (1 - 2 * abs(s.exposure - 0.5))
-           + 0.15 * (1 - s.clipped_highlights - s.clipped_shadows) AS quality
+           (1 - CASE WHEN i.score IS NOT NULL THEN :weight ELSE 0 END) *
+           (0.60 * s.sharpness + 0.25 * (1 - 2 * abs(s.exposure - 0.5))
+            + 0.15 * (1 - s.clipped_highlights - s.clipped_shadows))
+           + COALESCE(:weight * i.score, 0) AS quality
     FROM assets AS a JOIN asset_scores AS s ON s.asset_id = a.id
     LEFT JOIN asset_embeddings AS e ON e.asset_id = a.id AND e.model_key = :model_key
+    LEFT JOIN insight_results AS i ON i.asset_id = a.id AND i.stage = 'aesthetic'
+        AND i.key = :aesthetic_key AND i.content_hash = a.content_hash
     WHERE a.active = 1 AND a.captured_at IS NOT NULL
       AND a.captured_at BETWEEN :start AND :end
       AND (a.captured_at, a.id) > (:after_time, :after_id)
@@ -201,6 +205,7 @@ def _stage_range(
     settings: BurstSettings,
     pulse: Callable[[], None],
     model_key: str | None,
+    aesthetic_key: str | None,
 ) -> None:
     active: deque[Burst] = deque()
     index = AnchorIndex(settings.max_hamming_distance)
@@ -212,6 +217,8 @@ def _stage_range(
         "after_time": start,
         "after_id": 0,
         "model_key": model_key,
+        "aesthetic_key": aesthetic_key,
+        "weight": settings.aesthetic_weight,
     }
     while rows := db.execute(CANDIDATES_SQL, params).fetchall():
         pulse()
@@ -260,11 +267,13 @@ def refresh_bursts(
     settings: BurstSettings,
     pulse: Callable[[], None],
     model_key: str | None = None,
+    *,
+    aesthetic_key: str | None = None,
 ) -> bool:
     dirty, previous = db.execute(
         "SELECT bursts_dirty, burst_settings FROM analysis_state"
     ).fetchone()
-    config = f"{settings.model_dump_json()}:{model_key or ''}"
+    config = f"{settings.model_dump_json()}:{model_key or ''}:{aesthetic_key or ''}"
     # A full pass is cheaper than thousands of small range seeks after a big import.
     rebuild_all = dirty or previous != config
     if not rebuild_all:
@@ -286,7 +295,7 @@ def refresh_bursts(
     db.execute("DELETE FROM affected_bursts")
 
     if rebuild_all:
-        _stage_range(db, "", "\uffff", settings, pulse, model_key)
+        _stage_range(db, "", "\uffff", settings, pulse, model_key, aesthetic_key)
     else:
         for start, end in _affected_ranges(db, settings.window_seconds, pulse):
             db.execute(
@@ -296,7 +305,7 @@ def refresh_bursts(
                      AND a.captured_at BETWEEN ? AND ?""",
                 (start, end),
             )
-            _stage_range(db, start, end, settings, pulse, model_key)
+            _stage_range(db, start, end, settings, pulse, model_key, aesthetic_key)
 
     pulse()
     scope = "" if rebuild_all else "id IN (SELECT id FROM affected_bursts) AND"
