@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 
+from photocull.api.insights import mount_insights
 from photocull.config import MLSettings, Settings, Stage, load_settings
 from photocull.db import connect, initialize
 from photocull.db.bursts import (
@@ -39,6 +40,7 @@ from photocull.db.catalog import (
     get_asset,
 )
 from photocull.db.catalog import set_rating as save_rating
+from photocull.db.insights import asset_insights, public_keys
 from photocull.db.jobs import progress, request_scan, retry_job
 from photocull.db.search import (
     QueueFull,
@@ -255,6 +257,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         burst_id: Annotated[int, Query(gt=0, le=SQLITE_MAX_ID)] | None = None,
         similar_group_id: Annotated[int, Query(gt=0, le=SQLITE_MAX_ID)] | None = None,
         tag: TagKey | None = None,
+        person_id: Annotated[int, Query(gt=0, le=SQLITE_MAX_ID)] | None = None,
+        kind: Literal["image", "raw", "heif", "video"] | None = None,
+        min_aesthetic: ScoreBound | None = None,
+        sort: Literal["id", "aesthetic", "taste"] = "id",
     ):
         path = library_path(library)
         require_tag(tag)
@@ -262,6 +268,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             require_ml()
         with connect(path) as db:
             db.execute("BEGIN")
+            keys = public_keys(db, settings)
+            if person_id is not None and "faces" not in keys:
+                raise HTTPException(409, "Face grouping is disabled")
+            if min_aesthetic is not None and "aesthetic" not in keys:
+                raise HTTPException(409, "Aesthetic scoring is disabled")
+            sort_score = None
+            if sort != "id":
+                key = keys.get(sort, "")
+                previous = None
+                if cursor:
+                    row = db.execute(
+                        "SELECT score FROM insight_results WHERE stage=? AND key=? AND asset_id=?",
+                        (sort, key, cursor),
+                    ).fetchone()
+                    if row is None or row[0] is None:
+                        raise HTTPException(409, "Scores changed. Reload the results.")
+                    previous = row[0]
+                sort_score = (sort, key, previous)
             group_id = similar_group_id
             if (
                 group_id is not None
@@ -281,9 +305,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     similar_group_id=group_id,
                     tag=tag,
                     tag_key=tag_key,
+                    person_id=person_id,
+                    face_key=keys.get("faces"),
+                    kind=kind,
+                    aesthetic_key=keys.get("aesthetic"),
+                    min_aesthetic=min_aesthetic,
+                    sort_score=sort_score,
                 )
             ).fetchall()
             items = [asset_json(row) for row in rows[:limit]]
+            asset_insights(db, keys, items)
             add_tags(db, items)
         return {
             "items": items,
@@ -446,6 +477,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if row is None:
                 raise HTTPException(404, "Unknown asset")
             items = [asset_json(row)]
+            asset_insights(db, public_keys(db, settings), items)
             add_tags(db, items)
             return items[0]
 
@@ -532,6 +564,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(503, "Frontend build unavailable. Build frontend/dist first.")
         return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
+    mount_insights(app, settings, library_path)
     if (settings.static_dir / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=settings.static_dir / "assets"), name="frontend")
     return app

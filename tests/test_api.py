@@ -28,6 +28,7 @@ forbidden = {
     'onnxruntime', 'insightface', 'faster_whisper', 'torch', 'torchvision',
     'open_clip', 'transformers', 'tokenizers', 'usearch', 'numkong', 'huggingface_hub',
     'faiss', 'hnswlib', 'rawpy', 'pyexiv2', 'PIL', 'numpy', 'pillow_heif', 'cv2', 'imagehash',
+    'ctranslate2', 'watchdog', 'av',
 }
 original = builtins.__import__
 def guarded(name, *args, **kwargs):
@@ -36,18 +37,26 @@ def guarded(name, *args, **kwargs):
     return original(name, *args, **kwargs)
 builtins.__import__ = guarded
 import photocull.api
-from photocull.config import Library, MLSettings, Settings
+from photocull.config import InsightSettings, Library, MLSettings, Settings
 with TemporaryDirectory() as directory:
     state = Path(directory)
     settings = Settings(
         state_dir=state / 'state', libraries={'photos': Library(root=state / 'media')},
         ml=MLSettings(enabled=True),
+        insights=InsightSettings(
+            aesthetic=True, taste=True, faces=True, video=True, transcript=True,
+            story=True, report=True, export=True, watch=True,
+        ),
     )
     with TestClient(photocull.api.create_app(settings)) as client:
         base = '/api/libraries/photos'
         assert client.get(f'{base}/jobs').json()['ml']['waiting']
         assert client.get(f'{base}/tags').status_code == 200
         assert client.get(f'{base}/similar-groups').json()['items'] == []
+        assert client.get(f'{base}/insights').json()['transcript']
+        assert client.get(f'{base}/insights/people').json()['items'] == []
+        assert client.get(f'{base}/insights/stories').json()['items'] == []
+        assert client.post(f'{base}/insights/exports', json={'kind': 'zip'}).status_code == 202
         assert client.post(f'{base}/search', json={'query': '猫'}).status_code == 503
         assert client.post(f'{base}/assets/1/similar', json={}).status_code == 503
 assert forbidden.isdisjoint({name.split('.')[0] for name in sys.modules})
