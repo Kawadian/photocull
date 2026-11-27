@@ -36,9 +36,14 @@ def main():
             info = description(image)
             if image.info.get("bit_depth", 8) > 8:
                 raise ValueError("Cannot verify high-bit-depth pixels with this decoder")
+            if image.palette is not None:
+                with image.convert("RGBA") as colors:
+                    pixels = colors.tobytes()
+            else:
+                pixels = image.tobytes()
             info.update(
                 mode=image.mode,
-                pixels=hashlib.sha256(image.tobytes()).hexdigest(),
+                pixels=hashlib.sha256(pixels).hexdigest(),
                 icc=hashlib.sha256(image.info.get("icc_profile") or b"").hexdigest(),
                 color=image.info.get("nclx_profile"),
             )

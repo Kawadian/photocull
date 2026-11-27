@@ -61,7 +61,7 @@ For the planned 8-core, 16 GiB host, start with one item and two threads, then m
 
 ## Filesystem preflight
 
-Open **Archive → Write access** to see the worker's result for each configured write root. The worker tests the root on startup or after it detects a changed mount identity and reports readiness through the API. Use **Run worker filesystem checks** to request a fresh result after a mount or permissions change. In-place overwrite, removal, trash operations, and batch rename are disabled until the relevant write roots pass. Exports and catalog reports remain available with their own configured permissions.
+Open **Archive → Write access** to see the worker's result for each configured write root. The worker tests the root on startup or after it detects a changed mount identity and reports readiness through the API. Use **Run worker filesystem checks** to request a fresh result after a mount or permissions change. In-place overwrite, removal, trash operations, and in-place batch rename are disabled until the relevant write roots pass. Exports and catalog reports remain available with their own configured permissions.
 
 Run the same diagnostics from the worker's user and mount namespace to inspect any existing directory inside an approved write root. Add `--library NAME` when more than one library is configured.
 
@@ -157,11 +157,14 @@ The worker skips outputs that grow. Duplicate matches and filename pairs remain 
 
 ## Location information in exports
 
-Archive copies, export renames and keeper exports preserve the original media byte for byte by default, including GPS and embedded metadata. Archive preserves its usual sidecar behavior. Keeper exports include existing XMP only when requested. The Browser’s sharing and report preference has no effect on these defaults.
+Archive copies, export renames, and keeper folder or ZIP exports follow `browser.strip_location` (`PHOTOCULL_BROWSER_STRIP_LOCATION`), which defaults to `true`. Each operation lets you choose **Include location information** for a byte-identical copy. Archive binds the choice to the preview and job. The keeper confirmation carries it into the job. Exports with an already recorded choice keep that policy. Export renames work on read-only libraries. In-place operations and explicit conversion defaults retain their existing behavior.
 
-Choose **Remove location information** to scrub only the exported copy. ExifTool removes location metadata from JPEG, HEIC/HEIF/HIF and DNG and removes descriptive XMP, IPTC and camera MakerNotes that can also carry location. It preserves orientation, color and the image format, with decoded pixel verification for JPEG and supported HEIF and raw-sample and calibration verification for DNG. Location-free DNG copies omit embedded originals and private metadata blocks. Supported MP4/M4V, MOV and MKV files use FFmpeg stream copy with container and stream metadata removed. The worker checks stream properties and encoded audio/video packet hashes. Removal omits XMP sidecars.
+For JPEG, HEIC/HEIF/HIF, TIFF, DNG and compatible camera RAW files, ExifTool removes recognized location fields from EXIF, XMP, IPTC and other readable metadata. The worker compares decoded pixels or RAW samples and calibration, preserves unrelated metadata such as capture time, camera, orientation, rating and ICC, and verifies that location tags are absent. Archive includes and cleans both same-stem and extension-qualified XMP sidecars. Keeper exports do the same for sidecars when requested. Free text and filenames are preserved.
 
-Unsupported formats, additional or timed metadata tracks, and files that fail verification require retaining metadata or choosing an explicit Archive conversion. The worker never silently re-encodes a copy or changes its extension. The original remains available with its metadata. Archive conversions apply the selected codec and its existing verification when the operator chooses that operation.
+For compatible MP4/M4V, MOV and MKV, FFmpeg copies the streams and removes location keys. Other metadata is retained and checked. ExifTool checks for QuickTime and embedded location tags. The worker also compares encoded packet hashes.
+
+Archive and keeper previews show unsupported formats, such as PNG, WebP and AVIF, by extension. Checks that require reading the source run in the job. Files that cannot be verified are skipped with a reason. Examples include unreadable sidecars, multi-image files that the verifier cannot compare, videos with extra or timed metadata streams, and RAW files with opaque private data or embedded originals. If any requested sidecar fails verification, the whole item is skipped. Copies are staged on the export side. Originals and source sidecars are opened read-only. An explicit format conversion is a separate Archive operation.
+
 
 ## Saved conversion rules
 

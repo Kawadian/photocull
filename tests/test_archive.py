@@ -595,7 +595,6 @@ def test_cli_audits_numeric_container_uid(catalog, tmp_path, monkeypatch):
         {"operation": "hevc", "mode": "remove"},
         {"operation": "trash", "filters": {"ids": [1]}},
         {"operation": "rename", "mode": "overwrite"},
-        {"operation": "rename"},
         {"operation": "purge", "trash_before": "2026-01-01"},
         {"operation": "restore", "trash_ids": ["a" * 32 + "-1"]},
         {"operation": "undo", "trash_ids": ["a" * 32 + "-1"]},

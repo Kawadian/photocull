@@ -67,7 +67,11 @@ def page(db, id_, after=0):
         result["items" if item["eligible"] else "skipped"].append(json.loads(item["payload"]))
     if len(rows) > PAGE_SIZE:
         result["next_cursor"] = rows[PAGE_SIZE - 1]["ordinal"]
-    return result | json.loads(row["summary"])
+    return (
+        result
+        | json.loads(row["summary"])
+        | {"include_location": json.loads(row["request"]).get("include_location")}
+    )
 
 
 def prune(db):

@@ -22,7 +22,7 @@ worker:
   stages: [exif, preview, score]
   device: cpu
 # browser:
-#   strip_location: true # Default for shared media, rendered downloads, and trip reports.
+#   strip_location: true # Default for export copies and renames, shared media, rendered downloads, and trip reports.
 # derivatives:
 #   hot_dir: /var/lib/photocull/derivatives/hot
 #   hot_mib: 1536

@@ -628,7 +628,7 @@ function Recommendations({ base, capability, version, openReview }: ScreenProps)
 }
 
 type Transfer = {
-  include_location?: boolean
+  include_location?: boolean; skipped: number
   id: string; kind: 'copy' | 'zip' | 'report'; status: 'pending' | 'running' | 'cancelling' | 'cancelled' | 'error' | 'done'
   destination: string | null; error: string | null; processed: number; total: number
   total_bytes: number; written_bytes: number; cancellable: boolean
@@ -642,8 +642,33 @@ function FlagFilter({ name, label, initial = 'any' }: { name: string; label: str
   </select></label>
 }
 
+type Skip = { path: string; reason: string }
+type ExportPreview = Page<Skip> & { total: number; skipped: number; include_location: boolean }
+
+function SkipItems({ items }: { items: Skip[] }) {
+  return <ul>{items.map(({ path, reason }) => <li key={path}><strong>{path}</strong> · {reason}</li>)}</ul>
+}
+
+function TransferSkips({ url, count, version }: { url: string; count: number; version: number }) {
+  const [open, setOpen] = useState(false)
+  const cursor = usePageCursor(0)
+  const skips = useRemote<Page<Skip>>(open ? url + '?after=' + cursor.cursor : null, version)
+  return <details onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary>{count} skipped</summary>
+    <Status error={skips?.error} pending={open && !skips} />
+    {skips?.data && <><SkipItems items={skips.data.items} />
+      <Paging {...cursor} next={skips.data.next_cursor} forward={() => cursor.forward(skips.data?.next_cursor)} />
+    </>}
+  </details>
+}
+
 function Transfers({ base, version, capability, report }: ScreenProps & { report: boolean }) {
-  const [includeLocation, setIncludeLocation] = useState(!report || capability.strip_location === false)
+  const [includeLocation, setIncludeLocation] = useState(capability.strip_location === false)
+  const [preview, setPreview] = useState<{ body: Record<string, unknown>; data: ExportPreview }>()
+  const exportUrl = base + '/insights/exports'
+  const previewHeading = useRef<HTMLHeadingElement>(null)
+  const hasPreview = preview !== undefined
+  useEffect(() => { if (hasPreview) previewHeading.current?.focus() }, [hasPreview])
   const [mode, setMode] = useState('zip')
   const [poll, setPoll] = useState(0)
   const [person, setPerson] = useState('')
@@ -661,21 +686,31 @@ function Transfers({ base, version, capability, report }: ScreenProps & { report
     const timer = window.setInterval(() => setPoll((v) => v + 1), 1000)
     return () => window.clearInterval(timer)
   }, [running])
+  function loadPreview(body: Record<string, unknown>, after = 0) {
+    void work.action<ExportPreview>(exportUrl + '/preview?after=' + after, json('POST', body),
+      (data) => setPreview({ body: { ...body, include_location: data.include_location }, data }))
+      .catch(() => {})
+  }
+
   return <>
-    <form className="insight-form" onSubmit={(event) => {
+    <form onChange={() => setPreview(undefined)} onSubmit={(event) => {
       event.preventDefault()
       const data = new FormData(event.currentTarget)
       const dates = { start: data.get('start') || null, end: data.get('end') || null }
-      const body = report ? { ...dates, include_location: includeLocation } : {
-        kind: mode, destination: data.get('destination'), xmp: includeLocation && data.has('xmp'),
+      if (report) {
+        void work.action(base + '/insights/reports', json('POST', { ...dates, include_location: includeLocation }))
+          .catch(() => {})
+        return
+      }
+      loadPreview({
+        kind: mode, destination: data.get('destination'), xmp: data.has('xmp'),
         include_location: includeLocation,
         selection: { ...dates, minimum_rating: Number(data.get('rating')), rejected: bool(data.get('rejected')),
           auto_reject: bool(data.get('auto_reject')), dead: bool(data.get('dead')),
           person_id: person ? Number(person) : null },
-      }
-      void work.action(`${base}/insights/${report ? 'reports' : 'exports'}`, json('POST', body))
-        .catch(() => {})
+      })
     }}>
+      <fieldset className="insight-form insight-fieldset" disabled={work.busy}>
       {!report && <>
         <label>Format<select value={mode} onChange={(event) => setMode(event.target.value)}>
           <option value="zip">Download ZIP</option>
@@ -701,9 +736,8 @@ function Transfers({ base, version, capability, report }: ScreenProps & { report
           <Paging {...cursor} next={people?.data?.next_cursor} forward={() => cursor.forward(people?.data?.next_cursor)} />
           <Status error={people?.error} pending={!people} retry={work.retry} />
         </>}
-        {includeLocation
-          ? <label className="transfer-checkbox"><input type="checkbox" name="xmp" /> Include existing XMP sidecars</label>
-          : <p className="insight-muted">Location removal keeps the original format without re-encoding supported JPEG, HEIC, DNG, MP4, MOV and MKV files. Files that cannot be verified stop the export. XMP sidecars are omitted.</p>}
+        <label className="transfer-checkbox"><input type="checkbox" name="xmp" /> Include existing XMP sidecars</label>
+        {!includeLocation && <p className="insight-muted">Location removal keeps the original media format and cleans any included XMP sidecars. Unsupported files or files that fail verification are skipped.</p>}
       </>}
       <label>Location information<select value={String(includeLocation)}
         onChange={(event) => setIncludeLocation(event.target.value === 'true')}>
@@ -712,8 +746,21 @@ function Transfers({ base, version, capability, report }: ScreenProps & { report
       </select></label>
       <label>From date<input type="date" name="start" /></label>
       <label>To date<input type="date" name="end" /></label>
-      <button className="button primary" disabled={work.busy}>{report ? 'Generate HTML report' : 'Start export'}</button>
+      <button className="button primary">{report ? 'Generate HTML report' : 'Preview export'}</button>
+      </fieldset>
     </form>
+    {preview && <section className="insight-section" aria-label="Export preview">
+      <h2 ref={previewHeading} tabIndex={-1}>Export preview</h2>
+      <p>{preview.data.total} matching items · {preview.data.skipped} unsupported</p>
+      <p>{preview.data.include_location ? 'Export includes source location information.'
+        : 'Export removes source location information. Copies and included sidecars are verified before export.'}</p>
+      <SkipItems items={preview.data.items} />
+      {preview.data.next_cursor !== null && <button className="button secondary" disabled={work.busy}
+        onClick={() => loadPreview(preview.body, preview.data.next_cursor ?? 0)}>Next skipped items</button>}
+      <button className="button primary" disabled={work.busy || preview.data.total === preview.data.skipped}
+        onClick={() => { void work.action(exportUrl, json('POST', preview.body), () => setPreview(undefined))
+          .catch(() => {}) }}>Start export</button>
+    </section>}
     <Status error={work.error || result?.error} pending={!result} empty={!tasks.length} retry={work.retry}>
       {report ? 'No trip reports generated yet.' : 'No exports yet.'}
     </Status>
@@ -726,6 +773,8 @@ function Transfers({ base, version, capability, report }: ScreenProps & { report
             <p className="insight-muted">{item.kind === 'report' ? 'No matching story days.' : 'No matching keepers.'}</p>}
           {item.include_location !== undefined && <p className="insight-muted">{item.include_location
             ? 'Source location included when available' : 'Location information excluded'}</p>}
+          {!!item.skipped && <TransferSkips url={url + '/' + item.id + '/skips'} count={item.skipped}
+            version={work.version + poll} />}
           {item.kind === 'copy' && item.status === 'done' && <p className="copy-target">{item.destination}/{item.id}</p>}
           {item.error && <p role="alert" className="inline-error">{item.error}</p>}
           {['running', 'cancelling'].includes(item.status) && <progress aria-label="Transfer progress"

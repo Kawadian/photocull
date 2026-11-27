@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from photocull.config import Settings
 from photocull.db.catalog import AUTO_REJECT_REASON
+from photocull.media.export_location import MEDIA_SUFFIXES, unsupported_reason
 from photocull.media.walk import EXTENSIONS, MediaJail, excluded, open_directory, source_key
 
 MAX_ITEMS = 500
@@ -105,7 +106,7 @@ class ArchiveRequest(BaseModel):
 
     @property
     def requires_write_access(self) -> bool:
-        return self.destructive or self.operation == "rename"
+        return self.destructive
 
     @property
     def exports(self) -> bool:
@@ -121,10 +122,19 @@ class ArchiveRequest(BaseModel):
         # Old requests without a policy retain their recorded export behavior.
         return self.exports and self.include_location is False
 
-    def with_location_policy(self) -> ArchiveRequest:
-        if not self.exports:
+    @property
+    def metadata_copy(self) -> bool:
+        return self.exports and self.operation in {"copy", "rename"}
+
+    @property
+    def scrub_copy(self) -> bool:
+        return self.metadata_copy and self.strip_location
+
+    def with_location_policy(self, settings: Settings) -> ArchiveRequest:
+        if not self.exports or self.include_location is not None:
             return self
-        return self.model_copy(update={"include_location": self.include_location is not False})
+        include = not settings.browser.strip_location if self.metadata_copy else True
+        return self.model_copy(update={"include_location": include})
 
     @model_validator(mode="after")
     def validate_options(self):
@@ -245,6 +255,7 @@ def capabilities(db, settings, library):
             else None
         ),
         "retention_days": config.retention_days,
+        "strip_location": settings.browser.strip_location,
     }
 
 
@@ -442,14 +453,15 @@ def asset_plan(settings, library, jail, request, row, ordinal, listing):
             "remove": request.destructive,
         }
     ]
+    if request.scrub_copy and source.suffix.lower() not in MEDIA_SUFFIXES:
+        raise ArchiveError(unsupported_reason(source.suffix))
+    include_sidecars = not request.strip_location or request.scrub_copy
     related, shared = (
-        ([], False)
-        if request.strip_location and not request.destructive
-        else sidecar_state(source, listing)
+        sidecar_state(source, listing) if include_sidecars or request.destructive else ([], False)
     )
     for file in related:
         prior = Path(file["path"])
-        output = related_path(target, file) if target and not request.strip_location else None
+        output = related_path(target, file) if target and include_sidecars else None
         keep_shared = shared and not file["qualified"]
         if output == prior or (output is None and (keep_shared or not request.destructive)):
             continue

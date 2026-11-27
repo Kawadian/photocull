@@ -76,14 +76,14 @@ The versioned URL is `/api/libraries/{library}/assets/{id}/media/{variant}/{sour
 
 ## Location information in shared and exported media
 
-`browser.strip_location` sets the default for shared media, rendered downloads, and trip reports. It defaults to `true` and can be set in YAML or overridden by `PHOTOCULL_BROWSER_STRIP_LOCATION`. Each of those operations accepts an explicit `include_location` override. Ordinary browsing always uses location-free derivatives. Archive and keeper copies are intended for the owner's own storage and preserve the original bytes and metadata by default. The Archive preview binds any explicit removal request to its confirmation and job. The viewer asks which policy to apply before preparing a share link or rendered download and warns that original files can contain source location metadata.
+`browser.strip_location` sets the default for shared media, rendered downloads, trip reports, Archive copies and export renames, and keeper copies or ZIPs. It defaults to `true` and can be set in YAML or overridden by `PHOTOCULL_BROWSER_STRIP_LOCATION`. Each operation accepts an explicit `include_location` override. Ordinary browsing always uses location-free derivatives. Archive binds the resolved choice to its preview, confirmation and job. Keeper previews show likely skips by file format and carry the selected policy into the queued export. The viewer warns that original files can contain location metadata.
 
 | Operation | Exclude location | Include location |
 | --- | --- | --- |
 | Shared link or rendered download | A clean JPEG up to 2560 px or a 720p H.264/AAC MP4 | Same media with source coordinates when available. JPEG uses GPS EXIF and MP4 uses QuickTime location. |
 | Original download or streaming | Omitted and false flags are rejected | Requires `include_location=true` and delivers the original bytes and original metadata. Original downloads and original streaming retain their separate, default-off permissions. |
-| Keeper ZIP or folder export | Verified metadata-only removal in the same format. Sidecars are omitted. | Original media bytes and optional existing XMP sidecars. |
-| Archive copy or export rename | Same metadata-only removal and verification as a keeper export. Sidecars are omitted. | Original media bytes and existing sidecar behavior. |
+| Keeper ZIP or folder export | Verified metadata-only removal in the same format. Requested XMP sidecars are cleaned as well. | Original media bytes and optional existing XMP sidecars. |
+| Archive copy or export rename | The same verified removal, including existing XMP sidecars. | Original media bytes and existing sidecar behavior. |
 | Trip report | Generic section and photo labels, without indexed place names or coordinates. | Indexed place names or coordinates when available. |
 | Archive conversion export | Requested conversion format, with source descriptive metadata and sidecars omitted. DNG retains verified raw samples and omits embedded previews. Video retains audio and moving-picture tracks. | Existing verified metadata-preservation workflow. |
 
@@ -113,7 +113,8 @@ Nine generated stills (3200–3840 px long edge, with varied detail) measured 9.
 
 1. Stop the worker and API to capture a consistent set of catalogs. Save each `<state>/libraries/<library>/index.db` and any `<state>/browser.db` to separate storage, preserving the relative paths. After creating each destination directory, run `sqlite3 "$state/libraries/$library/index.db" ".backup '$backup/libraries/$library/index.db'"` for each library. For collections, run `sqlite3 "$state/browser.db" ".backup '$backup/browser.db'"` if that database exists. Verify that each backup opens and `PRAGMA quick_check` returns `ok`. SQLite’s backup includes committed data that is still in the WAL.
 2. Start the upgraded release. Numbered migrations 0023–0026 run in each library catalog across the stack. Migration 0024 adds derivative tables and indexes. Budget space for database backups and migration writes. The EXIF backfill in 0025 queues active photos for reindexing, so monitor the queue and postpone a large upgrade if the maintenance window is short. Collections use a separate `browser_0001` migration for `browser.db`.
-3. To roll back, stop both services, restore the pre-upgrade databases in their original layout, and start the corresponding earlier release. These migrations run forward only. Keep any exports you need separately.
+3. Migration 0029 records skipped keeper exports and their reasons. It adds a default-zero count to existing transfer records and creates a separate table for details.
+4. To roll back, stop both services, restore the pre-upgrade databases in their original layout, and start the corresponding earlier release. These migrations run forward only. Keep any exports you need separately.
 
 ## nginx and deployment
 

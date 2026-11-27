@@ -36,6 +36,7 @@ MIGRATIONS = (
     "0026_browser_labels.sql",
     "0027_score_detail.sql",
     "0028_unassigned_faces.sql",
+    "0029_export_skips.sql",
 )
 BUSY_TIMEOUT_MS = 10_000
 
