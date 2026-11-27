@@ -100,6 +100,7 @@ export function Delivery({ lang, assetUrl, hash, media, close }: {
       <label>{text.action}<select value={action} onChange={(event) => {
         clear()
         setAction(event.target.value as Action)
+        setInclude(media.strip_location === false)
       }}>
         <option value="share">{text.share}</option>
         <option value="download">{text.download}</option>
@@ -119,7 +120,7 @@ export function Delivery({ lang, assetUrl, hash, media, close }: {
         {status === 'failed' ? text.retry : action === 'share' ? text.prepare : text.prepareDownload}
       </button>}
       {ready && action === 'share' && <>
-        <label>{text.link}<input value={share} readOnly onFocus={(event) => event.currentTarget.select()} /></label>
+        <label>{text.link}<input value={share} readOnly autoFocus onFocus={(event) => event.currentTarget.select()} /></label>
         <button type="button" className="pcb-control pcb-delivery-primary" onClick={() => {
           if (!navigator.clipboard) setCopyResult(text.copyFailed)
           else void navigator.clipboard.writeText(share)
