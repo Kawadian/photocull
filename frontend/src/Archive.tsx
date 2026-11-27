@@ -79,8 +79,8 @@ function More({ any, previous, next }: { any: boolean; previous: () => void; nex
   </div>
 }
 
-function ArchiveForm({ capability, seed, busy, execute, clear, saveRule }: {
-  capability: Capability; seed?: number[]; busy: boolean; execute: (plan: Plan) => void
+function ArchiveForm({ capability, seed, exportOnly, busy, execute, clear, saveRule }: {
+  capability: Capability; seed?: number[]; exportOnly: boolean; busy: boolean; execute: (plan: Plan) => void
   clear: () => void; saveRule: (plan: Plan) => void
 }) {
   const [operation, setOperation] = useState<Operation>('copy')
@@ -99,13 +99,13 @@ function ArchiveForm({ capability, seed, busy, execute, clear, saveRule }: {
     const list = (key: string) => str(key).split(/[ ,]+/).filter(Boolean)
     const maxRating = num('max_rating')
     const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null
-    const submit = submitter?.value === 'save-rule' ? saveRule : execute
+    const submit = !exportOnly && submitter?.value === 'save-rule' ? saveRule : execute
     submit({
-      operation, mode, dng_preview: str('dng_preview') || undefined, reason: str('reason'), collision: str('collision') === 'rename' ? 'rename' : 'fail',
+      operation, mode: exportOnly ? 'export' : mode, dng_preview: str('dng_preview') || undefined, reason: str('reason'), collision: str('collision') === 'rename' ? 'rename' : 'fail',
       include_location: requiresOutput ? includeLocation : undefined,
       quality: num('quality'), preset: str('preset') || undefined, template: str('template') || undefined,
       filters: {
-        ids: list('ids').map(Number), after_id: num('after_id'),
+        ids: exportOnly ? seed : list('ids').map(Number), after_id: num('after_id'),
         start: str('start') || undefined, end: str('end') || undefined, older_days: num('older_days'),
         folder: str('folder'), camera: str('camera'), extensions: list('extensions').map((s) => s.replace(/^\./, '')),
         selection: str('selection'), burst_id: num('burst_id'), min_rating: num('min_rating'), max_rating: maxRating,
@@ -120,10 +120,12 @@ function ArchiveForm({ capability, seed, busy, execute, clear, saveRule }: {
       <legend>Operation</legend>
       <div className="archive-fields">
         <label>Action<select value={operation} onChange={(e) => { setOperation(e.target.value as Operation); setMode('export') }}>
-          {Object.entries(operations).filter(([id]) => !['restore', 'purge', 'undo'].includes(id)).map(([id, name]) =>
+          {Object.entries(operations).filter(([id]) => exportOnly
+            ? id === 'copy' || conversions.has(id as Operation)
+            : !['restore', 'purge', 'undo'].includes(id)).map(([id, name]) =>
             <option key={id} value={id} disabled={['trash', 'rename'].includes(id) && !capability.destructive}>{name}</option>)}
         </select></label>
-        {!['copy', 'trash'].includes(operation) && <label>Destination<select value={mode} onChange={(e) => setMode(e.target.value as Mode)}>
+        {!exportOnly && !['copy', 'trash'].includes(operation) && <label>Destination<select value={mode} onChange={(e) => setMode(e.target.value as Mode)}>
           <option value="export">Separate export folder</option>
           <option value="overwrite" disabled={!capability.destructive}>Replace originals after verification</option>
           {operation !== 'rename' && <option value="remove" disabled={!capability.destructive}>Export and trash verified originals</option>}
@@ -171,7 +173,7 @@ function ArchiveForm({ capability, seed, busy, execute, clear, saveRule }: {
           <option value="suggested">Suggested rejects</option><option value="dead">Unwanted clips</option>
           <option value="burst_rest">Burst members except best</option>
         </select></label>
-        <label>Asset IDs <input name="ids" defaultValue={seed?.join(', ')} placeholder="12, 56, 102" /></label>
+        <label>Asset IDs <input name="ids" defaultValue={seed?.join(', ')} readOnly={exportOnly} placeholder="12, 56, 102" /></label>
         <label>Folder <input name="folder" placeholder="2018/Trip" /></label>
         <label>Camera <input name="camera" placeholder="ILCE-7CM2" /></label>
         <label>From date <input type="date" name="start" /></label>
@@ -194,13 +196,13 @@ function ArchiveForm({ capability, seed, busy, execute, clear, saveRule }: {
         </div>
       </details>
     </fieldset>
-    {!capability.destructive && <p className="insight-muted">{capability.destructive_reason}
+    {!exportOnly && !capability.destructive && <p className="insight-muted">{capability.destructive_reason}
       {' '}Set PHOTOCULL_WRITE_ROOTS to the canonical worker directory, mount it read-write, and check Write access.</p>}
     {requiresOutput && !capability.export && <p className="insight-muted">{capability.export_reason}</p>}
     <button className="button primary archive-start" disabled={busy || requiresWrite && !capability.destructive || requiresOutput && !capability.export}>
       {busy ? 'Building preview…' : 'Preview operation'}
     </button>
-    {conversions.has(operation) && <button className="button secondary archive-start" value="save-rule" disabled={busy}>
+    {!exportOnly && conversions.has(operation) && <button className="button secondary archive-start" value="save-rule" disabled={busy}>
       Save as a rule
     </button>}
   </form>
@@ -473,6 +475,7 @@ const panels = ['Plan', 'Jobs', 'Trash', 'Rules', 'Write access', 'Storage', 'Du
 
 export function Archive({ base, online, initialSeed }: { base: string; online: boolean; initialSeed?: number[] }) {
   const url = `${base}/archive`
+  const exportOnly = initialSeed !== undefined
   const [panel, setPanel] = useState<typeof panels[number]>('Plan')
   const [version, setVersion] = useState(0)
   const [busy, setBusy] = useState(false)
@@ -484,9 +487,9 @@ export function Archive({ base, online, initialSeed }: { base: string; online: b
   const [rulePlan, setRulePlan] = useState<Plan>()
   const [jobId, setJobId] = useState<string>()
   const capability = useRemote<Capability>(url, version)
-  const rules = useRemote<{ items: Rule[] }>(`${url}/rules`, version)
+  const rules = useRemote<{ items: Rule[] }>(exportOnly ? null : `${url}/rules`, version)
   const unread = rules?.data?.items.filter((rule) => rule.unread).length ?? 0
-  const checksPending = capability?.data?.write_checks.some((check) => check.passed === null)
+  const checksPending = !exportOnly && capability?.data?.write_checks.some((check) => check.passed === null)
   const previewPage = useRemote<Preview>(planned ? `${url}/previews/${planned.id}?after=${previewPages.at(-1) ?? 0}` : null, version)
   const result = previewPage?.data
   const preparing = !!planned && (!result || ['pending', 'running'].includes(result.status))
@@ -550,8 +553,10 @@ export function Archive({ base, online, initialSeed }: { base: string; online: b
 
   const cfg = capability?.data
   const screens: Record<typeof panels[number], ReactNode> = {
-    Plan: cfg && <ArchiveForm capability={cfg} seed={seed} busy={busy || preparing} execute={preview} clear={() => setPlanned(undefined)} saveRule={(plan) => { setError(''); setRulePlan(plan) }} />,
-    Jobs: <JobsPanel url={url} version={version} id={jobId} setId={setJobId} action={mutate} busy={busy} />,
+    Plan: cfg && <ArchiveForm capability={cfg} seed={seed} exportOnly={exportOnly} busy={busy || preparing} execute={preview} clear={() => setPlanned(undefined)} saveRule={(plan) => { setError(''); setRulePlan(plan) }} />,
+    Jobs: exportOnly
+      ? jobId && <JobPage key={jobId} url={url} version={version} id={jobId} action={mutate} busy={busy} />
+      : <JobsPanel url={url} version={version} id={jobId} setId={setJobId} action={mutate} busy={busy} />,
     Trash: cfg && <TrashPanel url={url} capability={cfg} version={version} preview={preview} busy={busy || preparing} clear={() => setPlanned(undefined)} />,
     Rules: <RulesPanel list={rules} busy={busy} action={mutate} open={(rule) => {
       if (!rule.preview_id) return
@@ -567,7 +572,7 @@ export function Archive({ base, online, initialSeed }: { base: string; online: b
   return <main className="insights archive" aria-labelledby="archive-heading">
     <h2 id="archive-heading">Archive</h2>
     <nav className="insight-actions" aria-label="Archive sections">
-      {panels.map((name) => <button key={name} className="button secondary" aria-current={panel === name ? 'page' : undefined}
+      {(exportOnly ? jobId ? ['Plan', 'Jobs'] as const : ['Plan'] as const : panels).map((name) => <button key={name} className="button secondary" aria-current={panel === name ? 'page' : undefined}
         disabled={busy} onClick={() => { setError(''); setPlanned(undefined); setPanel(name) }}>{name}{name === 'Rules' && unread > 0 ? ` (${unread} new)` : ''}</button>)}
     </nav>
     <ReadState result={capability} retry={refresh} />

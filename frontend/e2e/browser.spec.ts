@@ -449,8 +449,22 @@ test('saves and edits a smart album and opens an archive plan for its selection'
   const actions = page.getByRole('dialog', { name: 'Selection actions' })
   await actions.getByRole('combobox', { name: 'Action', exact: true }).selectOption('export')
   await page.screenshot({ path: info.outputPath('desktop-export-handoff.png') })
+  await page.route('**/gallery-2025/archive', async (route) => {
+    const response = await route.fetch()
+    await route.fulfill({ json: { ...await response.json(), destructive: true, export: true } })
+  })
   await actions.getByRole('link', { name: 'gallery-2025 · 1 item' }).click()
-  await expect(page.getByRole('textbox', { name: 'Asset IDs' })).toHaveValue('118')
+  const archive = page.getByRole('main', { name: 'Archive' })
+  const ids = archive.getByRole('textbox', { name: 'Asset IDs' })
+  await expect(ids).toHaveValue('118')
+  await expect(ids).not.toBeEditable()
+  await expect(archive.getByRole('option', { name: 'Move to trash' })).toHaveCount(0)
+  await expect(archive.getByRole('button', { name: 'Trash', exact: true })).toHaveCount(0)
+  await archive.getByRole('combobox', { name: 'Action', exact: true }).selectOption('jpeg')
+  await expect(archive.getByRole('combobox', { name: 'Destination' })).toHaveCount(0)
+  const submitted = page.waitForRequest((request) => request.url().endsWith('/archive/preview'))
+  await archive.getByRole('button', { name: 'Preview operation' }).click()
+  expect((await submitted).postDataJSON()).toMatchObject({ mode: 'export', filters: { ids: [118] } })
 })
 
 test.describe('album organization on touch', () => {

@@ -327,3 +327,48 @@ def test_batch_selection_reports_and_retries_independent_catalogs(timeline):
         {"library": "alpha", "count": 2, "status": "tag_limit"}
     ]
     assert timeline.get("/api/libraries/alpha/assets/1").json()["rating"] == 0
+
+
+def test_browser_migrates_existing_catalog_and_initializes_album_db(tmp_path):
+    from photocull.db import MIGRATIONS, initialize
+
+    settings = Settings(
+        libraries={"alpha": Library(root=tmp_path / "photos")}, state_dir=tmp_path / "state"
+    )
+    path = settings.library_state("alpha") / "index.db"
+    initialize(path, MIGRATIONS[:22])
+    with connect(path) as db, write(db):
+        db.execute("INSERT INTO scan_requests(id,status,created_at) VALUES(1,'done',0)")
+        db.executemany(
+            """INSERT INTO assets(id,path,folder,kind,size,mtime_ns,content_hash,scan_id,day,
+                                  captured_at,active,rating)
+               VALUES (?,'frame-' || ? || '.jpg','','image',64,0,?,1,'2025-01-02',?,?,4)""",
+            ((1, 1, "a" * 64, "2025-01-02T03:04:05", 1), (2, 2, "b" * 64, None, 0)),
+        )
+        db.execute("""INSERT INTO jobs(asset_id,stage,content_hash,status,attempts)
+                      SELECT id,'exif',content_hash,'done',1 FROM assets""")
+
+    for startup in range(2):
+        with TestClient(create_app(settings)) as client, connect(path) as db:
+            assert db.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+            assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            assert not db.execute("PRAGMA foreign_key_check").fetchall()
+            rows = db.execute("SELECT id, rating, timeline_time, favorite FROM assets ORDER BY id")
+            assert [tuple(row) for row in rows] == [(1, 4, "2025-01-02T03:04:05", 0), (2, 4, "", 0)]
+            rows = db.execute(
+                "SELECT status,attempts FROM jobs WHERE stage='exif' ORDER BY asset_id"
+            )
+            assert [tuple(row) for row in rows] == [("pending", 0), ("done", 1)]
+            stage_counts = dict(
+                db.execute("SELECT status,count FROM stage_counts WHERE stage='exif'")
+            )
+            assert stage_counts == {"done": 1, "pending": 1}
+            path_collections = settings.state_dir / "browser.db"
+            with connect(path_collections) as browser:
+                assert browser.execute("PRAGMA user_version").fetchone()[0] == 1
+                assert browser.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            if startup == 0:
+                result = client.post("/api/browse/albums", json={"name": "Migration album"})
+                assert result.status_code == 201
+            assert client.get("/api/browse/albums").json()["items"][0]["name"] == "Migration album"
+            assert client.get(TIMELINE).json()["items"][0]["id"] == 1
