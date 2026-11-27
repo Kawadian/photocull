@@ -71,7 +71,8 @@ class FaceGroups:
                     db.execute(
                         """SELECT f.id, f.vector FROM faces AS f
                            JOIN assets AS a ON a.id = f.asset_id
-                           WHERE f.key = ? AND a.active = 1 AND f.quality >= ? ORDER BY f.id""",
+                           WHERE f.key = ? AND a.active = 1 AND f.quality >= ?
+                             AND f.content_hash = a.content_hash ORDER BY f.id""",
                         (key, MIN_QUALITY),
                     )
                 ) as rows:
@@ -81,7 +82,8 @@ class FaceGroups:
                 db.execute("DELETE FROM face_index_dirty")
                 return
             while batch := db.execute(
-                """SELECT d.id, CASE WHEN a.active = 1 THEN f.vector END AS vector
+                """SELECT d.id, CASE WHEN a.active=1 AND f.content_hash=a.content_hash
+                                      THEN f.vector END AS vector
                    FROM face_index_dirty AS d LEFT JOIN faces AS f
                      ON f.id = d.id AND f.key = ? AND f.quality >= ?
                    LEFT JOIN assets AS a ON a.id = f.asset_id
@@ -110,7 +112,8 @@ class FaceGroups:
                 break
             row = db.execute(
                 """SELECT f.person_id FROM faces AS f JOIN assets AS a ON a.id = f.asset_id
-                   WHERE f.id = ? AND f.asset_id <> ? AND a.active = 1""",
+                   WHERE f.id = ? AND f.asset_id <> ? AND a.active = 1
+                     AND f.content_hash=a.content_hash""",
                 (int(hit.key), asset_id),
             ).fetchone()
             if row and row[0] not in reserved:
@@ -151,7 +154,8 @@ class FaceGroups:
                                          right, bottom, confidence, quality, vector, manual)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(id) DO UPDATE SET person_id = excluded.person_id,
-                           key = excluded.key, left = excluded.left, top = excluded.top,
+                           key = excluded.key, content_hash=excluded.content_hash,
+                           left = excluded.left, top = excluded.top,
                            right = excluded.right, bottom = excluded.bottom,
                            confidence = excluded.confidence, quality = excluded.quality,
                            vector = excluded.vector, manual = excluded.manual""",

@@ -113,7 +113,7 @@ def select_assets(config: Selection, keys: dict):
     joins = "LEFT JOIN asset_scores AS s ON s.asset_id = a.id"
     if config.person_id is not None:
         clauses.append("""a.id IN (SELECT f.asset_id FROM faces AS f
-                        WHERE f.person_id = ? AND f.key = ?)""")
+                        WHERE f.person_id = ? AND f.key = ? AND f.content_hash=a.content_hash)""")
         values.extend((config.person_id, keys.get("faces", "")))
     if config.dead is not None:
         joins += """ LEFT JOIN video_flags AS f ON f.asset_id=a.id AND f.content_hash=a.content_hash

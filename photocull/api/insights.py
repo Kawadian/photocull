@@ -247,15 +247,17 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
                 """SELECT p.id, p.name, p.revision,
                    (SELECT count(DISTINCT f.asset_id) FROM faces AS f JOIN assets AS a
                     ON a.id = f.asset_id WHERE f.person_id = p.id AND f.key = :key
-                    AND a.active = 1) AS count,
+                    AND a.active = 1 AND f.content_hash=a.content_hash) AS count,
                    (SELECT json_object('asset_id', a.id, 'content_hash', a.content_hash,
                        'left', f.left, 'top', f.top, 'right', f.right, 'bottom', f.bottom)
                     FROM faces AS f JOIN assets AS a ON a.id = f.asset_id
                     WHERE f.person_id = p.id AND f.key = :key AND a.active = 1
+                    AND f.content_hash=a.content_hash
                     ORDER BY f.quality DESC, f.id LIMIT 1) AS cover
                    FROM people AS p WHERE p.id > :cursor AND EXISTS (
                     SELECT 1 FROM faces AS f JOIN assets AS a ON a.id = f.asset_id
-                    WHERE f.person_id = p.id AND f.key = :key AND a.active = 1)
+                    WHERE f.person_id = p.id AND f.key = :key AND a.active = 1
+                    AND f.content_hash=a.content_hash)
                    ORDER BY p.id LIMIT :limit""",
                 {"key": key, "cursor": cursor, "limit": limit + 1},
             ).fetchall()
@@ -279,6 +281,7 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
                           f.confidence, a.path, a.content_hash
                    FROM faces AS f JOIN assets AS a ON a.id = f.asset_id
                    WHERE f.person_id = ? AND f.key = ? AND a.active = 1 AND f.id > ?
+                   AND f.content_hash=a.content_hash
                    ORDER BY f.id LIMIT ?""",
                 (person_id, key, cursor, limit + 1),
             ).fetchall()
