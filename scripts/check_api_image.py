@@ -3,6 +3,7 @@
 import sys
 from importlib.util import find_spec
 from pathlib import Path
+from shutil import which
 
 from photocull.api import create_app
 from photocull.config import InsightSettings, MLSettings, Settings
@@ -32,6 +33,7 @@ FORBIDDEN = (
 )
 installed = [name for name in FORBIDDEN if find_spec(name) is not None]
 assert not installed, f"Unexpected packages in the API image: {installed}"
+assert not any(which(binary) for binary in ("dnglab", "ffmpeg", "ffprobe", "exiftool"))
 
 app = create_app(
     Settings(
@@ -42,6 +44,7 @@ app = create_app(
     )
 )
 assert any(route.path.endswith("/search") for route in app.routes)
+assert any(route.path.endswith("/archive/preview") for route in app.routes)
 assert not any(name.startswith("photocull.worker") for name in sys.modules)
 assert set(FORBIDDEN).isdisjoint(name.split(".")[0] for name in sys.modules)
 assert Path("frontend/dist/index.html").is_file()

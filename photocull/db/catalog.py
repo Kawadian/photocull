@@ -132,7 +132,8 @@ def asset_page_query(
         order = "t.asset_id"
     if person_id is not None:
         filters.append("""a.id IN (SELECT f.asset_id FROM faces AS f
-            WHERE f.person_id = ? AND f.key = ? AND f.asset_id > ?)""")
+            WHERE f.person_id = ? AND f.key = ? AND f.asset_id > ?
+              AND f.content_hash=a.content_hash)""")
         params.extend((person_id, face_key or "", 0 if sort_score else cursor))
     if min_aesthetic is not None:
         if sort_score and sort_score[:2] == ("aesthetic", aesthetic_key):

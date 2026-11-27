@@ -10,10 +10,10 @@ from pathlib import Path, PurePosixPath
 
 from photocull.config import Library
 
-EXCLUDED = {"edit", ".git", "__pycache__", "node_modules", ".photocull"}
+EXCLUDED = {"edit", ".git", "__pycache__", "node_modules", ".photocull", ".photocull-trash"}
 EXTENSIONS = {
     **dict.fromkeys(("jpg", "jpeg", "png", "webp", "tif", "tiff"), "image"),
-    **dict.fromkeys(("heic", "heif", "hif"), "heif"),
+    **dict.fromkeys(("heic", "heif", "hif", "avif"), "heif"),
     **dict.fromkeys(("dng", "arw", "cr2", "cr3", "nef", "raf", "orf", "rw2", "pef"), "raw"),
     **dict.fromkeys(("mp4", "mov", "m4v", "mkv"), "video"),
 }
@@ -26,6 +26,11 @@ class OutsideLibrary(ValueError):
 
 class SourceChanged(OSError):
     pass
+
+
+def excluded(name: str) -> bool:
+    name = name.casefold()
+    return name in EXCLUDED or name.startswith(".photocull-stage-")
 
 
 @dataclass(frozen=True)
@@ -63,7 +68,7 @@ class MediaJail:
         if relative.is_absolute() or ".." in relative.parts:
             raise OutsideLibrary(f"Invalid library path: {path}")
         lexical_dirs = relative.parts if directory else relative.parts[:-1]
-        if any(part.casefold() in EXCLUDED for part in lexical_dirs):
+        if any(excluded(part) for part in lexical_dirs):
             raise OutsideLibrary(f"Excluded library path: {path}")
 
         target = self.root.joinpath(relative).resolve(strict=True)
@@ -72,7 +77,7 @@ class MediaJail:
             raise OutsideLibrary(f"Path is outside permitted media directories: {path}")
         for location in matching:
             target_dirs = location.parts if directory else location.parts[:-1]
-            if any(part.casefold() in EXCLUDED for part in target_dirs):
+            if any(excluded(part) for part in target_dirs):
                 raise OutsideLibrary(f"Excluded target directory: {path}")
         return target
 
@@ -121,7 +126,7 @@ class MediaJail:
                     continue
                 child = f"{path}/{name}" if path else name
                 if is_dir:
-                    if name.casefold() not in EXCLUDED:
+                    if not excluded(name):
                         folders.append((child, descendants))
                     continue
 
@@ -132,7 +137,7 @@ class MediaJail:
                     resolved = self.locate(child)
                     with open_directory(resolved.parent) as parent:
                         info = os.stat(resolved.name, dir_fd=parent, follow_symlinks=False)
-                    if stat.S_ISDIR(info.st_mode) and name.casefold() not in EXCLUDED:
+                    if stat.S_ISDIR(info.st_mode) and not excluded(name):
                         folders.append((child, descendants))
                     elif kind and stat.S_ISREG(info.st_mode):
                         yield MediaEntry(child, kind, info)

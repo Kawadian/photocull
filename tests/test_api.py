@@ -32,17 +32,30 @@ forbidden = {
 }
 original = builtins.__import__
 def guarded(name, *args, **kwargs):
-    if name.split('.')[0] in forbidden:
-        raise AssertionError(f'Unexpected API import: {name}')
+    namespace = (args[0] if args else kwargs.get('globals')) or {}
+    importer = namespace.get('__name__', '')
+    archive = importer.startswith(
+        ('photocull.archive', 'photocull.api.archive', 'photocull.db.archive')
+    )
+    if name.split('.')[0] in forbidden or (archive and (
+        name.split('.')[0] in {'subprocess', 'multiprocessing', 'ctypes', 'resource'}
+        or name.startswith('photocull.worker')
+    )):
+        raise AssertionError(f'Unexpected API import from {importer}: {name}')
     return original(name, *args, **kwargs)
 builtins.__import__ = guarded
+def no_processes(event, args):
+    if event in {'subprocess.Popen', 'os.exec', 'os.system', 'os.posix_spawn'}:
+        raise AssertionError(f'Unexpected process launch from API: {event}')
+sys.addaudithook(no_processes)
 import photocull.api
-from photocull.config import InsightSettings, Library, MLSettings, Settings
+from photocull.config import ArchiveSettings, InsightSettings, Library, MLSettings, Settings
 with TemporaryDirectory() as directory:
     state = Path(directory)
     settings = Settings(
         state_dir=state / 'state', libraries={'photos': Library(root=state / 'media')},
         ml=MLSettings(enabled=True),
+        archive=ArchiveSettings(export_roots={'photos': state / 'export'}),
         insights=InsightSettings(
             aesthetic=True, taste=True, faces=True, video=True, transcript=True,
             story=True, report=True, export=True, watch=True,
@@ -59,6 +72,14 @@ with TemporaryDirectory() as directory:
         assert client.post(f'{base}/insights/exports', json={'kind': 'zip'}).status_code == 202
         assert client.post(f'{base}/search', json={'query': '猫'}).status_code == 503
         assert client.post(f'{base}/assets/1/similar', json={}).status_code == 503
+        archive = f'{base}/archive'
+        assert client.get(archive).json()['destructive'] is False
+        preview = client.post(f'{archive}/preview', json={'operation': 'copy'})
+        assert preview.status_code == 202
+        id_ = preview.json()['id']
+        assert client.get(f'{archive}/previews/{id_}').json()['status'] == 'pending'
+        assert client.get(f'{archive}/rules').json()['items'] == []
+        assert client.post(f'{archive}/selftest').status_code == 409
 assert forbidden.isdisjoint({name.split('.')[0] for name in sys.modules})
 assert not any(name.startswith('photocull.worker') for name in sys.modules)
 """,

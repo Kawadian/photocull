@@ -170,6 +170,19 @@ class InsightSettings(BaseModel):
     export_roots: dict[LibraryName, Path] = Field(default_factory=dict)
 
 
+class ArchiveSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    write_roots: tuple[Path, ...] = ()
+    export_roots: dict[LibraryName, Path] = Field(default_factory=dict)
+    trash_roots: dict[LibraryName, Path] = Field(default_factory=dict)
+    retention_days: int = Field(default=0, ge=0, le=36500)
+    parallelism: int = Field(default=1, ge=1, le=4)
+    threads: int = Field(default=2, ge=1, le=8)
+    memory_mb: int = Field(default=1536, ge=256, le=16384)
+    timeout_seconds: int = Field(default=86400, ge=5, le=604800)
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -185,6 +198,7 @@ class Settings(BaseModel):
     burst: BurstSettings = Field(default_factory=BurstSettings)
     ml: MLSettings = Field(default_factory=MLSettings)
     insights: InsightSettings = Field(default_factory=InsightSettings)
+    archive: ArchiveSettings = Field(default_factory=ArchiveSettings)
 
     @model_validator(mode="after")
     def validate_state(self) -> Settings:
@@ -200,6 +214,43 @@ class Settings(BaseModel):
             ):
                 if target.is_relative_to(area) or area.is_relative_to(target):
                     raise ValueError(f"export root {name} overlaps a media or state directory")
+        media = tuple(root.resolve() for lib in self.libraries.values() for root in lib.roots)
+        for root in self.archive.write_roots:
+            if not root.is_absolute() or root == Path("/") or root != root.resolve():
+                raise ValueError("Archive write roots must be canonical absolute directories")
+            if root.is_relative_to(state) or state.is_relative_to(root):
+                raise ValueError("Archive write roots must be outside state")
+        for name, root in self.archive.export_roots.items():
+            if (
+                not root.is_absolute()
+                or root != root.resolve()
+                or any(
+                    root.is_relative_to(area) or area.is_relative_to(root)
+                    for area in (state, *media)
+                )
+            ):
+                raise ValueError(
+                    f"Archive export root {name} overlaps media/state or is not canonical"
+                )
+        for name, root in self.archive.trash_roots.items():
+            if (
+                not root.is_absolute()
+                or root != root.resolve()
+                or not any(
+                    root != area and root.is_relative_to(area) for area in self.archive.write_roots
+                )
+            ):
+                raise ValueError(f"Archive trash root {name} must be inside an explicit write root")
+            if any(root == area or area.is_relative_to(root) for area in media) or (
+                any(root.is_relative_to(area) for area in media)
+                and ".photocull-trash" not in root.parts
+            ):
+                raise ValueError("Archive trash inside media must use a .photocull-trash directory")
+            if any(
+                root.is_relative_to(area) or area.is_relative_to(root)
+                for area in self.archive.export_roots.values()
+            ):
+                raise ValueError(f"Archive trash and export roots overlap for {name}")
         return self
 
     def library_state(self, name: str) -> Path:
@@ -242,6 +293,18 @@ def load_settings() -> Settings:
         insights["story_geonames"] = (cwd / Path(places).expanduser()).absolute()
     if roots := insights.get("export_roots"):
         _paths(roots, tuple(roots), config.parent)
+    archive = values.setdefault("archive", {})
+    for mapping in ("export_roots", "trash_roots"):
+        if roots := archive.get(mapping):
+            _paths(roots, tuple(roots), config.parent)
+    if (roots := env.get("PHOTOCULL_WRITE_ROOTS")) is not None:
+        archive["write_roots"] = [
+            Path(root).expanduser() for root in roots.split(os.pathsep) if root
+        ]
+    elif "write_roots" in archive:
+        archive["write_roots"] = [
+            (config.parent / Path(root).expanduser()).absolute() for root in archive["write_roots"]
+        ]
 
     env_values = {
         field: env[key]
@@ -284,12 +347,15 @@ def load_settings() -> Settings:
         ("burst", BurstSettings),
         ("ml", MLSettings),
         ("insights", InsightSettings),
+        ("archive", ArchiveSettings),
     ):
         settings = values.setdefault(section, {})
         for field in model.model_fields.keys() - {
             "tag_vocabulary",
             "story_geonames",
             "export_roots",
+            "trash_roots",
+            "write_roots",
         }:
             if (value := env.get(f"PHOTOCULL_{section.upper()}_{field.upper()}")) is not None:
                 settings[field] = value

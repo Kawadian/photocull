@@ -16,6 +16,35 @@ def fallback_day(mtime_ns: int) -> str:
     return datetime.fromtimestamp(mtime_ns // 1_000_000_000, UTC).date().isoformat()
 
 
+def relink_asset(db, entry, digest, prior):
+    link = db.execute(
+        "SELECT * FROM archive_reindex WHERE path=? AND ready=1", (entry.path,)
+    ).fetchone()
+    if link is None or link["after_hash"] != digest:
+        return prior, False
+    source = db.execute(
+        "SELECT id,content_hash,rating,rejected FROM assets WHERE id=? AND path=? "
+        "AND content_hash=?",
+        (link["asset_id"], link["source_path"], link["before_hash"]),
+    ).fetchone()
+    if source is None:
+        return prior, False
+    if prior is None:
+        db.execute(
+            "UPDATE assets SET path=?,folder=?,kind=? WHERE id=?",
+            (entry.path, entry.path.rpartition("/")[0], entry.kind, source["id"]),
+        )
+        return source, True
+    if prior["id"] == source["id"]:
+        return prior, True
+    # The destination has unrelated catalog history. Preserve its row and transfer review.
+    db.execute(
+        "UPDATE assets SET rating=?,rejected=?,revision=revision+1 WHERE id=?",
+        (source["rating"], source["rejected"], prior["id"]),
+    )
+    return prior, False
+
+
 def _record(
     db: sqlite3.Connection,
     scan_id: int,
@@ -26,35 +55,46 @@ def _record(
     with write(db):
         for entry, key, digest in batch:
             prior = db.execute(
-                "SELECT content_hash FROM assets WHERE path = ?", (entry.path,)
+                "SELECT id,content_hash FROM assets WHERE path = ?", (entry.path,)
             ).fetchone()
-            asset = db.execute(
-                """
-                INSERT INTO assets (path, folder, kind, size, mtime_ns, content_hash, scan_id,
-                                    day, source_key)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (path) DO UPDATE SET
-                    active = 1, scan_id = excluded.scan_id, size = excluded.size,
-                    mtime_ns = excluded.mtime_ns, source_key = excluded.source_key,
-                    day = CASE WHEN assets.content_hash = excluded.content_hash
-                               THEN COALESCE(substr(assets.captured_at, 1, 10), excluded.day)
-                               ELSE excluded.day END,
-                    content_hash = excluded.content_hash
-                RETURNING id
-                """,
-                (
-                    entry.path,
-                    entry.path.rpartition("/")[0],
-                    entry.kind,
-                    entry.stat.st_size,
-                    entry.stat.st_mtime_ns,
-                    digest,
-                    scan_id,
-                    fallback_day(entry.stat.st_mtime_ns),
-                    key,
-                ),
+            prior, relinked = relink_asset(db, entry, digest, prior)
+            size, mtime = entry.stat.st_size, entry.stat.st_mtime_ns
+            day = fallback_day(mtime)
+            if prior is None:
+                asset_id = db.execute(
+                    """INSERT INTO assets(path,folder,kind,size,mtime_ns,content_hash,
+                                          scan_id,day,source_key)
+                       VALUES (?,?,?,?,?,?,?,?,?) RETURNING id""",
+                    (
+                        entry.path,
+                        entry.path.rpartition("/")[0],
+                        entry.kind,
+                        size,
+                        mtime,
+                        digest,
+                        scan_id,
+                        day,
+                        key,
+                    ),
+                ).fetchone()["id"]
+            else:
+                asset_id = prior["id"]
+                # A plain UPDATE lets nested catalog triggers keep their own conflict policies.
+                db.execute(
+                    """UPDATE assets SET active=1,scan_id=?,size=?,mtime_ns=?,source_key=?,
+                         day=CASE WHEN content_hash=? THEN coalesce(substr(captured_at,1,10),?)
+                                  ELSE ? END, content_hash=?
+                       WHERE id=?""",
+                    (scan_id, size, mtime, key, digest, day, day, digest, asset_id),
+                )
+            rating = db.execute(
+                "DELETE FROM archive_rating_transfer WHERE path=? RETURNING *", (entry.path,)
             ).fetchone()
-            asset_id = asset["id"]
+            if rating and rating["content_hash"] == digest:
+                db.execute(
+                    "UPDATE assets SET rating=?,rejected=?,revision=revision+1 WHERE id=?",
+                    (rating["rating"], rating["rejected"], asset_id),
+                )
             if model_key and entry.kind != "video":
                 db.execute(
                     """INSERT INTO jobs (asset_id, stage, content_hash, status, model_key)
@@ -68,7 +108,8 @@ def _record(
                 )
             if prior and prior["content_hash"] != digest:
                 db.execute("DELETE FROM asset_scores WHERE asset_id = ?", (asset_id,))
-                db.execute("DELETE FROM burst_choices WHERE asset_id = ?", (asset_id,))
+                if not relinked:
+                    db.execute("DELETE FROM burst_choices WHERE asset_id = ?", (asset_id,))
                 db.execute(
                     """UPDATE assets SET auto_reject_dismissed = 0, burst_reject_token = NULL
                        WHERE id = ?""",
@@ -107,6 +148,7 @@ def _record(
                         " WHERE id = ?",
                         (asset_id,),
                     )
+            db.execute("DELETE FROM archive_reindex WHERE path=? AND ready=1", (entry.path,))
         mark_catalog_updated(db)
 
 
@@ -122,7 +164,16 @@ def scan_batches(
     defer: Callable[[], None] | None = None,
 ) -> Iterator[None]:
     batch: list[tuple[MediaEntry, str, str]] = []
+    # A crash may leave a journal with one path already published. Hold its catalog
+    # identity until recovery reports a durable result, including when work is blocked.
+    held_paths = {
+        path
+        for row in db.execute("SELECT path,source_path FROM archive_reindex WHERE ready=0")
+        for path in row
+    }
     for entry in jail.walk(pulse):
+        if entry.path in held_paths:
+            continue
         key = source_key(entry.stat)
         prior = db.execute(
             "SELECT source_key, content_hash FROM assets WHERE path = ?", (entry.path,)
@@ -155,7 +206,9 @@ def scan_batches(
     # Only retire absent assets after a complete walk. Keep their ratings if they return.
     after = 0
     while rows := db.execute(
-        "SELECT id FROM assets WHERE active = 1 AND id > ? AND scan_id <> ? ORDER BY id LIMIT ?",
+        "SELECT id FROM assets WHERE active=1 AND id>? AND scan_id<>? "
+        "AND NOT EXISTS(SELECT 1 FROM archive_reindex WHERE ready=0 AND asset_id=assets.id) "
+        "ORDER BY id LIMIT ?",
         (after, scan_id, settings.batch_size),
     ).fetchall():
         pulse()

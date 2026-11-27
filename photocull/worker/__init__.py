@@ -10,10 +10,10 @@ import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from sqlite3 import Connection
-from threading import Event
+from threading import Event, Lock
 
 from photocull.config import STAGES, Library, Settings, load_settings
 from photocull.db import connect, initialize, write
@@ -69,6 +69,7 @@ class LibraryWorker:
     stories: Stories | None = None
     watch: Watch | None = None
     transfers: Transfers | None = None
+    archive_gate: Lock = field(default_factory=Lock)
 
     def beat(self) -> None:
         if time.monotonic() - self.heartbeat < HEARTBEAT_INTERVAL:
@@ -132,12 +133,16 @@ class LibraryWorker:
 
     def step_scan(self, pulse: Callable[[], None] | None = None) -> bool:
         if self.scan is None:
+            if not self.archive_gate.acquire(blocking=False):
+                return False
             scan_id = claim_scan(self.db)
             if scan_id is None:
+                self.archive_gate.release()
                 return False
             try:
                 jail = MediaJail(self.library, self.settings.state_dir)
             except (OSError, RuntimeError, ValueError) as error:
+                self.archive_gate.release()
                 finish_scan(self.db, scan_id, str(error))
                 return True
             key = self.ml.key if self.ml is not None and self.settings.ml.enabled else None
@@ -158,12 +163,14 @@ class LibraryWorker:
         try:
             next(batches)
         except StopIteration:
-            finish_scan(self.db, scan_id)
             self.scan = None
+            self.archive_gate.release()
+            finish_scan(self.db, scan_id)
         except (OSError, RuntimeError, ValueError) as error:
+            self.scan = None
+            self.archive_gate.release()
             LOG.warning("Scan %s failed: %s", scan_id, error)
             finish_scan(self.db, scan_id, str(error))
-            self.scan = None
         return True
 
     def work(self, job: Job) -> tuple[dict, str | None]:
@@ -327,6 +334,8 @@ class LibraryWorker:
 
 
 def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=None) -> int:
+    from photocull.worker.archive import Archives
+
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     if not settings.libraries:
         LOG.info("No libraries configured")
@@ -394,6 +403,9 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=N
             config = settings.worker
             pool = stack.enter_context(ThreadPoolExecutor(max_workers=config.parallelism))
             stack.callback(inference.close)
+            gates = {worker.state.name: worker.archive_gate for worker in workers}
+            archives = Archives(settings, stop, stack, gates)
+            stack.callback(stop.set)
             for worker in workers:
                 stack.callback(worker.offline)
             ready = True
@@ -407,6 +419,7 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=N
                     if rss_mb >= config.memory_mb:
                         LOG.warning("Worker reached %.0f MiB RSS and will restart", rss_mb)
                         return 75
+                archives.step(idle=not busy)
                 if not busy:
                     stop.wait(SEARCH_POLL_SECONDS if poll_search else 1)
     except StopWorker:

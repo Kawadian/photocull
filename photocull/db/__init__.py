@@ -24,6 +24,11 @@ MIGRATIONS = (
     "0014_face_index.sql",
     "0015_transfer_publication.sql",
     "0016_insight_inputs.sql",
+    "0017_archive.sql",
+    "0018_archive_previews.sql",
+    "0019_archive_safety.sql",
+    "0020_archive_reindex.sql",
+    "0021_archive_rules.sql",
 )
 BUSY_TIMEOUT_MS = 10_000
 

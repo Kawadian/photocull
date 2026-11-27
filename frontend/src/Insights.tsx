@@ -1,4 +1,4 @@
-import { CalendarDays, Film, FolderOutput, Image, Map, Sparkles, Users } from 'lucide-react'
+import { Archive, CalendarDays, Film, FolderOutput, Image, Map, Sparkles, Users } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { assetName, json, mediaUrl, message, request, useRemote } from './api'
@@ -14,6 +14,7 @@ export const views = [
   { id: 'taste', label: 'Recommendations', icon: Sparkles },
   { id: 'export', label: 'Exports', icon: FolderOutput },
   { id: 'report', label: 'Trip reports', icon: Map },
+  { id: 'archive', label: 'Archive', icon: Archive },
 ] as const
 export type View = typeof views[number]['id']
 export type InsightStage = 'faces' | 'story' | 'video' | 'aesthetic' | 'transcript' | 'taste'
@@ -632,7 +633,7 @@ function Transfers({ base, version, capability, report }: ScreenProps & { report
 }
 
 export function InsightsScreen({ view, base, capability, version, openReview, error, retry, videoStart }: {
-  view: Exclude<View, 'review'>; base: string; capability?: InsightCapabilities; version: number
+  view: Exclude<View, 'review' | 'archive'>; base: string; capability?: InsightCapabilities; version: number
   openReview: OpenReview; error?: string; retry: () => void; videoStart?: number
 }) {
   const heading = useRef<HTMLHeadingElement>(null)
