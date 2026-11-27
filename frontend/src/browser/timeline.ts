@@ -29,7 +29,8 @@ export function browseUrl(endpoint: 'timeline' | 'months' | 'facets', library: s
   if (month) query.set('month', month)
   if (cursor) query.set('cursor', cursor)
   if (filters) writeFilters(query, filters)
-  return '/api/browse/' + endpoint + (query.size ? '?' + query : '')
+  const serialized = query.toString()
+  return '/api/browse/' + endpoint + (serialized ? '?' + serialized : '')
 }
 
 type Load = { cursor: string | null }

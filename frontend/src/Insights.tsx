@@ -544,7 +544,7 @@ function FlagFilter({ name, label, initial = 'any' }: { name: string; label: str
 }
 
 function Transfers({ base, version, capability, report }: ScreenProps & { report: boolean }) {
-  const [includeLocation, setIncludeLocation] = useState(capability.strip_location === false)
+  const [includeLocation, setIncludeLocation] = useState(!report || capability.strip_location === false)
   const [mode, setMode] = useState('zip')
   const [poll, setPoll] = useState(0)
   const [person, setPerson] = useState('')
@@ -567,7 +567,7 @@ function Transfers({ base, version, capability, report }: ScreenProps & { report
       event.preventDefault()
       const data = new FormData(event.currentTarget)
       const dates = { start: data.get('start') || null, end: data.get('end') || null }
-      const body = report ? dates : {
+      const body = report ? { ...dates, include_location: includeLocation } : {
         kind: mode, destination: data.get('destination'), xmp: includeLocation && data.has('xmp'),
         include_location: includeLocation,
         selection: { ...dates, minimum_rating: Number(data.get('rating')), rejected: bool(data.get('rejected')),
@@ -602,15 +602,15 @@ function Transfers({ base, version, capability, report }: ScreenProps & { report
           <Paging {...cursor} next={people?.data?.next_cursor} forward={() => cursor.forward(people?.data?.next_cursor)} />
           <Status error={people?.error} pending={!people} retry={work.retry} />
         </>}
-        <label>Location information<select value={String(includeLocation)}
-          onChange={(event) => setIncludeLocation(event.target.value === 'true')}>
-          <option value="false">Exclude location information</option>
-          <option value="true">Include location information</option>
-        </select></label>
         {includeLocation
           ? <label className="transfer-checkbox"><input type="checkbox" name="xmp" /> Include existing XMP sidecars</label>
-          : <p className="insight-muted">Location-free exports use JPEG for stills and MP4 for video.</p>}
+          : <p className="insight-muted">Location removal keeps the original format without re-encoding supported JPEG, HEIC, DNG, MP4, MOV and MKV files. Files that cannot be verified stop the export. XMP sidecars are omitted.</p>}
       </>}
+      <label>Location information<select value={String(includeLocation)}
+        onChange={(event) => setIncludeLocation(event.target.value === 'true')}>
+        <option value="true">Include location information</option>
+        <option value="false">Remove location information</option>
+      </select></label>
       <label>From date<input type="date" name="start" /></label>
       <label>To date<input type="date" name="end" /></label>
       <button className="button primary" disabled={work.busy}>{report ? 'Generate HTML report' : 'Start export'}</button>
@@ -664,7 +664,7 @@ export function InsightsScreen({ view, base, capability, version, openReview, er
       view === 'story' ? <Stories {...props} /> :
       view === 'video' ? <Videos {...props} start={videoStart} /> :
       view === 'taste' ? <Recommendations {...props} /> :
-      <Transfers {...props} report={view === 'report'} />
+      <Transfers key={view} {...props} report={view === 'report'} />
     )}
   </main>
 }

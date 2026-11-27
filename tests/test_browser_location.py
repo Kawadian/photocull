@@ -13,7 +13,11 @@ from PIL import Image
 from photocull.api import create_app
 from photocull.config import ArchiveSettings, BrowserSettings, InsightSettings, load_settings
 from photocull.media.derivatives import VARIANTS, derivative_path
-from tests.archive_fixtures import synthetic_image, synthetic_video
+from photocull.media.exif import read_metadata
+from photocull.media.images import register_heif
+from photocull.worker.archive_media import Tools
+from photocull.worker.location import jpeg_exif, strip_copy
+from tests.archive_fixtures import synthetic_dng, synthetic_image, synthetic_video
 from tests.test_derivatives import BASE, media_path, ready, scan, settings_for, version
 from tests.worker_harness import start_worker, wait_for
 
@@ -58,7 +62,7 @@ def test_location_delivery_derived_original_and_exports(tmp_path, strip_location
         asset = scan(client)[source.name]
         root = f"{BASE}/assets/{asset['id']}"
         assert client.get("/api/browse/media").json()["strip_location"] is strip_location
-        assert client.get(root + "/original").content == original
+        assert client.get(root + "/original").status_code == 422
         assert client.get(root + "/original?include_location=true").content == original
         assert client.get(root + "/original?include_location=false").status_code == 422
         assert has_gps(original)
@@ -93,7 +97,7 @@ def test_location_delivery_derived_original_and_exports(tmp_path, strip_location
         assert client.post(BASE + "/insights/exports", json=denied).status_code == 422
         for override in (None, False, True):
             option = {} if override is None else {"include_location": override}
-            expect = not strip_location if override is None else override
+            expect = override is not False
             body = {"kind": "zip", **options, **option}
             if override is True:
                 body["xmp"] = True
@@ -117,6 +121,12 @@ def test_location_delivery_derived_original_and_exports(tmp_path, strip_location
                 )
                 if expect:
                     assert archive.read(photo) == original
+                else:
+                    with (
+                        Image.open(BytesIO(original)) as before,
+                        Image.open(BytesIO(archive.read(photo))) as after,
+                    ):
+                        assert before.tobytes() == after.tobytes()
 
             archive_path = BASE + "/archive"
             plan = {"operation": "copy", "filters": {"ids": [asset["id"]]}, **option}
@@ -193,3 +203,70 @@ def test_video_location_variants_do_not_share_the_playback_cache(tmp_path):
             )[0]
             assert (data.get("GPSLatitude") is not None) is present
             assert (data.get("GPSLongitude") is not None) is present
+
+
+@pytest.mark.parametrize(
+    "coordinates", [(1.15, -1.15), (89.999999999, -179.999999999), (-35.5, 139.25)]
+)
+def test_jpeg_coordinates_carry_rounded_seconds(tmp_path, coordinates):
+    path = tmp_path / "coordinates.jpg"
+    with Image.new("RGB", (8, 8)) as image:
+        image.save(path, exif=jpeg_exif(coordinates))
+    result = read_metadata(str(path))
+    assert result.latitude == pytest.approx(coordinates[0], abs=2e-8)
+    assert result.longitude == pytest.approx(coordinates[1], abs=2e-8)
+    with Image.open(path) as image:
+        gps = image.getexif().get_ifd(34853)
+        assert 0 <= gps[2][2] < 60 and 0 <= gps[4][2] < 60
+
+
+@pytest.mark.parametrize("suffix", [".heic", ".dng", ".mov"])
+def test_metadata_only_copy_keeps_format_and_essence(tmp_path, suffix):
+    required = {
+        ".heic": ("exiftool",),
+        ".dng": ("exiftool", "dnglab"),
+        ".mov": ("exiftool", "ffmpeg", "ffprobe"),
+    }
+    if any(not shutil.which(tool) for tool in required[suffix]):
+        pytest.skip("Metadata tools are unavailable")
+    source = tmp_path / f"original{suffix}"
+    target = tmp_path / f"stripped{suffix}"
+    if suffix == ".dng":
+        synthetic_dng(source)
+    elif suffix == ".mov":
+        synthetic_video(source)
+    else:
+        register_heif()
+        with Image.new("RGB", (80, 60), "green") as image:
+            image.save(source, format="HEIF", exif=jpeg_exif((35.25, 139.25)))
+    if suffix == ".dng":
+        subprocess.run(
+            [
+                "exiftool",
+                "-overwrite_original",
+                "-GPSLatitude=35.25",
+                "-GPSLatitudeRef=N",
+                "-GPSLongitude=139.25",
+                "-GPSLongitudeRef=E",
+                source,
+            ],
+            check=True,
+            capture_output=True,
+        )
+    original = source.read_bytes()
+    tools = Tools(ArchiveSettings(), lambda: None)
+    tags = ("exiftool", "-j", "-n", "-GPSLatitude", "-GPSCoordinates")
+    assert len(json.loads(tools.run(*tags, source))[0]) > 1
+    strip_copy(tools, source, target)
+    assert len(json.loads(tools.run(*tags, target))[0]) == 1
+    assert source.read_bytes() == original
+
+
+def test_metadata_only_copy_unsupported_format_has_no_fallback(tmp_path):
+    from photocull.archive import ArchiveError
+
+    source = tmp_path / "original.png"
+    target = tmp_path / "stripped.png"
+    with pytest.raises(ArchiveError, match="explicit Archive conversion"):
+        strip_copy(Tools(ArchiveSettings(), lambda: None), source, target)
+    assert not target.exists()
