@@ -18,6 +18,9 @@ function Header({ connected, online, onHelp }: {
     <header className="app-header">
       <div className="wordmark"><Aperture size={24} strokeWidth={1.9} /><span>Photocull</span></div>
       <div className="header-actions">
+        <a className="button secondary browser-entry" href="/?view=browser" aria-label="Photo browser" title="Photo browser">
+          <Images size={15} aria-hidden="true" /><span>Photo browser</span>
+        </a>
         {connected !== undefined && (
           <div className="worker-indicator" role="status">
             <span className={online ? 'online' : undefined} />

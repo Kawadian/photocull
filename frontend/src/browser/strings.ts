@@ -1,0 +1,80 @@
+import type { Language } from './location'
+
+const en = {
+  browser: 'Photo browser',
+  timeline: 'Timeline',
+  review: 'Review',
+  library: 'Library',
+  all: 'All libraries',
+  month: 'Jump to month',
+  latest: 'Latest photos',
+  density: 'Grid density',
+  compact: 'Compact',
+  comfortable: 'Comfortable',
+  large: 'Large',
+  language: 'Language',
+  refresh: 'Refresh timeline',
+  photos: 'Photos and videos',
+  scrubber: 'Timeline scrubber',
+  loading: 'Loading timeline…',
+  loadingPhoto: 'Loading photo…',
+  unavailable: 'Timeline unavailable',
+  noPhotos: 'No photos or videos',
+  chooseLatest: 'Show latest photos',
+  clearLibrary: 'Browse all libraries',
+  loadMore: 'Load more',
+  retry: 'Retry',
+  quietEmpty: 'Photos will appear here as the worker indexes the library.',
+  photoError: 'This item could not be loaded.',
+  previewPending: 'Preview is being prepared.',
+  previewError: 'Preview unavailable.',
+  close: 'Close preview',
+  video: 'Video',
+  previous: 'Previous photo',
+  next: 'Next photo',
+}
+
+export const strings: Record<Language, typeof en> = {
+  en,
+  ja: {
+    browser: '写真ブラウザ',
+    timeline: 'タイムライン',
+    review: 'レビュー',
+    library: 'ライブラリ',
+    all: '全ライブラリ',
+    month: '年月に移動',
+    latest: '最新の写真',
+    density: 'グリッドの密度',
+    compact: 'コンパクト',
+    comfortable: '標準',
+    large: '大きい',
+    language: '言語',
+    refresh: 'タイムラインを更新',
+    photos: '写真と動画',
+    scrubber: 'タイムラインスクラバー',
+    loading: 'タイムラインを読み込み中…',
+    loadingPhoto: '写真を読み込み中…',
+    unavailable: 'タイムラインを読み込めませんでした',
+    noPhotos: '写真や動画がありません',
+    chooseLatest: '最新の写真を表示',
+    clearLibrary: 'すべてのライブラリを表示',
+    loadMore: 'さらに読み込む',
+    retry: '再試行',
+    quietEmpty: 'ワーカーがインデックスに登録した写真がここに表示されます。',
+    photoError: 'この項目を読み込めませんでした。',
+    previewPending: 'プレビューを準備中です。',
+    previewError: 'プレビューを表示できません。',
+    close: 'プレビューを閉じる',
+    video: '動画',
+    previous: '前の写真',
+    next: '次の写真',
+  },
+}
+
+export type Strings = typeof en
+
+export function formatDate(value: string, lang: Language, options: Intl.DateTimeFormatOptions) {
+  return new Intl.DateTimeFormat(lang, { ...options, timeZone: 'UTC' }).format(
+    new Date(value.length === 7 ? value + '-01' : value),
+  )
+}
