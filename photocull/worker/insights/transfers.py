@@ -289,6 +289,7 @@ class Transfers:
         self.db.execute("DROP TABLE IF EXISTS transfer_plan")
         self.db.execute(f"CREATE TEMP TABLE transfer_plan AS {query}", arguments)
         try:
+            self.db.execute("CREATE UNIQUE INDEX temp.transfer_plan_id ON transfer_plan(id)")
             count, total = self.db.execute(
                 "SELECT count(*), coalesce(sum(size),0) FROM transfer_plan"
             ).fetchone()
@@ -343,6 +344,16 @@ class Transfers:
         finally:
             remove_private(root_fd, staged)
 
+    def planned_assets(self):
+        after = 0
+        # Finish each SELECT before copying or writing progress. A cursor held across
+        # encoding can retain a WAL snapshot that SQLite cannot upgrade to a writer.
+        while assets := self.db.execute(
+            "SELECT * FROM transfer_plan WHERE id > ? ORDER BY id LIMIT 64", (after,)
+        ).fetchall():
+            yield from assets
+            after = assets[-1]["id"]
+
     def copy_files(self, config, job_id, pulse, output):
         jail = MediaJail(self.worker.library, self.settings.state_dir)
         written = 0
@@ -367,7 +378,7 @@ class Transfers:
             if before != source_key(os.fstat(fd)):
                 raise SourceChanged(f"Source changed while exporting {name}")
 
-        for asset in self.db.execute("SELECT * FROM transfer_plan ORDER BY id"):
+        for asset in self.planned_assets():
             self.check(job_id, pulse)
             with jail.open_media(asset["path"]) as (fd, _):
                 if source_key(os.fstat(fd)) != asset["source_key"]:
