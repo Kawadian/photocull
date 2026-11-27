@@ -227,7 +227,7 @@ class ArchiveWork:
                         open_regular(parent, snapshot.name) as (fd, _),
                         clean_copy(self.settings, fd, item["kind"], staged, pulse) as clean,
                     ):
-                        clean.replace(staged)
+                        clean.replace(clean.with_name(staged.name))
                     snapshot.unlink()
                     fs.sync_result(staged, original)
                     record["output"] = fs.fingerprint(staged, pulse)

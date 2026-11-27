@@ -17,6 +17,7 @@ x-photocull-library: &library
   type: bind
   source: ${PHOTOCULL_LIBRARY_DIR:-/mnt/PhotoLibrary}
   target: /mnt/PhotoLibrary
+  read_only: true
   bind:
     create_host_path: false
 
@@ -61,8 +62,7 @@ services:
     volumes:
       - *config
       - *state
-      - <<: *library
-        read_only: true
+      - *library
       - type: bind
         source: ${PHOTOCULL_MODELS_DIR:-./.photocull/models}
         target: /models

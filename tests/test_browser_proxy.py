@@ -43,17 +43,19 @@ def test_nginx_authenticated_offload_ranges_304_and_gzip(tmp_path):
                VALUES (?,?,'','image',0,0,?,1,'2025-01-01')""",
             ((i, f"synthetic-{i:03}.jpg", "b" * 64) for i in range(1, 30)),
         )
-        db.execute(
+        db.executemany(
             """INSERT INTO derivative_files
                (asset_id,variant,version,tier,status,priority,requested_at,last_access,byte_size)
                VALUES (1,?,?,'large','ready',1,0,0,64)""",
-            (variant.name, version),
+            ((name, version) for name in (variant.name, "location-photo.jpg")),
         )
 
     target = derivative_path(settings, "photo", 1, variant, version)
     target.parent.mkdir(parents=True)
     media = bytes(range(64))
     target.write_bytes(media)
+    location_file = derivative_path(settings, "photo", 1, VARIANTS["location-photo.jpg"], version)
+    location_file.write_bytes(media[::-1])
 
     snippets = tmp_path / "snippets"
     snippets.mkdir()
@@ -91,7 +93,6 @@ def test_nginx_authenticated_offload_ranges_304_and_gzip(tmp_path):
                 fastcgi_temp_path {tmp_path}/fastcgi;
                 uwsgi_temp_path {tmp_path}/uwsgi;
                 scgi_temp_path {tmp_path}/scgi;
-                types {{ image/avif avif; }}
                 {example}
             }}
             """
@@ -138,11 +139,51 @@ def test_nginx_authenticated_offload_ranges_304_and_gzip(tmp_path):
                 assert partial.status_code == 206 and partial.content == media[4:16]
                 internal = "/_photocull/large/" + target.relative_to(large).as_posix()
                 assert proxy.get(internal).status_code == 404
+                assert proxy.get("/_photocull").status_code == 404
+                assert proxy.get("/_photocull/").status_code == 404
+                assert proxy.get("/_photocull/hot/").status_code == 404
+                assert (
+                    proxy.get(
+                        "/_photocull/large/" + location_file.relative_to(large).as_posix()
+                    ).status_code
+                    == 404
+                )
+                asset_url = "/api/libraries/photo/assets/1"
+                delivery_url = asset_url + f"/delivery/{version}?action=share&include_location=true"
+                location = proxy.get(delivery_url)
+                assert location.content == media[::-1]
+                assert location.headers["cache-control"] == "private, no-store"
+                assert (
+                    proxy.get(asset_url + f"/media/location-photo.jpg/{version}").status_code == 404
+                )
+                assert proxy.get(asset_url + "/original").status_code == 404
+                # The proxy uses its own configured token even when a client sends that header.
+                assert (
+                    proxy.get(media_url, headers={"X-Photocull-Token": "client-token"}).status_code
+                    == 200
+                )
                 timeline = proxy.get("/api/browse/timeline", headers={"Accept-Encoding": "gzip"})
                 assert timeline.headers["Content-Encoding"] == "gzip"
                 assert len(timeline.json()["items"]) == 29
+                target.unlink()
+                target.symlink_to(location_file)
+                rejected = proxy.get(media_url)
+                assert rejected.status_code == 202
+                assert rejected.headers["cache-control"] == "private, no-store"
             with Client(base_url=f"http://127.0.0.1:{api_port}", timeout=5) as direct:
-                assert direct.get(media_url).status_code == 401
+                for url in (
+                    media_url,
+                    delivery_url,
+                    "/api/browse/timeline",
+                    "/api/health",
+                    "/openapi.json",
+                ):
+                    assert direct.get(url).status_code == 401
+                    assert (
+                        direct.get(url, headers={"X-Photocull-Token": "client-token"}).status_code
+                        == 401
+                    )
+                assert direct.post("/api/libraries/photo/scans").status_code == 401
         finally:
             process.terminate()
             process.wait(timeout=5)

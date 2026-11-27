@@ -6,10 +6,10 @@ import subprocess
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 
 from PIL import Image, ImageOps
 
+from photocull.media.artifacts import stage_artifact
 from photocull.media.cache import cache_path
 from photocull.media.images import register_heif
 
@@ -142,15 +142,11 @@ def _video(fd: int, path: str) -> tuple[Image.Image, float | None]:
 
 
 def _save(image: Image.Image, target: Path, quality: int) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(dir=target.parent, prefix=f".{target.stem}-", delete=False) as temp:
+    with stage_artifact(target, f".{target.stem}-") as temp:
+        image.save(temp, format="JPEG", quality=quality, comment=b"")
+        temp.close()
         temporary = Path(temp.name)
-        try:
-            image.save(temp, format="JPEG", quality=quality, comment=b"")
-            temp.close()
-            temporary.replace(target)
-        finally:
-            temporary.unlink(missing_ok=True)
+        temporary.replace(temporary.with_name(target.name))
 
 
 def decode_source(
