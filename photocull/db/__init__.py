@@ -32,6 +32,7 @@ MIGRATIONS = (
     "0022_scan_progress.sql",
     "0023_browser_timeline.sql",
     "0024_derivative_cache.sql",
+    "0025_browser_exif.sql",
 )
 BUSY_TIMEOUT_MS = 10_000
 

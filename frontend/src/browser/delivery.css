@@ -1,0 +1,51 @@
+.pcb-delivery {
+  width: min(100% - 22px, 460px);
+  max-height: 90dvh;
+  padding: 15px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  color-scheme: dark;
+  border: 1px solid #526058;
+  border-radius: 12px;
+  background: #202522;
+  color: #eef2ee;
+  box-shadow: 0 15px 60px #0009;
+}
+.pcb-delivery::backdrop { background: #121512af; }
+.pcb-delivery header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.pcb-delivery h2 { font-size: 21px; margin: 0; }
+.pcb-delivery form { margin-top: 14px; display: grid; gap: 12px; }
+.pcb-delivery form > label { display: grid; gap: 4px; }
+.pcb-delivery form > label, .pcb-delivery legend { font-size: 13px; color: #c9d3cc; }
+.pcb-delivery :is(select, input[readonly]) {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding-inline: 8px;
+  border: 1px solid #526058;
+  border-radius: 8px;
+  background: #171c19;
+  color: #eef2ee;
+  font: inherit;
+  font-size: 15px;
+}
+.pcb-delivery fieldset { margin: 0; border: 1px solid #526058; border-radius: 8px; padding: 2px 8px; }
+.pcb-delivery fieldset label, .pcb-delivery section p { display: flex; align-items: center; gap: 7px; }
+.pcb-delivery fieldset label { min-height: 44px; font-size: 14px; }
+.pcb-delivery fieldset input { margin: 0 2px 0 0; width: 18px; height: 18px; accent-color: #acdfbe; }
+.pcb-delivery fieldset svg, .pcb-delivery section svg { flex: none; }
+.pcb-delivery p { margin: 0; color: #c9d3cc; font-size: 13px; line-height: 1.5; }
+.pcb .pcb-delivery .pcb-control {
+  width: fit-content;
+  gap: 7px;
+  color: #eef2ee;
+  border-color: #526058;
+  background: #29342d;
+  text-decoration: none;
+}
+.pcb .pcb-delivery .pcb-delivery-primary { background: #345143; color: #f0fff4; }
+.pcb .pcb-delivery .pcb-control:enabled:hover, .pcb .pcb-delivery a.pcb-control:hover {
+  background: #456352;
+}
+.pcb-delivery .pcb-control:disabled { opacity: .65; }
+.pcb-delivery section { display: grid; gap: 7px; margin-top: 15px; padding-top: 13px; border-top: 1px solid #526058; }

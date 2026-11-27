@@ -246,6 +246,8 @@ class LibraryWorker:
                 self.db.execute(
                     """UPDATE assets SET captured_at = :captured_at, day = :day,
                         make = :make, model = :model, latitude = :latitude, longitude = :longitude,
+                        lens = :lens, shutter_seconds = :shutter_seconds, aperture = :aperture,
+                        focal_length_mm = :focal_length_mm, iso = :iso,
                         metadata_error = :metadata_error WHERE id = :id""",
                     {**values, "id": job.asset_id},
                 )

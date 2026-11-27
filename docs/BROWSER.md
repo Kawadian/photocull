@@ -20,7 +20,22 @@ Before each PR, review the full diff, test edge cases and inspect Playwright scr
 
 Open **Photo browser** in the Photocull header. The default scope includes every configured library. Narrow it with the library selector. Use **Jump to month** or the right-hand scrubber to start at a month and continue into earlier photos. The photos in each row keep their aspect ratios. Use **Grid density** to change how many appear per row. The browser follows the device's color scheme. Choose English or Japanese in its header.
 
-Tab into the grid and use the arrow keys to move between thumbnails. Enter opens a preview. Left and Right step through the loaded photos, and Escape closes the preview. Listings and photo previews have shareable URLs. Use **Refresh timeline** after a scan or to update pending thumbnails. For a video, choose a quality and select **Prepare playback**. **Download original** appears when the server enables it.
+Tab into the grid and use the arrow keys to move between thumbnails. Enter opens a preview. Left and Right step through the loaded photos, and Escape closes the preview. Listings and photo previews have shareable URLs. Use **Refresh timeline** after a scan or to update pending thumbnails. For a video, choose a quality and select **Prepare playback**. **Share or download** opens delivery options, with an original-file link when the server enables it.
+
+## Viewer
+
+| Action | Keyboard | Touch or pointer |
+| --- | --- | --- |
+| Previous or next | Left or Right | Swipe horizontally from fit view or use the arrow buttons |
+| Fullscreen | F | Fullscreen button |
+| Photo information | I | Information button |
+| Zoom or pan | Plus or Minus for zoom | Pinch, double tap and drag |
+| Rate or clear the rating | 1–5 or 0 | Stars in the information panel |
+| Close | Escape | Close button |
+
+The viewer paints the placeholder and thumbnail while the fit image loads. It uses the native JPEG for supported zoom requests. Automatic full-resolution requests and neighbor thumbnail preloading pause on a connection marked slow or Save-Data. Use the **100%** control to request full resolution explicitly. Slideshow settings include interval, random order and a fade that honors the device's reduced-motion setting.
+
+The information panel reads existing scores, automatic tags and face group names. Toggle face boxes to see their location in the image. Video highlights from the analysis stage seek the same playback proxy, and the position carries over when changing quality. The worker reads lens, shutter time, aperture, focal length and ISO alongside the existing capture time, camera and GPS fields. The upgrade queues existing completed EXIF jobs to populate the new fields. Camera files are opened read-only. [Exiv2 tag reference](https://exiv2.org/tags.html)
 
 ## Catalog and navigation
 
@@ -42,7 +57,7 @@ The versioned URL is `/api/libraries/{library}/assets/{id}/media/{variant}/{sour
 
 ## Location information in shared and exported media
 
-`browser.strip_location` sets the default for shared media, rendered downloads, and trip reports. It defaults to `true` and can be set in YAML or overridden by `PHOTOCULL_BROWSER_STRIP_LOCATION`. Each of those operations accepts an explicit `include_location` override. Ordinary browsing always uses location-free derivatives. Archive and keeper copies are intended for the owner's own storage and preserve the original bytes and metadata by default. The Archive preview binds any explicit removal request to its confirmation and job.
+`browser.strip_location` sets the default for shared media, rendered downloads, and trip reports. It defaults to `true` and can be set in YAML or overridden by `PHOTOCULL_BROWSER_STRIP_LOCATION`. Each of those operations accepts an explicit `include_location` override. Ordinary browsing always uses location-free derivatives. Archive and keeper copies are intended for the owner's own storage and preserve the original bytes and metadata by default. The Archive preview binds any explicit removal request to its confirmation and job. The viewer asks which policy to apply before preparing a share link or rendered download and warns that original files can contain source location metadata.
 
 | Operation | Exclude location | Include location |
 | --- | --- | --- |

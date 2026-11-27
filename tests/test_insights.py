@@ -114,6 +114,15 @@ def test_people_aesthetic_and_learned_taste_survive_restarts(tmp_path):
         faces = get(client, f"{URL}/people/{left}/faces")["items"]
         assert faces[0]["right"] == 0.6
         assert "vector" not in faces[0]
+        detail = get(client, f"{BASE}/assets/{faces[0]['asset_id']}?details=browser")
+        assert detail["faces"] == [
+            {
+                "id": faces[0]["id"],
+                "name": "Mika",
+                "person_id": left,
+                **{field: faces[0][field] for field in ("left", "top", "right", "bottom")},
+            }
+        ]
         split = payload(
             client.post(
                 f"{URL}/people/{left}/split",

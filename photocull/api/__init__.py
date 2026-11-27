@@ -25,6 +25,7 @@ from photocull.api.insights import mount_insights
 from photocull.api.media import CacheAccess, cached_media, mount_media, worker_recipe
 from photocull.config import MLSettings, Settings, Stage, host_name, load_settings
 from photocull.db import connect, initialize
+from photocull.db.browse import photo_details
 from photocull.db.bursts import (
     BurstConflict,
     choose_best,
@@ -502,15 +503,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(404, str(error)) from error
 
     @app.get("/api/libraries/{library}/assets/{asset_id}")
-    def asset(library: str, asset_id: CatalogId):
+    def asset(library: str, asset_id: CatalogId, details: Literal["browser"] | None = None):
         with connect(library_path(library)) as db:
             db.execute("BEGIN")
             row = get_asset(db, asset_id)
             if row is None:
                 raise HTTPException(404, "Unknown asset")
             items = [asset_json(row)]
-            asset_insights(db, public_keys(db, settings), items)
+            keys = public_keys(db, settings)
+            asset_insights(db, keys, items)
             add_tags(db, items)
+            if details == "browser":
+                items[0].update(photo_details(db, row, keys.get("faces")))
             return items[0]
 
     @app.patch("/api/libraries/{library}/assets/{asset_id}/rating")

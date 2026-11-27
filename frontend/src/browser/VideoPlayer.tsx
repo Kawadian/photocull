@@ -1,12 +1,21 @@
 import { Play } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { Asset } from '../api'
-import { mediaUrl } from '../api'
+import { mediaUrl, useRemote } from '../api'
 import { derivativeUrl } from './ResponsiveImage'
 import type { BrowserMedia } from './ResponsiveImage'
 import type { Strings } from './strings'
 import { libraryUrl } from './timeline'
+import { useDerivativeAvailability } from './viewer'
+
+type VideoAnalysis = {
+  video?: { data: { highlights: { start: number; end: number }[] } | null }
+}
+
+function timestamp(seconds: number) {
+  return Math.floor(seconds / 60) + ':' + String(Math.floor(seconds % 60)).padStart(2, '0')
+}
 
 export function VideoPlayer({ library, asset, media, text, children }: {
   library: string
@@ -17,42 +26,40 @@ export function VideoPlayer({ library, asset, media, text, children }: {
 }) {
   const [quality, setQuality] = useState(media.recipe ? '480' : 'original')
   const [start, setStart] = useState(0)
-  const [response, setResponse] = useState<{ key: string; status: 'ready' | 'error' }>()
+  const [failed, setFailed] = useState('')
+  const player = useRef<HTMLVideoElement>(null)
+  const seek = useRef(0)
   const base = libraryUrl(library)
   const url = quality === 'original' ? base + '/assets/' + asset.id + '/original?mode=stream&include_location=true'
     : media.recipe ? derivativeUrl(base, asset, 'video-' + quality + '.mp4', media.recipe) : ''
+  const readiness = useDerivativeAvailability(start && quality !== 'original' ? url : '', start)
   const key = url + ':' + start
-  const status = response?.key === key ? response.status : 'pending'
+  const status = failed === key ? 'error' : readiness
   const playable = !!start && (quality === 'original' || status === 'ready') && status !== 'error'
+  const analysis = useRemote<VideoAnalysis>(base + '/insights/assets/' + asset.id + '/video')?.data
+  const highlights = analysis?.video?.data?.highlights ?? []
 
-  useEffect(() => {
-    if (!start || !url || quality === 'original') return
-    const controller = new AbortController()
-    let timer: ReturnType<typeof setTimeout>
-    async function check() {
-      try {
-        const pending = await fetch(url, { method: 'HEAD', signal: controller.signal })
-        if (controller.signal.aborted) return
-        if (pending.status === 202 || pending.status === 503) {
-          const seconds = Number(pending.headers.get('Retry-After')) || 2
-          timer = setTimeout(check, Math.max(2, Math.min(10, seconds)) * 1_000)
-        } else {
-          setResponse({ key, status: pending.ok ? 'ready' : 'error' })
-        }
-      } catch {
-        if (!controller.signal.aborted) setResponse({ key, status: 'error' })
-      }
-    }
-    void check()
-    return () => { controller.abort(); clearTimeout(timer) }
-  }, [key, quality, start, url])
+  function jump(seconds: number) {
+    seek.current = seconds
+    if (player.current?.readyState) player.current.currentTime = seconds
+    if (!start) setStart(1)
+  }
 
   return <>
-    {playable ? <video src={url} controls playsInline preload="metadata"
+    {playable ? <video src={url} controls playsInline preload="metadata" ref={player}
       poster={mediaUrl(base, asset, 'preview')}
-      onError={() => setResponse({ key, status: 'error' })} /> : children}
+      onLoadedMetadata={(event) => { event.currentTarget.currentTime = seek.current }}
+      onError={() => setFailed(key)} /> : children}
+    {!!highlights.length && <div className="pcb-highlights" role="group" aria-label={text.highlights}>
+      <span>{text.highlights}</span>
+      {highlights.map((highlight) => <button key={highlight.start} className="pcb-control" type="button"
+        onClick={() => jump(highlight.start)}>{timestamp(highlight.start)}</button>)}
+    </div>}
     <div className="pcb-playback">
-      <select aria-label={text.videoQuality} value={quality} onChange={(event) => setQuality(event.target.value)}>
+      <select aria-label={text.videoQuality} value={quality} onChange={(event) => {
+        if (player.current) seek.current = player.current.currentTime
+        setQuality(event.target.value)
+      }}>
         {media.recipe && <><option value="480">480p</option><option value="720">720p</option></>}
         {media.original_streaming && <option value="original">{text.original}</option>}
       </select>

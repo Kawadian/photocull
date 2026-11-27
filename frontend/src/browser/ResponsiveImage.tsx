@@ -9,6 +9,7 @@ export type BrowserMedia = {
   recipe: string | null
   original_download: boolean
   original_streaming: boolean
+  strip_location: boolean
 }
 
 export function derivativeUrl(base: string, asset: Source, variant: string, recipe: string) {
@@ -44,7 +45,7 @@ export function Blurhash({ value }: { value: string }) {
   return <canvas className="pcb-blurhash" ref={canvas} width={16} height={16} aria-hidden="true" />
 }
 
-export function ResponsiveImage({ library, asset, recipe, size, sizes, alt, priority, onError }: {
+export function ResponsiveImage({ library, asset, recipe, size, sizes, alt, priority, onError, onLoad }: {
   library: string
   asset: Source
   recipe?: string | null
@@ -53,6 +54,7 @@ export function ResponsiveImage({ library, asset, recipe, size, sizes, alt, prio
   alt: string
   priority?: boolean
   onError: () => void
+  onLoad?: () => void
 }) {
   const base = libraryUrl(library)
   const legacy = mediaUrl(base, asset, size === 'grid' ? 'thumb' : 'preview')
@@ -65,6 +67,7 @@ export function ResponsiveImage({ library, asset, recipe, size, sizes, alt, prio
     decoding: 'async' as const,
     fetchPriority: priority ? 'high' as const : 'auto' as const,
     draggable: false,
+    onLoad,
   }
 
   if (!modern) return <img src={legacy} {...legacyProps} onError={onError} />

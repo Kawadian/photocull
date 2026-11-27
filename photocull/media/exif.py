@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from fractions import Fraction
@@ -23,6 +24,11 @@ class Metadata:
     latitude: float | None = None
     longitude: float | None = None
     metadata_error: str | None = None
+    lens: str | None = None
+    shutter_seconds: float | None = None
+    aperture: float | None = None
+    focal_length_mm: float | None = None
+    iso: int | None = None
 
 
 def _date(*values: tuple[str | None, str | None]) -> str | None:
@@ -70,6 +76,12 @@ def _pillow_tags(path: str) -> dict:
             "Exif.Photo.SubSecTime": photo.get(37520) or root.get(37520),
             "Exif.Image.Make": root.get(271),
             "Exif.Image.Model": root.get(272),
+            "Exif.Photo.LensModel": photo.get(42036),
+            "Exif.Photo.ExposureTime": photo.get(33434) or root.get(33434),
+            "Exif.Photo.FNumber": photo.get(33437) or root.get(33437),
+            "Exif.Photo.FocalLength": photo.get(37386) or root.get(37386),
+            "Exif.Photo.ISOSpeedRatings": photo.get(34855) or root.get(34855),
+            "Exif.Photo.ISOSpeed": photo.get(34867),
             "Exif.GPSInfo.GPSLatitudeRef": gps.get(1),
             "Exif.GPSInfo.GPSLatitude": gps.get(2),
             "Exif.GPSInfo.GPSLongitudeRef": gps.get(3),
@@ -81,6 +93,18 @@ def _text(value) -> str | None:
     if isinstance(value, bytes):
         value = value.decode("utf-8", errors="replace")
     return (value.strip("\0 ") or None) if isinstance(value, str) else None
+
+
+def _positive(value) -> float | None:
+    try:
+        number = float(Fraction(str(value)))
+    except (ValueError, OverflowError, ZeroDivisionError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _photo_number(tags: dict, name: str) -> float | None:
+    return _positive(tags.get(f"Exif.Photo.{name}")) or _positive(tags.get(f"Exif.Image.{name}"))
 
 
 def read_metadata(path: str) -> Metadata:
@@ -101,6 +125,7 @@ def read_metadata(path: str) -> Metadata:
                 metadata_error=json.dumps({"code": "exif_read_failed", "message": str(error)})
             )
 
+    iso = _photo_number(tags, "ISOSpeed") or _photo_number(tags, "ISOSpeedRatings")
     return Metadata(
         captured_at=_date(
             *(
@@ -126,4 +151,9 @@ def read_metadata(path: str) -> Metadata:
             "E",
             "W",
         ),
+        lens=_text(tags.get("Exif.Photo.LensModel")),
+        shutter_seconds=_photo_number(tags, "ExposureTime"),
+        aperture=_photo_number(tags, "FNumber"),
+        focal_length_mm=_photo_number(tags, "FocalLength"),
+        iso=int(iso) if iso and iso.is_integer() and iso < 2**31 else None,
     )

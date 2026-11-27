@@ -9,6 +9,7 @@ import { Preview } from './Preview'
 import { Scrubber } from './Scrubber'
 import { formatDate, strings } from './strings'
 import { assetKey, browseUrl, useTimeline } from './timeline'
+import type { TimelineAsset } from './timeline'
 import './browser.css'
 
 type Navigate = (updates: Partial<BrowserLocation>, replace?: boolean) => void
@@ -23,16 +24,34 @@ function Timeline({ location, months, navigate, jump, close }: {
   const text = strings[location.lang]
   const feed = useTimeline(location)
   const media = feed.media
+  const { next: cursor, busy, error, loadMore } = feed
+  const loaded = feed.assets.length
   const [currentMonth, setCurrentMonth] = useState('')
   const opener = useRef<HTMLButtonElement>(null)
   const index = location.photo ? feed.assets.findIndex((asset) => assetKey(asset) === location.photo) : -1
   const openPhoto = (offset: number) => navigate({ photo: assetKey(feed.assets[index + offset]) }, true)
+  const neighbors: TimelineAsset[] = []
+  if (index > 0) neighbors.push(feed.assets[index - 1])
+  if (index >= 0 && index < feed.assets.length - 1) neighbors.push(feed.assets[index + 1])
+
+  function advance(random: boolean) {
+    const stills = feed.assets.filter((asset) => asset.kind !== 'video' && assetKey(asset) !== location.photo)
+    if (!stills.length) return false
+    const destination = random ? stills[Math.floor(Math.random() * stills.length)]
+      : feed.assets.slice(index + 1).find((asset) => asset.kind !== 'video') ?? stills[0]
+    navigate({ photo: assetKey(destination) }, true)
+    return true
+  }
 
   useEffect(() => {
     if (location.photo) return
     opener.current?.focus({ preventScroll: true })
     opener.current = null
   }, [location.photo])
+
+  useEffect(() => {
+    if (index >= 0 && index >= loaded - 5 && cursor && !error && !busy) loadMore()
+  }, [index, loaded, cursor, error, busy, loadMore])
 
   return <div className="pcb-content">
     <TimelineGrid assets={feed.assets} location={location} recipe={media?.recipe} text={text} busy={feed.busy}
@@ -64,7 +83,7 @@ function Timeline({ location, months, navigate, jump, close }: {
       label={text.scrubber} jump={jump} />
     {location.photo && <Preview photo={location.photo} asset={feed.assets[index]} media={media}
       mediaLoading={!feed.completed}
-      text={text} close={close}
+      text={text} lang={location.lang} neighbors={neighbors} advance={advance} close={close}
       previous={index > 0 ? () => openPhoto(-1) : undefined}
       next={index >= 0 && index < feed.assets.length - 1 ? () => openPhoto(1) : undefined} />}
   </div>
