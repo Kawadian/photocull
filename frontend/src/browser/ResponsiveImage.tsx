@@ -9,6 +9,7 @@ export type BrowserMedia = {
   recipe: string | null
   original_download: boolean
   original_streaming: boolean
+  strip_location: boolean
 }
 
 export function derivativeUrl(base: string, asset: Source, variant: string, recipe: string) {

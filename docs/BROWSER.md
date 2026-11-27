@@ -20,7 +20,7 @@ Before each PR, review the full diff, test edge cases and inspect Playwright scr
 
 Open **Photo browser** in the Photocull header. The default scope includes every configured library. Narrow it with the library selector. Use **Jump to month** or the right-hand scrubber to start at a month and continue into earlier photos. The photos in each row keep their aspect ratios. Use **Grid density** to change how many appear per row. The browser follows the device's color scheme. Choose English or Japanese in its header.
 
-Tab into the grid and use the arrow keys to move between thumbnails. Enter opens a preview. Left and Right step through the loaded photos, and Escape closes the preview. Listings and photo previews have shareable URLs. Use **Refresh timeline** after a scan or to update pending thumbnails. For a video, choose a quality and select **Prepare playback**. **Download original** appears when the server enables it.
+Tab into the grid and use the arrow keys to move between thumbnails. Enter opens a preview. Left and Right step through the loaded photos, and Escape closes the preview. Listings and photo previews have shareable URLs. Use **Refresh timeline** after a scan or to update pending thumbnails. For a video, choose a quality and select **Prepare playback**. **Share or download** opens delivery options, with an original-file link when the server enables it.
 
 ## Viewer
 
@@ -57,7 +57,7 @@ The versioned URL is `/api/libraries/{library}/assets/{id}/media/{variant}/{sour
 
 ## Location information in shared and exported media
 
-`browser.strip_location` sets the default for sharing, downloading a rendered copy, keeper exports and archive exports. It defaults to `true` and can be set in YAML or overridden by `PHOTOCULL_BROWSER_STRIP_LOCATION`. Each operation can send `include_location: true` or `false` to override the default. The archive preview binds that choice to the confirmation and job. Older confirmed jobs and saved rules preserve the behavior recorded when they were created.
+`browser.strip_location` sets the default for sharing, downloading a rendered copy, keeper exports and archive exports. It defaults to `true` and can be set in YAML or overridden by `PHOTOCULL_BROWSER_STRIP_LOCATION`. The viewer asks which location policy to apply before preparing a share link or a copy. The original-file link displays a metadata warning. Export forms show the choice before submission, and the API accepts `include_location: true` or `false` to override the default. The archive preview binds that choice to the confirmation and job. Older confirmed jobs and saved rules preserve the behavior recorded when they were created.
 
 | Operation | Exclude location | Include location |
 | --- | --- | --- |

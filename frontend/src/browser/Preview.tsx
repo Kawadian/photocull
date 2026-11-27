@@ -1,10 +1,11 @@
 import {
-  ChevronLeft, ChevronRight, Download, ImageOff, Info, Maximize, Minimize, Pause, Play, X, ZoomIn, ZoomOut,
+  ChevronLeft, ChevronRight, ImageOff, Info, Maximize, Minimize, Pause, Play, Share2, X, ZoomIn, ZoomOut,
 } from 'lucide-react'
 import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { assetName, json, mediaUrl, request, useRemote } from '../api'
 import type { Rating } from '../api'
+import { Delivery, deliveryText } from './Delivery'
 import type { Language } from './location'
 import { PhotoInformation } from './PhotoInformation'
 import { PhotoPlane } from './PhotoPlane'
@@ -35,8 +36,10 @@ export function Preview({ photo, asset, media, mediaLoading, text, lang, close, 
   const dialog = useRef<HTMLDialogElement>(null)
   const viewer = useRef<HTMLDivElement>(null)
   const zoom = useRef<PhotoZoom>(null)
+  const deliveryButton = useRef<HTMLButtonElement>(null)
   const nativeFullscreen = useRef(false)
   const [attempt, setAttempt] = useState(0)
+  const [deliveryOpen, setDeliveryOpen] = useState(false)
   const [revision, refresh] = useState(0)
   const [failed, setFailed] = useState('')
   const [expanded, setExpanded] = useState(false)
@@ -208,11 +211,12 @@ export function Preview({ photo, asset, media, mediaLoading, text, lang, close, 
             aria-keyshortcuts="F" aria-pressed={expanded} title={text.fullscreen + ' (F)'} onClick={fullscreen}>
             {expanded ? <Minimize size={20} aria-hidden="true" /> : <Maximize size={20} aria-hidden="true" />}
           </button>
-          {source && media?.original_download &&
-            <a className="pcb-icon" href={assetUrl + '/original'} download
-              aria-label={text.downloadOriginal} title={text.downloadOriginal}>
-              <Download size={20} aria-hidden="true" />
-            </a>}
+          {source && media && (media.recipe || media.original_download) &&
+            <button className="pcb-icon" type="button" ref={deliveryButton} aria-haspopup="dialog"
+              aria-label={deliveryText[lang].title} title={deliveryText[lang].title} onClick={() => {
+                setPlaying(false)
+                setDeliveryOpen(true)
+              }}><Share2 size={19} aria-hidden="true" /></button>}
           <button className="pcb-icon" type="button" aria-label={text.close} title={text.close} onClick={close}
             autoFocus><X size={23} aria-hidden="true" /></button>
         </div>
@@ -265,6 +269,11 @@ export function Preview({ photo, asset, media, mediaLoading, text, lang, close, 
         </details>
         {ratingFailed === photo && <span role="alert">{text.ratingError}</span>}
       </div>
+      {deliveryOpen && source && media && <Delivery key={photo} lang={lang} assetUrl={assetUrl}
+        hash={source.content_hash} media={media} close={() => {
+          setDeliveryOpen(false)
+          requestAnimationFrame(() => deliveryButton.current?.focus())
+        }} />}
     </div>
   </dialog>
 }
