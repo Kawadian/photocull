@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+from importlib import import_module
+from importlib.util import find_spec
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from photocull.config import MLSettings
 from photocull.db import connect
-from photocull.worker.ml.grouping import SimilarityGroups
 from photocull.worker.ml.model import ModelUnavailable
 from photocull.worker.ml.process import MAX_INFERENCE_BATCH
 from photocull.worker.ml.vectors import STORAGE_DTYPE, blob_vector, exact_search, normalized
+
+if TYPE_CHECKING:
+    from photocull.worker.ml.grouping import SimilarityGroups
 
 
 class Engine:
@@ -198,6 +203,12 @@ class Engine:
             if state["generation"] != state["grouped_generation"] and not state["group_error"]:
                 return False
         if self.groups is None or self.groups.path != path:
+            # Grouping can run before encoding after a worker restart. On some
+            # systems loading usearch first makes the later ONNX import segfault.
+            if find_spec("onnxruntime") is not None:
+                import_module("onnxruntime")
+            from photocull.worker.ml.grouping import SimilarityGroups
+
             self.groups = SimilarityGroups(path, self.key, self.settings.similar_threshold)
         try:
             with connect(path) as db:

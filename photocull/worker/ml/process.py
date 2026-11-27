@@ -39,10 +39,6 @@ def _child(channel, settings, cache, memory_bytes: int, factory, parent_pid: int
             )
             resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
             set_native_threads()
-            if find_spec("onnxruntime") is not None:
-                # usearch, imported with the engine, segfaults a later
-                # onnxruntime load inside onnxruntime_pybind11_state.
-                import onnxruntime  # noqa: F401
             from photocull.worker.ml.engine import Engine
 
             engine = Engine(settings, cache, factory)

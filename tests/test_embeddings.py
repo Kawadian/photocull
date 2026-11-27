@@ -1,22 +1,21 @@
 import fcntl
-import inspect
-import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
+from importlib.util import find_spec
 
 import pytest
 from fastapi.testclient import TestClient
 
 from photocull.api import create_app
 from photocull.config import Library, MLSettings, Settings, WorkerSettings
-from photocull.db import connect
+from photocull.db import connect, initialize
 from photocull.db.jobs import claim_jobs, recover, request_scan, retry_job
 from photocull.db.search import MAX_PENDING, REQUEST_TTL
 from photocull.media.cache import cache_path
 from photocull.worker import LibraryWorker
 from photocull.worker.ml import LibraryML
-from photocull.worker.ml.process import InferenceProcess, _child
+from photocull.worker.ml.process import InferenceProcess
 from tests.fake_embedding import FakeEmbedding
 from tests.worker_harness import photo
 
@@ -218,8 +217,6 @@ def test_ml_failure_preserves_media_work(settings, monkeypatch, failure):
     if failure == "memory":
         settings = settings.model_copy(update={"worker": WorkerSettings(memory_mb=1536)})
     if failure == "dependency":
-        from importlib.util import find_spec
-
         monkeypatch.setattr(
             "photocull.worker.ml.process.find_spec",
             lambda name: None if name == "onnxruntime" else find_spec(name),
@@ -353,23 +350,41 @@ def test_inference_allocation_cap_is_applied_in_the_child(settings):
         inference.close()
 
 
-def test_ml_child_imports_onnxruntime_before_the_engine():
-    source = inspect.getsource(_child)
-    assert source.index("import onnxruntime") < source.index(
-        "from photocull.worker.ml.engine import Engine"
-    )
+class OnnxImportProbe(FakeEmbedding):
+    def image_vectors(self, paths):
+        loaded = tuple(sys.modules)
+        if "usearch.index" in loaded:
+            assert "onnxruntime" in loaded, "usearch loaded before ONNX Runtime"
+            assert loaded.index("onnxruntime") < loaded.index("usearch.index")
+        import onnxruntime
+
+        assert "CPUExecutionProvider" in onnxruntime.get_available_providers()
+        return super().image_vectors(paths)
 
 
-def test_onnxruntime_import_survives_when_it_precedes_usearch():
-    pytest.importorskip("onnxruntime")
-    pytest.importorskip("usearch")
-    completed = subprocess.run(
-        [sys.executable, "-c", "import onnxruntime; from usearch.index import Index"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert completed.returncode == 0, completed.stderr
+@pytest.mark.parametrize("group_first", [False, True], ids=["images-first", "groups-first"])
+def test_ml_child_loads_onnxruntime_before_usearch(settings, group_first):
+    if any(find_spec(name) is None for name in ("onnxruntime", "usearch")):
+        pytest.skip("Requires photocull[ml]")
+    path = settings.library_state("photos") / "index.db"
+    initialize(path)
+    with connect(path) as db:
+        db.execute("UPDATE ml_state SET generation = 1, grouped_generation = 0")
+    inference = InferenceProcess(settings, OnnxImportProbe)
+
+    def pulse():
+        pass
+
+    try:
+        if group_first:
+            assert inference.call("group_step", (path,), pulse)
+        paths = [settings.libraries["photos"].root / "a.jpg"]
+        [(embedding, error)] = inference.call("images", (paths,), pulse)
+        assert embedding and error is None
+        if not group_first:
+            assert inference.call("group_step", (path,), pulse)
+    finally:
+        inference.close()
 
 
 def test_search_and_tag_flags_are_independent(settings):
