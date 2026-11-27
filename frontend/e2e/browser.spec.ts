@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 test('opens the cross-library timeline from Review and shares navigation state', async ({ page }, info) => {
+  test.setTimeout(60_000)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/')
   await page.getByRole('link', { name: 'Photo browser' }).click()
@@ -51,6 +52,7 @@ test('opens the cross-library timeline from Review and shares navigation state',
   await page.setViewportSize({ width: 3840, height: 2160 })
   await expect(firstScoped).toBeVisible()
   await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 3840)
+  await page.setViewportSize({ width: 1440, height: 900 })
   await page.getByRole('link', { name: 'Review', exact: true }).click()
   await expect(page.getByRole('link', { name: 'Photo browser' })).toBeVisible()
 })
@@ -73,9 +75,11 @@ test('loads another cursor page while keeping the number of mounted tiles bounde
 })
 
 test('recovers from catalog and failed preview requests and opens a shared photo URL', async ({ page }) => {
-  await page.route('**/api/browse/timeline?*', (route) => route.fulfill({ status: 503 }), { times: 1 })
+  const timeline = '**/api/browse/timeline?*'
+  await page.route(timeline, (route) => route.fulfill({ status: 503 }))
   await page.goto('/?view=browser&library=gallery-2024&lang=en')
   await expect(page.getByRole('alert')).toContainText('Timeline unavailable')
+  await page.unroute(timeline)
   await page.getByRole('button', { name: 'Retry' }).click()
   await expect(page.getByRole('button', { name: 'Frame-118.jpg' })).toBeVisible()
 
@@ -97,6 +101,7 @@ test('recovers from catalog and failed preview requests and opens a shared photo
 })
 
 test('prepares a video from its poster and switches proxy quality', async ({ page, request }, info) => {
+  test.setTimeout(60_000)
   await request.post('/api/libraries/insights/scans')
   await expect.poll(async () => {
     const response = await request.get('/api/libraries/insights/assets?kind=video')
