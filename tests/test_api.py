@@ -63,6 +63,8 @@ with TemporaryDirectory() as directory:
     )
     with TestClient(photocull.api.create_app(settings)) as client:
         base = '/api/libraries/photos'
+        assert client.get('/api/browse/timeline').json()['items'] == []
+        assert client.get('/api/browse/months').json()['items'] == []
         assert client.get(f'{base}/jobs').json()['ml']['waiting']
         assert client.get(f'{base}/tags').status_code == 200
         assert client.get(f'{base}/similar-groups').json()['items'] == []

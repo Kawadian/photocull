@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import uvicorn
+from gallery_fixtures import seed_gallery
 from PIL import Image
 
 from photocull.api import create_app
@@ -68,10 +69,23 @@ def main() -> None:
         root = Path(directory)
         archive_output = root / "archive-output"
         archive_output.mkdir()
+        galleries = {f"gallery-{year}": year for year in (2024, 2025)}
+        for name in galleries:
+            (root / name).mkdir()
         settings = Settings(
             libraries={
-                name: write_fixtures(root / name)
-                for name in ("desktop", "mobile", "semantic", "insights", "archive", "scan-errors")
+                **{
+                    name: write_fixtures(root / name)
+                    for name in (
+                        "desktop",
+                        "mobile",
+                        "semantic",
+                        "insights",
+                        "archive",
+                        "scan-errors",
+                    )
+                },
+                **{name: Library(root=root / name) for name in galleries},
             },
             state_dir=root / "state",
             static_dir=Path(__file__).resolve().parents[1] / "dist",
@@ -93,6 +107,8 @@ def main() -> None:
                 offline=True,
             ),
         )
+        for name, year in galleries.items():
+            seed_gallery(settings, name, year)
         index = settings.library_state("scan-errors") / "index.db"
         initialize(index)
         with connect(index) as db, write(db):
