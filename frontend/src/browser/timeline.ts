@@ -7,7 +7,7 @@ import type { BrowserLocation } from './location'
 import type { BrowserMedia } from './ResponsiveImage'
 
 export type TimelineAsset = Pick<Asset, 'id' | 'kind' | 'day' | 'width' | 'height' | 'duration' |
-  'content_hash' | 'preview_status'> & {
+  'content_hash' | 'preview_status' | 'revision'> & {
   library: string
   name: string
   blurhash?: string | null
@@ -23,8 +23,9 @@ export function libraryUrl(library: string) {
 }
 
 export function browseUrl(endpoint: 'timeline' | 'months' | 'facets', library: string, month = '',
-  cursor?: string | null, filters?: FilterValues) {
+  cursor?: string | null, filters?: FilterValues, album?: string) {
   const query = new URLSearchParams()
+  if (album) query.set('album', album)
   if (library) query.set('library', library)
   if (month) query.set('month', month)
   if (cursor) query.set('cursor', cursor)
@@ -42,11 +43,11 @@ type Feed = {
   error?: string
 }
 
-export function useTimeline({ library, month, filters }: BrowserLocation) {
+export function useTimeline({ library, month, filters, album }: BrowserLocation) {
   const [load, setLoad] = useState<Load>({ cursor: null })
   const [feed, setFeed] = useState<Feed>({ assets: [], next: null, completed: null })
   const busy = feed.completed !== load
-  const url = browseUrl('timeline', library, month, load.cursor, filters)
+  const url = browseUrl('timeline', library, month, load.cursor, filters, album)
 
   useEffect(() => {
     const controller = new AbortController()

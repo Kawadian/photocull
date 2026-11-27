@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi import Path as RoutePath
 from pydantic import BaseModel, Field, ValidationError
 
+from photocull.api.collections import ALBUM_PATTERN, visible_album
 from photocull.config import LibraryName, Settings
 from photocull.db import connect
 from photocull.db.browse import TimelineKey, timeline_months, timeline_page
@@ -21,6 +22,7 @@ Id = Annotated[int, RoutePath(gt=0, le=2**63 - 1)]
 
 
 class TimelineQuery(Filters):
+    album: str | None = Field(default=None, pattern=ALBUM_PATTERN)
     library: LibraryName | None = None
     month: str | None = Field(default=None, pattern=MONTH_PATTERN)
     cursor: str | None = Field(default=None, max_length=512, pattern=r"^[A-Za-z0-9_-]+$")
@@ -68,10 +70,25 @@ def browse_router(settings: Settings) -> APIRouter:
             raise HTTPException(404, "Unknown library")
         return {library: catalogs[library]}
 
+    def album_record(album_id: str) -> dict:
+        with connect(settings.state_dir / "browser.db") as db:
+            return visible_album(db, album_id, catalogs)
+
     @router.get("/months")
-    def months(response: Response, library: LibraryName | None = None):
+    def months(
+        response: Response,
+        library: LibraryName | None = None,
+        album: Annotated[str | None, Query(pattern=ALBUM_PATTERN)] = None,
+    ):
         response.headers["Cache-Control"] = "private, no-cache"
-        return {"items": timeline_months(select(library))}
+        filters = None
+        if album:
+            record = album_record(album)
+            if record["kind"] == "smart":
+                library = record["library"]
+                filters = Filters.model_validate(record["filters"])
+                album = None
+        return {"items": timeline_months(select(library), settings, filters, album)}
 
     @router.get("/media")
     def browse_media():
@@ -99,10 +116,19 @@ def browse_router(settings: Settings) -> APIRouter:
         query: Annotated[TimelineQuery, Query()],
     ):
         library, month, cursor, limit = query.library, query.month, query.cursor, query.limit
-        scoped = query.model_dump_json(
-            exclude={"library", "month", "cursor", "limit"}, exclude_none=True
-        )
-        fingerprint = sha256(scoped.encode()).hexdigest()[:16] if scoped != "{}" else ""
+        filters = Filters.model_validate(query.model_dump())
+        manual_album = None
+        revision = None
+        if query.album:
+            record = album_record(query.album)
+            revision = record["revision"]
+            if record["kind"] == "smart":
+                library = record["library"]
+                filters = Filters.model_validate(record["filters"])
+            else:
+                manual_album = query.album
+        scoped = (query.album, revision, filters.model_dump_json(exclude_none=True))
+        fingerprint = sha256(repr(scoped).encode()).hexdigest()[:16]
         selected = select(library)
         after = None
         if cursor is not None:
@@ -116,7 +142,9 @@ def browse_router(settings: Settings) -> APIRouter:
                 raise HTTPException(422, "Cursor does not match the timeline scope")
             after = TimelineKey(value.day, value.time, value.library, value.asset_id)
 
-        items, next_key = timeline_page(selected, limit, month, after, encoding, query, settings)
+        items, next_key = timeline_page(
+            selected, limit, month, after, encoding, filters, settings, manual_album
+        )
         next_cursor = (
             TimelineCursor(
                 **next_key._asdict(), scope=library, month=month, filters=fingerprint

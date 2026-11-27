@@ -1,4 +1,4 @@
-import { Film, Heart, ImageOff, Images } from 'lucide-react'
+import { Check, Film, Heart, ImageOff, Images } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent, ReactNode } from 'react'
 import { mediaUrl } from '../api'
@@ -28,7 +28,7 @@ function Thumbnail({ asset, priority, text, recipe, width }: {
   </>
 }
 
-export function TimelineGrid({ assets, location, recipe, text, busy, canLoad, loadMore, onPhoto, onMonth, children }: {
+export function TimelineGrid({ assets, location, recipe, text, busy, canLoad, loadMore, onPhoto, onMonth, selection, children }: {
   assets: TimelineAsset[]
   location: BrowserLocation
   recipe?: string | null
@@ -38,12 +38,22 @@ export function TimelineGrid({ assets, location, recipe, text, busy, canLoad, lo
   loadMore: () => void
   onPhoto: (asset: TimelineAsset, button: HTMLButtonElement) => void
   onMonth: (month: string) => void
+  selection: {
+    active: boolean
+    keys: ReadonlySet<string>
+    choose: (index: number, range: boolean) => void
+  }
   children: ReactNode
 }) {
   const scroller = useRef<HTMLElement>(null)
   const gallery = useRef<HTMLDivElement>(null)
   const buttons = useRef(new Map<number, HTMLButtonElement>())
   const frame = useRef(0)
+  const hold = useRef({ timer: 0, x: 0, y: 0, selected: false })
+  function releaseHold() {
+    window.clearTimeout(hold.current.timer)
+    hold.current.timer = 0
+  }
   const [bounds, setBounds] = useState({ width: 0, height: 0, top: 0 })
   const [focused, setFocused] = useState<number>()
   const geometry = useMemo(
@@ -65,6 +75,7 @@ export function TimelineGrid({ assets, location, recipe, text, busy, canLoad, lo
   const month = day?.slice(0, 7)
 
   useEffect(() => {
+    const gesture = hold.current
     const viewport = scroller.current!
     const surface = gallery.current!
     function measure() {
@@ -84,6 +95,7 @@ export function TimelineGrid({ assets, location, recipe, text, busy, canLoad, lo
     return () => {
       observer.disconnect()
       viewport.removeEventListener('scroll', scroll)
+      window.clearTimeout(gesture.timer)
       cancelAnimationFrame(frame.current)
       frame.current = 0
     }
@@ -99,9 +111,10 @@ export function TimelineGrid({ assets, location, recipe, text, busy, canLoad, lo
 
   function moveFocus(event: KeyboardEvent, index: number) {
     const target = neighbor(rows, assetRows[index], index, event.key, assets.length)
-    if (target === null || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+    if (target === null || event.altKey || event.ctrlKey || event.metaKey || (event.shiftKey && !selection.active)) return
     event.preventDefault()
     if (target === index) return
+    if (event.shiftKey) selection.choose(target, true)
     const row = rows[assetRows[target]]
     const viewport = scroller.current!
     if (row.top < viewport.scrollTop) viewport.scrollTop = Math.max(0, row.top - 4)
@@ -131,13 +144,40 @@ export function TimelineGrid({ assets, location, recipe, text, busy, canLoad, lo
               const asset = assets[index]
               const name = asset.name + (location.library ? '' : ' · ' + asset.library)
                 + (asset.kind === 'video' ? ' · ' + text.video : '')
+              const selected = selection.active ? selection.keys.has(assetKey(asset)) : undefined
               return <button key={assetKey(asset)} className="pcb-tile" style={{ width }} type="button"
                 title={name} aria-label={name} aria-description={asset.favorite ? text.favorite : undefined}
-                aria-haspopup="dialog" tabIndex={index === tabIndex ? 0 : -1}
+                aria-haspopup={selection.active ? undefined : 'dialog'} aria-pressed={selected} tabIndex={index === tabIndex ? 0 : -1}
                 ref={(node) => { if (node) buttons.current.set(index, node); else buttons.current.delete(index) }}
                 onFocus={() => setFocused(index)} onKeyDown={(event) => moveFocus(event, index)}
-                onClick={(event) => onPhoto(asset, event.currentTarget)}>
+                onPointerDown={(event) => {
+                  releaseHold()
+                  hold.current.selected = false
+                  if (event.pointerType === 'mouse' || !event.isPrimary) return
+                  hold.current.x = event.clientX
+                  hold.current.y = event.clientY
+                  hold.current.timer = window.setTimeout(() => {
+                    hold.current.selected = true
+                    selection.choose(index, false)
+                  }, 480)
+                }}
+                onPointerMove={(event) => {
+                  if (Math.hypot(event.clientX - hold.current.x, event.clientY - hold.current.y) > 10) releaseHold()
+                }}
+                onPointerUp={releaseHold} onPointerCancel={releaseHold}
+                onContextMenu={(event) => { if (hold.current.timer || hold.current.selected) event.preventDefault() }}
+                onClick={(event) => {
+                  if (hold.current.selected && event.detail > 0) {
+                    hold.current.selected = false
+                    return
+                  }
+                  if (selection.active || event.shiftKey) selection.choose(index, event.shiftKey)
+                  else onPhoto(asset, event.currentTarget)
+                }}>
                 <Thumbnail asset={asset} recipe={recipe} width={width} priority={index < 2} text={text} />
+                {selection.active && <span className="pcb-selection-check" aria-hidden="true">
+                  {selected && <Check size={17} />}
+                </span>}
                 {asset.favorite && <span className="pcb-favorite-chip" aria-hidden="true">
                   <Heart size={14} fill="currentColor" />
                 </span>}

@@ -230,3 +230,191 @@ def test_library_labels_facets_and_filtered_cursors(timeline):
     assert [
         item["library"] for item in timeline.get(TIMELINE, params=combined).json()["items"]
     ] == ["zulu"]
+
+
+def test_cross_library_album_membership_and_saved_filters(timeline):
+    albums = "/api/browse/albums"
+    manual_response = timeline.post(albums, json={"name": "  Family trip  "})
+    assert manual_response.status_code == 201
+    manual = manual_response.json()
+    assert manual["name"] == "Family trip"
+    assert timeline.post(albums, json={"name": "family TRIP"}).status_code == 409
+    endpoint = f"{albums}/{manual['id']}"
+    selection = {
+        "assets": [{"library": name, "id": asset} for name, asset in [("alpha", 1), ("zulu", 1)]]
+    }
+    member_request = endpoint + "/members"
+    assert timeline.post(member_request, json=selection).json() == {"changed": 2}
+    assert timeline.post(member_request, json=selection).json() == {"changed": 0}
+    assert (
+        timeline.get("/api/browse/alpha/assets/1/albums").json()["items"][0]["id"] == manual["id"]
+    )
+    assert timeline.get("/api/browse/alpha/assets/2/albums").json() == {"items": []}
+    assert timeline.get(albums).json()["items"][0]["count"] == 2
+    assert timeline.get(MONTHS, params={"album": manual["id"]}).json() == {"items": ["2025-04"]}
+
+    params = {"album": manual["id"], "limit": 1}
+    page = timeline.get(TIMELINE, params=params).json()
+    assert [(item["library"], item["id"]) for item in page["items"]] == [("zulu", 1)]
+    assert timeline.get(TIMELINE, params={"cursor": page["next_cursor"]}).status_code == 422
+    page2 = timeline.get(TIMELINE, params=params | {"cursor": page["next_cursor"]}).json()
+    assert [(item["library"], item["id"]) for item in page2["items"]] == [("alpha", 1)]
+    assert timeline.post(member_request, json=selection | {"operation": "remove"}).json() == {
+        "changed": 2
+    }
+    assert timeline.get(TIMELINE, params=params).json()["items"] == []
+
+    smart_settings = {
+        "kind": "smart",
+        "name": "My favorites",
+        "library": "alpha",
+        "filters": {"favorite": True},
+    }
+    smart = timeline.post(albums, json=smart_settings).json()
+    assert timeline.post(f"{albums}/{smart['id']}/members", json=selection).status_code == 422
+    assert timeline.get(TIMELINE, params={"album": smart["id"]}).json()["items"] == []
+    bulk = "/api/browse/selection/labels"
+    body = {
+        "assets": [asset | {"expected_revision": 0} for asset in selection["assets"]],
+        "favorite": True,
+        "rating": 4,
+        "add_tags": ["Sunsets"],
+    }
+    assert timeline.patch(bulk, json=body).json()["items"] == [
+        {"library": lib, "count": 1, "status": "done"} for lib in ("alpha", "zulu")
+    ]
+    assert timeline.patch(bulk, json=body).json()["items"] == [
+        {"library": lib, "count": 1, "status": "conflict"} for lib in ("alpha", "zulu")
+    ]
+    smart_page = timeline.get(TIMELINE, params={"album": smart["id"], "library": "zulu"}).json()
+    assert [(item["library"], item["id"]) for item in smart_page["items"]] == [("alpha", 1)]
+    assert timeline.get(MONTHS, params={"album": smart["id"]}).json() == {"items": ["2025-04"]}
+    for library in ("alpha", "zulu"):
+        asset = timeline.get(f"/api/libraries/{library}/assets/1?details=browser").json()
+        assert asset["revision"] == 1
+        assert asset["rating"] == 4
+        assert asset["user_tags"] == ["Sunsets"]
+
+    update = smart_settings | {"filters": {"start": "2025-03-31"}, "expected_revision": 0}
+    assert timeline.patch(f"{albums}/{smart['id']}", json=update).json()["revision"] == 1
+    assert timeline.patch(f"{albums}/{smart['id']}", json=update).status_code == 409
+    assert timeline.delete(f"{albums}/{smart['id']}?revision=0").status_code == 409
+    assert timeline.delete(f"{albums}/{smart['id']}?revision=1").status_code == 204
+    assert timeline.get(TIMELINE, params={"album": smart["id"]}).status_code == 404
+    assert timeline.get(albums, headers={"X-Photocull-Token": ""}).status_code == 401
+
+
+def test_batch_selection_reports_and_retries_independent_catalogs(timeline):
+    bulk = "/api/browse/selection/labels"
+    body = {
+        "assets": [{"library": "alpha", "id": 1}, {"library": "zulu", "id": 900}],
+        "favorite": True,
+    }
+    albums = "/api/browse/albums"
+    album = timeline.post(albums, json={"name": "Source check"}).json()["id"]
+    members = f"{albums}/{album}/members"
+    assert timeline.post(members, json={"assets": body["assets"]}).status_code == 409
+    assert timeline.get(TIMELINE, params={"album": album}).json()["items"] == []
+    assert timeline.patch(bulk, json=body).json()["items"] == [
+        {"library": "alpha", "count": 1, "status": "done"},
+        {"library": "zulu", "count": 1, "status": "stale"},
+    ]
+    assert timeline.patch(bulk, json={"assets": body["assets"] * 101}).status_code == 422
+    for asset_id in (1, 2, 3):
+        labels = f"/api/browse/alpha/assets/{asset_id}/labels"
+        for batch in range(3):
+            tags = [f"tag-{i}" for i in range(batch * 22, min((batch + 1) * 22, 64))]
+            assert timeline.patch(labels, json={"add_tags": tags}).status_code == 200
+    body = {
+        "assets": [{"library": "alpha", "id": i, "expected_revision": 0} for i in (1, 2)],
+        "rating": 5,
+        "add_tags": ["too-many"],
+    }
+    assert timeline.patch(bulk, json=body).json()["items"] == [
+        {"library": "alpha", "count": 2, "status": "tag_limit"}
+    ]
+    assert timeline.get("/api/libraries/alpha/assets/1").json()["rating"] == 0
+
+
+def test_batch_rating_uses_the_selection_revision_in_each_library(timeline):
+    bulk = "/api/browse/selection/labels"
+    items = timeline.get(TIMELINE).json()["items"]
+    refs = {
+        (item["library"], item["id"]): {
+            "library": item["library"],
+            "id": item["id"],
+            "expected_revision": item["revision"],
+        }
+        for item in items
+    }
+    get_asset = "/api/libraries/alpha/assets/1"
+    first = refs["alpha", 1]
+    assert (
+        timeline.patch(
+            get_asset + "/rating",
+            json={"rating": 4, "rejected": False, "expected_revision": first["expected_revision"]},
+        ).status_code
+        == 200
+    )
+    assert (
+        timeline.patch(
+            bulk, json={"assets": [{"library": "alpha", "id": 1}], "rating": 1}
+        ).status_code
+        == 422
+    )
+    assert timeline.patch(bulk, json={"assets": [first, first], "rating": 1}).status_code == 422
+    body = {"assets": [first, refs["alpha", 2], refs["zulu", 1]], "rating": 1, "favorite": True}
+    assert timeline.patch(bulk, json=body).json()["items"] == [
+        {"library": "alpha", "count": 2, "status": "conflict"},
+        {"library": "zulu", "count": 1, "status": "done"},
+    ]
+    assert timeline.get(get_asset).json()["rating"] == 4
+    assert timeline.get("/api/libraries/alpha/assets/2").json()["rating"] == 0
+    assert timeline.get("/api/libraries/zulu/assets/1").json()["rating"] == 1
+    detail = timeline.get(get_asset, params={"details": "browser"}).json()
+    assert not detail["favorite"]
+
+
+def test_browser_migrates_existing_catalog_and_initializes_album_db(tmp_path):
+    from photocull.db import MIGRATIONS, initialize
+
+    settings = Settings(
+        libraries={"alpha": Library(root=tmp_path / "photos")}, state_dir=tmp_path / "state"
+    )
+    path = settings.library_state("alpha") / "index.db"
+    initialize(path, MIGRATIONS[:22])
+    with connect(path) as db, write(db):
+        db.execute("INSERT INTO scan_requests(id,status,created_at) VALUES(1,'done',0)")
+        db.executemany(
+            """INSERT INTO assets(id,path,folder,kind,size,mtime_ns,content_hash,scan_id,day,
+                                  captured_at,active,rating)
+               VALUES (?,'frame-' || ? || '.jpg','','image',64,0,?,1,'2025-01-02',?,?,4)""",
+            ((1, 1, "a" * 64, "2025-01-02T03:04:05", 1), (2, 2, "b" * 64, None, 0)),
+        )
+        db.execute("""INSERT INTO jobs(asset_id,stage,content_hash,status,attempts)
+                      SELECT id,'exif',content_hash,'done',1 FROM assets""")
+
+    for startup in range(2):
+        with TestClient(create_app(settings)) as client, connect(path) as db:
+            assert db.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+            assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            assert not db.execute("PRAGMA foreign_key_check").fetchall()
+            rows = db.execute("SELECT id, rating, timeline_time, favorite FROM assets ORDER BY id")
+            assert [tuple(row) for row in rows] == [(1, 4, "2025-01-02T03:04:05", 0), (2, 4, "", 0)]
+            rows = db.execute(
+                "SELECT status,attempts FROM jobs WHERE stage='exif' ORDER BY asset_id"
+            )
+            assert [tuple(row) for row in rows] == [("pending", 0), ("done", 1)]
+            stage_counts = dict(
+                db.execute("SELECT status,count FROM stage_counts WHERE stage='exif'")
+            )
+            assert stage_counts == {"done": 1, "pending": 1}
+            path_collections = settings.state_dir / "browser.db"
+            with connect(path_collections) as browser:
+                assert browser.execute("PRAGMA user_version").fetchone()[0] == 1
+                assert browser.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            if startup == 0:
+                result = client.post("/api/browse/albums", json={"name": "Migration album"})
+                assert result.status_code == 201
+            assert client.get("/api/browse/albums").json()["items"][0]["name"] == "Migration album"
+            assert client.get(TIMELINE).json()["items"][0]["id"] == 1

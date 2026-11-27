@@ -5,6 +5,7 @@ import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { assetName, json, mediaUrl, request, useRemote } from '../api'
 import type { Rating } from '../api'
+import type { Album } from './collections'
 import { Delivery, deliveryText } from './Delivery'
 import type { FilterValues } from './filterValues'
 import type { Language } from './location'
@@ -22,7 +23,7 @@ import type { LabelUpdate, PhotoLabels, ViewerAsset } from './viewer'
 import './viewer.css'
 
 export function Preview({ photo, asset, media, mediaLoading, text, lang, close, previous, next,
-  neighbors, advance, onLabels, filterBy }: {
+  neighbors, advance, onLabels, filterBy, openAlbum }: {
   photo: string
   asset?: TimelineAsset
   media?: BrowserMedia
@@ -36,6 +37,7 @@ export function Preview({ photo, asset, media, mediaLoading, text, lang, close, 
   advance: (random: boolean) => boolean
   onLabels: (photo: string, labels: PhotoLabels) => void
   filterBy: (filter: FilterValues) => void
+  openAlbum: (album: Album) => void
 }) {
   const dialog = useRef<HTMLDialogElement>(null)
   const viewer = useRef<HTMLDivElement>(null)
@@ -264,7 +266,8 @@ export function Preview({ photo, asset, media, mediaLoading, text, lang, close, 
         {information && <PhotoInformation key={photo} asset={updated} text={text} lang={lang} boxes={showFaces}
           toggleBoxes={() => setShowFaces(!showFaces)} loading={indexing} error={result?.error}
           retry={retry} rate={(value) => { void rate(value) }} busy={saving} editLabels={editLabels}
-          labelSaving={labelSaving} labelFailed={labelFailed === photo} filterBy={filterBy} />}
+          labelSaving={labelSaving} labelFailed={labelFailed === photo} filterBy={filterBy}
+          albumAsset={{ library, id: Number(assetId) }} openAlbum={openAlbum} />}
       </div>
       <div className="pcb-viewer-footer">
         {!isVideo && <>

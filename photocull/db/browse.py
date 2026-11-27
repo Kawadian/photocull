@@ -19,6 +19,26 @@ class TimelineKey(NamedTuple):
     asset_id: int
 
 
+def _attach_collections(db: sqlite3.Connection, settings: Settings, album: str | None) -> None:
+    if album:
+        db.execute("ATTACH DATABASE ? AS collections", (str(settings.state_dir / "browser.db"),))
+
+
+def _conditions(
+    db: sqlite3.Connection,
+    library: str,
+    filters: Filters | None,
+    settings: Settings,
+    album: str | None,
+) -> tuple[str, list]:
+    conditions, params = clauses(db, library, filters, settings) if filters else ([], [])
+    if album:
+        conditions.append("""a.id IN (SELECT asset_id FROM collections.album_members
+            WHERE album_id = ? AND library = ?)""")
+        params.extend((album, library))
+    return "".join(f" AND ({condition})" for condition in conditions), params
+
+
 def _library_page(
     db: sqlite3.Connection,
     library: str,
@@ -28,14 +48,14 @@ def _library_page(
     recipe: str | None,
     filters: Filters,
     settings: Settings,
+    manual_album: str | None,
 ) -> list[tuple[TimelineKey, sqlite3.Row]]:
-    conditions, params = clauses(db, library, filters, settings)
-    where = "".join(f" AND ({condition})" for condition in conditions)
+    where, params = _conditions(db, library, filters, settings, manual_album)
 
     def fetch(bound: str, args: tuple, count: int) -> list[sqlite3.Row]:
         return db.execute(
             f"""SELECT a.id, a.day, a.timeline_time, a.path, a.kind, a.width, a.height,
-                       a.duration, a.content_hash, a.favorite,
+                       a.duration, a.content_hash, a.favorite, a.revision,
                        p.status AS preview_status, d.blurhash
                 FROM assets AS a
                 LEFT JOIN jobs AS p ON p.asset_id = a.id AND p.stage = 'preview'
@@ -77,13 +97,17 @@ def timeline_page(
     recipe: str | None,
     filters: Filters,
     settings: Settings,
+    manual_album: str | None = None,
 ) -> tuple[list[dict], TimelineKey | None]:
     pages = []
     for library, path in libraries.items():
         with connect(path) as db:
+            _attach_collections(db, settings, manual_album)
             db.execute("BEGIN")
             pages.append(
-                _library_page(db, library, limit + 1, month, after, recipe, filters, settings)
+                _library_page(
+                    db, library, limit + 1, month, after, recipe, filters, settings, manual_album
+                )
             )
     rows = list(islice(merge(*pages, key=lambda item: item[0], reverse=True), limit + 1))
     next_key = rows[limit - 1][0] if len(rows) > limit else None
@@ -98,12 +122,13 @@ def timeline_page(
     return items, next_key
 
 
-def _library_months(db: sqlite3.Connection) -> Iterator[str]:
+def _library_months(db: sqlite3.Connection, where: str, params: list) -> Iterator[str]:
     # Seek to the preceding month without visiting all the photos in the current month.
     before = ":"
     while row := db.execute(
-        """SELECT day FROM assets WHERE active = 1 AND day < ? ORDER BY day DESC LIMIT 1""",
-        (before,),
+        f"""SELECT a.day FROM assets AS a
+            WHERE a.active = 1 AND a.day < ? {where} ORDER BY a.day DESC LIMIT 1""",
+        (before, *params),
     ).fetchone():
         month = row["day"][:7]
         month_start = f"{month}-01"
@@ -112,12 +137,19 @@ def _library_months(db: sqlite3.Connection) -> Iterator[str]:
         before = min(month_start, row["day"])
 
 
-def timeline_months(libraries: Mapping[str, Path]) -> list[str]:
+def timeline_months(
+    libraries: Mapping[str, Path],
+    settings: Settings,
+    filters: Filters | None = None,
+    manual_album: str | None = None,
+) -> list[str]:
     months: set[str] = set()
-    for path in libraries.values():
+    for library, path in libraries.items():
         with connect(path) as db:
+            _attach_collections(db, settings, manual_album)
             db.execute("BEGIN")
-            months.update(_library_months(db))
+            where, params = _conditions(db, library, filters, settings, manual_album)
+            months.update(_library_months(db, where, params))
     return sorted(months, reverse=True)
 
 

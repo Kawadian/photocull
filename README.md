@@ -2,7 +2,7 @@
 
 Photocull is a self-hosted photo and video culler for a LAN or Tailscale network. Browse by folder, capture day or burst, review previews with a filmstrip and keyboard, and export ratings as XMP sidecars. Optional CPU ML adds Japanese and English photo search, similar-photo groups and automatic tags. The FastAPI service and SQLite indexing worker run independently, so you can browse and rate while the worker scans or restarts.
 
-Open **Photo browser** for a cross-library capture timeline with a justified photo grid, month navigation and shareable photo previews. The grid supports touch, keyboard navigation and three densities. Choose English or Japanese in the browser header. [Photo browser guide](docs/BROWSER.md)
+Open **Photo browser** for a cross-library capture timeline with a justified photo grid, month navigation and shareable photo previews. The grid supports touch, keyboard navigation and three densities. Use manual or smart albums to organize photos across libraries. Sharing, rendered downloads and exports offer a location setting with a location-free default. Choose English or Japanese in the browser header. [Photo browser guide](docs/BROWSER.md)
 
 The viewer supports fullscreen, touch zoom and pan, slideshow, EXIF information, face boxes and video highlights. The worker prepares responsive AVIF, WebP and JPEG images and two fast-start video proxies. Optional original downloads use the existing authentication. [Viewer guide](docs/BROWSER.md#viewer) · [Cache configuration](docs/BROWSER.md#cache-configuration-and-migration)
 
