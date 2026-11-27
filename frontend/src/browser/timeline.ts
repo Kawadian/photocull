@@ -19,7 +19,8 @@ export function browseUrl(endpoint: 'timeline' | 'months', library: string, mont
   if (library) query.set('library', library)
   if (month) query.set('month', month)
   if (cursor) query.set('cursor', cursor)
-  return '/api/browse/' + endpoint + (query.size ? '?' + query : '')
+  const serialized = query.toString()
+  return '/api/browse/' + endpoint + (serialized ? '?' + serialized : '')
 }
 
 type Load = { cursor: string | null }
