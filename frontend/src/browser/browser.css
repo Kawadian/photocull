@@ -244,6 +244,18 @@
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
+.pcb-favorite-chip {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  color: #ffc4ca;
+  background: #131915db;
+}
 @media (hover: hover) {
   .pcb-tile:hover img { filter: brightness(1.08); }
 }

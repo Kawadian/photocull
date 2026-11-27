@@ -1,9 +1,11 @@
-import { ScanFace, Star } from 'lucide-react'
+import { Heart, Plus, ScanFace, Star, X } from 'lucide-react'
+import { useState } from 'react'
 import type { ReactNode } from 'react'
+import type { FilterValues } from './filterValues'
 import type { Language } from './location'
 import { formatDate } from './strings'
 import type { Strings } from './strings'
-import type { ViewerAsset } from './viewer'
+import type { LabelUpdate, ViewerAsset } from './viewer'
 
 function Fact({ label, children }: { label: string; children: ReactNode }) {
   if (children == null || children === '') return null
@@ -17,7 +19,7 @@ function exposure(value: number | null, number: Intl.NumberFormat) {
 }
 
 export function PhotoInformation({ asset, loading, error, retry, text, lang, boxes, toggleBoxes,
-  rate, busy }: {
+  rate, busy, editLabels, labelSaving, labelFailed, filterBy }: {
   asset?: ViewerAsset
   loading: boolean
   error?: string
@@ -28,7 +30,12 @@ export function PhotoInformation({ asset, loading, error, retry, text, lang, box
   toggleBoxes: () => void
   rate: (value: number) => void
   busy: boolean
+  editLabels: (change: LabelUpdate) => Promise<boolean>
+  labelSaving: boolean
+  labelFailed: boolean
+  filterBy: (filter: FilterValues) => void
 }) {
+  const [tag, setTag] = useState('')
   const number = new Intl.NumberFormat(lang, { maximumFractionDigits: 1 })
   const percent = new Intl.NumberFormat(lang, { style: 'percent', maximumFractionDigits: 1 })
   const date = asset?.captured_at
@@ -40,7 +47,14 @@ export function PhotoInformation({ asset, loading, error, retry, text, lang, box
   const people = [...new Map(asset?.faces.map((face) => [face.person_id, face.name]) ?? []).entries()]
 
   return <aside className="pcb-information" aria-label={text.information}>
-    <h2>{text.information}</h2>
+    <div className="pcb-information-title">
+      <h2>{text.information}</h2>
+      {asset && <button className="pcb-icon pcb-favorite" type="button"
+        title={text.favorite} aria-label={text.favorite} aria-pressed={asset.favorite}
+        disabled={labelSaving} onClick={() => { void editLabels({ favorite: !asset.favorite }) }}>
+        <Heart size={18} fill={asset.favorite ? 'currentColor' : 'none'} aria-hidden="true" />
+      </button>}
+    </div>
     {!asset ? <div className="pcb-information-status" role="status">
       <p>{error ? text.photoError : text.loadingPhoto}</p>
       {error && <button type="button" className="pcb-control" onClick={retry}>{text.retry}</button>}
@@ -69,10 +83,33 @@ export function PhotoInformation({ asset, loading, error, retry, text, lang, box
       </dl>
       {loading && <p className="pcb-information-status" role="status">{text.preparingMetadata}</p>}
       {!!asset.tags?.length && <section>
-        <h3>{text.tags}</h3>
+        <h3>{text.automaticTags}</h3>
         <ul className="pcb-information-chips">{asset.tags.map((tag) =>
-          <li key={tag.tag}>{tag.label}</li>)}</ul>
+          <li key={tag.tag}><button type="button" onClick={() => filterBy({ tag: 'auto:' + tag.tag })}>
+            {tag.label}
+          </button></li>)}</ul>
       </section>}
+      <section>
+        <h3>{text.userTags}</h3>
+        {!!asset.user_tags.length && <ul className="pcb-information-chips">{asset.user_tags.map((tag) =>
+          <li key={tag}>
+            <button type="button" onClick={() => filterBy({ tag: 'user:' + tag })}>{tag}</button>
+            <button type="button" aria-label={text.removeTag + ' ' + tag} title={text.removeTag}
+              disabled={labelSaving} onClick={() => { void editLabels({ remove_tags: [tag] }) }}>
+              <X size={14} aria-hidden="true" />
+            </button>
+          </li>)}</ul>}
+        <form className="pcb-tag-form" onSubmit={(event) => {
+          event.preventDefault()
+          if (tag.trim()) void editLabels({ add_tags: [tag.trim()] }).then((saved) => { if (saved) setTag('') })
+        }}>
+          <input aria-label={text.tagName} placeholder={text.tagName} maxLength={64}
+            value={tag} onChange={(event) => setTag(event.target.value)} />
+          <button type="submit" className="pcb-icon" title={text.addTag} aria-label={text.addTag}
+            disabled={labelSaving || !tag.trim()}><Plus size={18} aria-hidden="true" /></button>
+        </form>
+        {labelFailed && <p className="pcb-information-status" role="alert">{text.labelError}</p>}
+      </section>
       {!!people.length && <section>
         <h3>{text.people}</h3>
         <ul className="pcb-information-chips">{people.map(([id, name]) =>

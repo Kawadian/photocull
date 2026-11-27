@@ -1,0 +1,65 @@
+.pcb-filter-dialog {
+  width: min(100% - 32px, 560px);
+  max-height: min(90dvh, 820px);
+  padding: 0;
+  border: 1px solid var(--pcb-edge);
+  border-radius: 12px;
+  color: var(--pcb-text);
+  background: var(--pcb-surface);
+  box-shadow: 0 15px 55px #0005;
+  overflow: hidden;
+}
+.pcb-filter-dialog::backdrop { background: #1119159c; }
+.pcb-filter-form { display: flex; flex-direction: column; max-height: min(90dvh, 820px); }
+.pcb-filter-form > :is(header, footer) {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 16px;
+}
+.pcb-filter-form h2 { font-size: 20px; }
+.pcb-filter-form header { border-bottom: 1px solid var(--pcb-edge); }
+.pcb-filter-form footer { border-top: 1px solid var(--pcb-edge); }
+.pcb-filter-form .pcb-apply { background: var(--pcb-soft); color: var(--pcb-accent); }
+.pcb-filter-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  gap: 12px;
+  padding: 15px 16px;
+}
+.pcb-filter-field { display: grid; gap: 4px; font-size: 13px; color: var(--pcb-muted); }
+.pcb-filter-field :is(select, input) {
+  height: 44px;
+  width: 100%;
+  min-width: 0;
+  padding: 4px 7px;
+  border: 1px solid var(--pcb-edge);
+  border-radius: 8px;
+  color: var(--pcb-text);
+  background: var(--pcb-bg);
+}
+.pcb-filter-flags {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+.pcb-favorite-filter { display: flex; align-items: center; gap: 6px; min-height: 44px; font-size: 13px; }
+.pcb-favorite-filter input { width: 20px; height: 20px; accent-color: var(--pcb-accent); }
+.pcb-filter-status { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.pcb-filters-toggle { gap: 6px; }
+.pcb .pcb-filters-toggle[data-active="true"] { background: var(--pcb-soft); color: var(--pcb-accent); }
+
+@media (max-width: 700px) {
+  .pcb-filters-toggle { position: absolute; top: 12px; right: calc(var(--pcb-gutter) + 48px); }
+  .pcb-filters-toggle .pcb-filter-label { display: none; }
+  .pcb-filter-dialog { width: calc(100% - 22px); max-height: 92dvh; }
+  .pcb-filter-form { max-height: 92dvh; }
+  .pcb-filter-fields { gap: 10px; padding-inline: 12px; }
+}

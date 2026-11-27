@@ -151,6 +151,8 @@
   background: #202522;
 }
 .pcb-information h2 { font-size: 17px; font-weight: 700; }
+.pcb-information-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pcb-favorite[aria-pressed="true"] { color: #ffc4ca; border-color: #c2878a; }
 .pcb-information h3 { font-size: 13px; font-weight: 650; margin: 0 0 8px; }
 .pcb-information section { padding: 12px 0; border-top: 1px solid #3a433e; }
 .pcb-information-status { margin-top: 12px; color: #c6d5cb; font-size: 13px; }
@@ -171,6 +173,35 @@
   padding: 0;
 }
 .pcb-information-chips li { background: #344038; border-radius: 5px; padding: 5px 7px; font-size: 12px; }
+.pcb-information-chips li:has(button) {
+  display: inline-flex;
+  align-items: stretch;
+  min-height: 44px;
+  max-width: 100%;
+  padding: 0;
+}
+.pcb-information-chips button {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  overflow-wrap: anywhere;
+}
+.pcb-information-chips button:has(svg) { min-width: 44px; justify-content: center; }
+.pcb-tag-form { display: flex; gap: 6px; }
+.pcb-tag-form input {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  border: 1px solid #526058;
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: #151917;
+  color: #ecf1ed;
+}
 
 .pcb-viewer-footer {
   flex: 0 0 auto;

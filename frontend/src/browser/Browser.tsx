@@ -1,7 +1,9 @@
-import { Aperture, CalendarDays, Grid2X2, Images, RefreshCw, SlidersHorizontal } from 'lucide-react'
+import { Aperture, CalendarDays, Grid2X2, Images, ListFilter, RefreshCw, SlidersHorizontal } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useRemote } from '../api'
 import type { Library } from '../api'
+import { FiltersDialog, filterText } from './Filters'
+import type { FilterValues } from './filterValues'
 import { TimelineGrid } from './Grid'
 import { densities, readLocation, writeLocation } from './location'
 import type { BrowserLocation, Density, Language } from './location'
@@ -22,12 +24,15 @@ function Timeline({ location, months, navigate, jump, close }: {
   close: () => void
 }) {
   const text = strings[location.lang]
+  const filters = filterText[location.lang]
   const feed = useTimeline(location)
   const media = feed.media
   const { next: cursor, busy, error, loadMore } = feed
   const loaded = feed.assets.length
   const [currentMonth, setCurrentMonth] = useState('')
   const opener = useRef<HTMLButtonElement>(null)
+  const refreshLabels = useRef(false)
+  const { reload, setFavorite } = feed
   const index = location.photo ? feed.assets.findIndex((asset) => assetKey(asset) === location.photo) : -1
   const openPhoto = (offset: number) => navigate({ photo: assetKey(feed.assets[index + offset]) }, true)
   const neighbors: TimelineAsset[] = []
@@ -47,7 +52,11 @@ function Timeline({ location, months, navigate, jump, close }: {
     if (location.photo) return
     opener.current?.focus({ preventScroll: true })
     opener.current = null
-  }, [location.photo])
+    if (refreshLabels.current) {
+      reload()
+      refreshLabels.current = false
+    }
+  }, [location.photo, reload])
 
   useEffect(() => {
     if (index >= 0 && index >= loaded - 5 && cursor && !error && !busy) loadMore()
@@ -71,8 +80,10 @@ function Timeline({ location, months, navigate, jump, close }: {
         <p>{text.loading}</p>
       </div> : !feed.assets.length ? <div className="pcb-state">
         <Images size={28} aria-hidden="true" />
-        <p>{text.noPhotos}</p>
-        {location.month
+        <p>{Object.keys(location.filters).length ? filters.noMatch : text.noPhotos}</p>
+        {Object.keys(location.filters).length
+          ? <button type="button" className="pcb-control" onClick={() => navigate({ filters: {} })}>{filters.reset}</button>
+          : location.month
           ? <button type="button" className="pcb-control" onClick={() => navigate({ month: '' })}>{text.chooseLatest}</button>
           : <span>{text.quietEmpty}</span>}
       </div> : !!feed.next && <div className="pcb-page-status">
@@ -84,6 +95,11 @@ function Timeline({ location, months, navigate, jump, close }: {
     {location.photo && <Preview photo={location.photo} asset={feed.assets[index]} media={media}
       mediaLoading={!feed.completed}
       text={text} lang={location.lang} neighbors={neighbors} advance={advance} close={close}
+      onLabels={(key, labels) => {
+        setFavorite(key, labels.favorite)
+        if (location.filters.favorite || location.filters.tag?.startsWith('user:')) refreshLabels.current = true
+      }}
+      filterBy={(filter) => navigate({ filters: { ...location.filters, ...filter }, photo: '', month: '' })}
       previous={index > 0 ? () => openPhoto(-1) : undefined}
       next={index >= 0 && index < feed.assets.length - 1 ? () => openPhoto(1) : undefined} />}
   </div>
@@ -93,7 +109,11 @@ export default function Browser() {
   const [location, setLocation] = useState(readLocation)
   const [refresh, setRefresh] = useState(0)
   const [jumpRevision, setJumpRevision] = useState(0)
+  const [filterOpen, setFilterOpen] = useState(false)
+  const filterButton = useRef<HTMLButtonElement>(null)
   const text = strings[location.lang]
+  const filters = filterText[location.lang]
+  const activeFilters = Object.keys(location.filters).length
   const libraries = useRemote<{ items: Library[] }>('/api/libraries', refresh)?.data?.items ?? []
   const result = useRemote<{ items: string[] }>(browseUrl('months', location.library), refresh)
   const months = result?.data?.items ?? []
@@ -127,6 +147,16 @@ export default function Browser() {
     else navigate({ month })
   }
 
+  function closeFilters() {
+    setFilterOpen(false)
+    requestAnimationFrame(() => filterButton.current?.focus())
+  }
+
+  function applyFilters(values: FilterValues) {
+    navigate({ filters: values, month: '' })
+    closeFilters()
+  }
+
   return <div className="pcb" lang={location.lang}>
     <header className="pcb-header">
       <div className="pcb-header-inner">
@@ -145,6 +175,13 @@ export default function Browser() {
     <div className="pcb-toolbar">
       <h1>{text.timeline}</h1>
       <div className="pcb-tools">
+        <button className="pcb-control pcb-filters-toggle" type="button" ref={filterButton}
+          title={filters.title} aria-label={filters.title} aria-haspopup="dialog"
+          data-active={activeFilters > 0} onClick={() => setFilterOpen(true)}>
+          <ListFilter size={17} aria-hidden="true" />
+          <span className="pcb-filter-label">{filters.title}</span>
+          {activeFilters > 0 && <span>{activeFilters}</span>}
+        </button>
         <label className="pcb-control pcb-library">
           <Images size={16} aria-hidden="true" />
           <select aria-label={text.library} value={location.library}
@@ -178,7 +215,8 @@ export default function Browser() {
         </button>
       </div>
     </div>
-    <Timeline key={JSON.stringify([location.library, location.month, refresh, jumpRevision])}
+    <Timeline key={JSON.stringify([location.library, location.month, location.filters, refresh, jumpRevision])}
       location={location} months={months} navigate={navigate} jump={jump} close={closePhoto} />
+    {filterOpen && <FiltersDialog location={location} text={text} apply={applyFilters} close={closeFilters} />}
   </div>
 }

@@ -2,19 +2,29 @@ from __future__ import annotations
 
 from base64 import b64decode, urlsafe_b64encode
 from binascii import Error as BinaryError
+from hashlib import sha256
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import Path as RoutePath
 from pydantic import BaseModel, Field, ValidationError
 
 from photocull.config import LibraryName, Settings
+from photocull.db import connect
 from photocull.db.browse import TimelineKey, timeline_months, timeline_page
+from photocull.db.browse_filters import Filters, LabelUpdate, apply_labels, facets
 from photocull.media.derivatives import recipe
 
 MONTH_PATTERN = r"^[0-9]{4}-(0[1-9]|1[0-2])$"
-MonthQuery = Annotated[str, Query(pattern=MONTH_PATTERN)]
-CursorQuery = Annotated[str, Query(max_length=384, pattern=r"^[A-Za-z0-9_-]+$")]
+Id = Annotated[int, RoutePath(gt=0, le=2**63 - 1)]
+
+
+class TimelineQuery(Filters):
+    library: LibraryName | None = None
+    month: str | None = Field(default=None, pattern=MONTH_PATTERN)
+    cursor: str | None = Field(default=None, max_length=512, pattern=r"^[A-Za-z0-9_-]+$")
+    limit: int = Field(default=72, ge=1, le=120)
 
 
 class TimelineCursor(BaseModel):
@@ -24,6 +34,7 @@ class TimelineCursor(BaseModel):
     asset_id: int = Field(gt=0, le=2**63 - 1)
     scope: LibraryName | None
     month: str | None
+    filters: str = ""
 
     @classmethod
     def decode(cls, cursor: str) -> TimelineCursor:
@@ -65,25 +76,50 @@ def browse_router(settings: Settings) -> APIRouter:
     def browse_media():
         return media
 
+    @router.get("/facets")
+    def filter_options(response: Response, library: LibraryName | None = None):
+        response.headers["Cache-Control"] = "private, no-cache"
+        return facets(select(library), settings)
+
+    @router.patch("/{library}/assets/{asset_id}/labels")
+    def update_labels(library: LibraryName, asset_id: Id, change: LabelUpdate):
+        with connect(select(library)[library]) as db:
+            try:
+                result = apply_labels(db, asset_id, change)
+            except ValueError as error:
+                raise HTTPException(422, str(error)) from error
+        if result is None:
+            raise HTTPException(404, "Unknown asset")
+        return result
+
     @router.get("/timeline")
     def timeline(
         response: Response,
-        library: LibraryName | None = None,
-        month: MonthQuery | None = None,
-        cursor: CursorQuery | None = None,
-        limit: Annotated[int, Query(ge=1, le=120)] = 72,
+        query: Annotated[TimelineQuery, Query()],
     ):
+        library, month, cursor, limit = query.library, query.month, query.cursor, query.limit
+        scoped = query.model_dump_json(
+            exclude={"library", "month", "cursor", "limit"}, exclude_none=True
+        )
+        fingerprint = sha256(scoped.encode()).hexdigest()[:16] if scoped != "{}" else ""
         selected = select(library)
         after = None
         if cursor is not None:
             value = TimelineCursor.decode(cursor)
-            if value.scope != library or value.month != month or value.library not in selected:
+            if (
+                value.scope != library
+                or value.month != month
+                or value.library not in selected
+                or value.filters != fingerprint
+            ):
                 raise HTTPException(422, "Cursor does not match the timeline scope")
             after = TimelineKey(value.day, value.time, value.library, value.asset_id)
 
-        items, next_key = timeline_page(selected, limit, month, after, encoding)
+        items, next_key = timeline_page(selected, limit, month, after, encoding, query, settings)
         next_cursor = (
-            TimelineCursor(**next_key._asdict(), scope=library, month=month).encode()
+            TimelineCursor(
+                **next_key._asdict(), scope=library, month=month, filters=fingerprint
+            ).encode()
             if next_key
             else None
         )

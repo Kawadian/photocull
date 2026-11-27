@@ -121,6 +121,9 @@ def test_people_aesthetic_and_learned_taste_survive_restarts(tmp_path):
                 **{field: faces[0][field] for field in ("left", "top", "right", "bottom")},
             }
         ]
+        browser = get(client, "/api/browse/timeline?person=name:Mika&min_aesthetic=0.75")
+        assert len(browser["items"]) == 3
+        assert all(int(item["name"].split(".")[0]) % 2 == 0 for item in browser["items"])
         split = payload(
             client.post(
                 f"{URL}/people/{left}/split",

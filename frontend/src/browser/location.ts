@@ -1,3 +1,6 @@
+import { readFilters, writeFilters } from './filterValues'
+import type { FilterValues } from './filterValues'
+
 export type Density = 'compact' | 'comfortable' | 'large'
 export type Language = 'en' | 'ja'
 
@@ -7,6 +10,7 @@ export type BrowserLocation = {
   density: Density
   lang: Language
   photo: string
+  filters: FilterValues
 }
 
 export const densities: Density[] = ['compact', 'comfortable', 'large']
@@ -24,6 +28,7 @@ export function readLocation(): BrowserLocation {
     density: density === 'compact' || density === 'large' ? density : 'comfortable',
     lang: lang === 'ja' || lang === 'en' ? lang : navigator.language.startsWith('ja') ? 'ja' : 'en',
     photo: /^[\w-]{1,64}:[1-9]\d{0,18}$/.test(photo) ? photo : '',
+    filters: readFilters(query),
   }
 }
 
@@ -33,6 +38,7 @@ export function writeLocation(next: BrowserLocation, replace = false) {
   if (next.month) query.set('month', next.month)
   if (next.density !== 'comfortable') query.set('density', next.density)
   if (next.photo) query.set('photo', next.photo)
+  writeFilters(query, next.filters)
   const method = replace ? 'replaceState' : 'pushState'
   window.history[method]({
     photocullPhoto: replace ? window.history.state?.photocullPhoto : !!next.photo,

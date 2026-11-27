@@ -61,7 +61,6 @@ const en = {
   aperture: 'Aperture',
   focalLength: 'Focal length',
   preparingMetadata: 'Reading shooting metadata…',
-  tags: 'Tags',
   people: 'People',
   unnamedPerson: 'Unnamed person',
   faceBoxes: 'Face boxes',
@@ -71,6 +70,13 @@ const en = {
   sharpness: 'Sharpness',
   aesthetic: 'Aesthetic score',
   highlights: 'Video highlights',
+  favorite: 'Favorite',
+  userTags: 'User tags',
+  automaticTags: 'Automatic tags',
+  addTag: 'Add tag',
+  tagName: 'Tag name',
+  removeTag: 'Remove tag',
+  labelError: 'Could not save the change. Try again.',
 }
 
 export const strings: Record<Language, typeof en> = {
@@ -136,7 +142,6 @@ export const strings: Record<Language, typeof en> = {
     aperture: '絞り',
     focalLength: '焦点距離',
     preparingMetadata: '撮影情報を読み込み中…',
-    tags: 'タグ',
     people: '人物',
     unnamedPerson: '名前なし',
     faceBoxes: '顔の枠を表示',
@@ -146,6 +151,13 @@ export const strings: Record<Language, typeof en> = {
     sharpness: 'シャープネス',
     aesthetic: '美的スコア',
     highlights: '動画のハイライト',
+    favorite: 'お気に入り',
+    userTags: 'ユーザータグ',
+    automaticTags: '自動タグ',
+    addTag: 'タグを追加',
+    tagName: 'タグ名',
+    removeTag: 'タグを削除',
+    labelError: '変更を保存できませんでした。再試行してください。',
   },
 }
 

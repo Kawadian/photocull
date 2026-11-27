@@ -5,6 +5,7 @@ import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { assetName, json, mediaUrl, request, useRemote } from '../api'
 import type { Rating } from '../api'
+import type { FilterValues } from './filterValues'
 import type { Language } from './location'
 import { PhotoInformation } from './PhotoInformation'
 import { PhotoPlane } from './PhotoPlane'
@@ -16,10 +17,11 @@ import { assetKey, libraryUrl } from './timeline'
 import type { TimelineAsset } from './timeline'
 import { VideoPlayer } from './VideoPlayer'
 import { constrainedConnection } from './viewer'
-import type { ViewerAsset } from './viewer'
+import type { LabelUpdate, PhotoLabels, ViewerAsset } from './viewer'
 import './viewer.css'
 
-export function Preview({ photo, asset, media, mediaLoading, text, lang, close, previous, next, neighbors, advance }: {
+export function Preview({ photo, asset, media, mediaLoading, text, lang, close, previous, next,
+  neighbors, advance, onLabels, filterBy }: {
   photo: string
   asset?: TimelineAsset
   media?: BrowserMedia
@@ -31,6 +33,8 @@ export function Preview({ photo, asset, media, mediaLoading, text, lang, close, 
   next?: () => void
   neighbors: TimelineAsset[]
   advance: (random: boolean) => boolean
+  onLabels: (photo: string, labels: PhotoLabels) => void
+  filterBy: (filter: FilterValues) => void
 }) {
   const dialog = useRef<HTMLDialogElement>(null)
   const viewer = useRef<HTMLDivElement>(null)
@@ -45,6 +49,9 @@ export function Preview({ photo, asset, media, mediaLoading, text, lang, close, 
   const [rating, setRating] = useState<{ photo: string; value: Rating }>()
   const [ratingFailed, setRatingFailed] = useState('')
   const [saving, setSaving] = useState(false)
+  const [labelState, setLabelState] = useState<{ photo: string; labels: PhotoLabels }>()
+  const [labelSaving, setLabelSaving] = useState(false)
+  const [labelFailed, setLabelFailed] = useState('')
   const [playing, setPlaying] = useState(false)
   const [seconds, setSeconds] = useState(5)
   const [random, setRandom] = useState(false)
@@ -54,9 +61,10 @@ export function Preview({ photo, asset, media, mediaLoading, text, lang, close, 
   const assetUrl = base + '/assets/' + assetId
   const result = useRemote<ViewerAsset>(assetUrl + '?details=browser', revision)
   const details = result?.data
-  const updated = rating?.photo === photo && details && rating.value.revision >= details.revision
+  const rated = rating?.photo === photo && details && rating.value.revision >= details.revision
     ? { ...details, ...rating.value }
     : details
+  const updated = rated && labelState?.photo === photo ? { ...rated, ...labelState.labels } : rated
   const source = updated ?? asset
   const name = updated ? assetName(updated) : asset?.name
   const url = source ? mediaUrl(base, source, 'preview') : ''
@@ -150,6 +158,24 @@ export function Preview({ photo, asset, media, mediaLoading, text, lang, close, 
     }
   }
 
+  async function editLabels(change: LabelUpdate) {
+    if (labelSaving) return false
+    setLabelSaving(true)
+    setLabelFailed('')
+    try {
+      const url = '/api/browse/' + encodeURIComponent(library) + '/assets/' + assetId + '/labels'
+      const labels = await request<PhotoLabels>(url, json('PATCH', change))
+      setLabelState({ photo, labels })
+      onLabels(photo, labels)
+      return true
+    } catch {
+      setLabelFailed(photo)
+      return false
+    } finally {
+      setLabelSaving(false)
+    }
+  }
+
   function keydown(event: KeyboardEvent) {
     if (event.altKey || event.ctrlKey || event.metaKey || event.defaultPrevented) return
     if (event.target instanceof HTMLVideoElement || event.target instanceof HTMLSelectElement
@@ -231,9 +257,10 @@ export function Preview({ photo, asset, media, mediaLoading, text, lang, close, 
             </button>
           </div>}
         </div>
-        {information && <PhotoInformation asset={updated} text={text} lang={lang} boxes={showFaces}
+        {information && <PhotoInformation key={photo} asset={updated} text={text} lang={lang} boxes={showFaces}
           toggleBoxes={() => setShowFaces(!showFaces)} loading={indexing} error={result?.error}
-          retry={retry} rate={(value) => { void rate(value) }} busy={saving} />}
+          retry={retry} rate={(value) => { void rate(value) }} busy={saving} editLabels={editLabels}
+          labelSaving={labelSaving} labelFailed={labelFailed === photo} filterBy={filterBy} />}
       </div>
       <div className="pcb-viewer-footer">
         {!isVideo && <>
