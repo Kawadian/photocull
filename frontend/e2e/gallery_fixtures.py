@@ -101,6 +101,13 @@ def seed_gallery(settings, library: str, year: int) -> None:
             cache_path(state, "previews", asset_id, digest).write_bytes(preview)
             if asset_id >= 107:
                 seed_derivatives(settings, db, library, asset_id, digest, image)
+            if asset_id == 118:
+                db.execute(
+                    """UPDATE assets SET make='Photocull', model='Test Camera',
+                       lens='35 mm Prime', aperture=2.8, shutter_seconds=0.004,
+                       focal_length_mm=35, iso=200, latitude=35.68, longitude=139.76 WHERE id=?""",
+                    (asset_id,),
+                )
 
 
 def seed_derivatives(settings, db, library, asset_id, digest, image) -> None:

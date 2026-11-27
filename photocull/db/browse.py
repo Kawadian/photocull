@@ -106,3 +106,23 @@ def timeline_months(libraries: Mapping[str, Path]) -> list[str]:
             db.execute("BEGIN")
             months.update(_library_months(db))
     return sorted(months, reverse=True)
+
+
+def photo_details(db: sqlite3.Connection, asset: sqlite3.Row, face_key: str | None) -> dict:
+    camera = db.execute(
+        """SELECT lens, shutter_seconds, aperture, focal_length_mm, iso
+           FROM assets WHERE id = ?""",
+        (asset["id"],),
+    ).fetchone()
+    faces = (
+        db.execute(
+            """SELECT f.id, p.name, f.person_id, f.left, f.top, f.right, f.bottom
+               FROM faces AS f JOIN people AS p ON p.id = f.person_id
+               WHERE f.asset_id = ? AND f.key = ? AND f.content_hash = ?
+               ORDER BY f.id LIMIT 100""",
+            (asset["id"], face_key, asset["content_hash"]),
+        ).fetchall()
+        if face_key is not None
+        else []
+    )
+    return {**dict(camera), "faces": [dict(row) for row in faces]}

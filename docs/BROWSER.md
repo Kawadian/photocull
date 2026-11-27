@@ -22,6 +22,21 @@ Open **Photo browser** in the Photocull header. The default scope includes every
 
 Tab into the grid and use the arrow keys to move between thumbnails. Enter opens a preview. Left and Right step through the loaded photos, and Escape closes the preview. Listings and photo previews have shareable URLs. Use **Refresh timeline** after a scan or to update pending thumbnails. For a video, choose a quality and select **Prepare playback**. **Download original** appears when the server enables it.
 
+## Viewer
+
+| Action | Keyboard | Touch or pointer |
+| --- | --- | --- |
+| Previous or next | Left or Right | Swipe horizontally from fit view or use the arrow buttons |
+| Fullscreen | F | Fullscreen button |
+| Photo information | I | Information button |
+| Zoom or pan | Plus or Minus for zoom | Pinch, double tap and drag |
+| Rate or clear the rating | 1–5 or 0 | Stars in the information panel |
+| Close | Escape | Close button |
+
+The viewer paints the placeholder and thumbnail while the fit image loads. It uses the native JPEG for supported zoom requests. Automatic full-resolution requests and neighbor thumbnail preloading pause on a connection marked slow or Save-Data. Use the **100%** control to request full resolution explicitly. Slideshow settings include interval, random order and a fade that honors the device's reduced-motion setting.
+
+The information panel reads existing scores, automatic tags and face group names. Toggle face boxes to see their location in the image. Video highlights from the analysis stage seek the same playback proxy, and the position carries over when changing quality. The worker reads lens, shutter time, aperture, focal length and ISO alongside the existing capture time, camera and GPS fields. The upgrade queues existing completed EXIF jobs to populate the new fields. Camera files are opened read-only. [Exiv2 tag reference](https://exiv2.org/tags.html)
+
 ## Catalog and navigation
 
 Use a bounded keyset query against each selected library's SQLite catalog, then merge the sorted results in the API. Order newest capture day and time first, followed by descending library name and asset ID for equal timestamps. Within a day, photos without a capture time come after those with one. A cursor carries the sort key and the selected scope. Each catalog keeps an index for the same order so late pages can seek instead of scanning an offset. Month jumps use a date bound with the same feed. Measure the approach with 100,000 synthetic assets across nine libraries before considering a second index.

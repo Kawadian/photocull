@@ -42,6 +42,13 @@ def settings_for(tmp_path, **options):
 def source_jpeg(path):
     orientation = Image.Exif()
     orientation[274] = 6
+    orientation[34665] = {
+        42036: "35 mm Prime",
+        33434: IFDRational(1, 250),
+        33437: IFDRational(28, 10),
+        37386: IFDRational(35),
+        34855: 200,
+    }
     orientation[34853] = {1: "N", 2: (IFDRational(35), IFDRational(30), IFDRational(0))}
     with Image.new("RGB", (800, 480), (210, 58, 50)) as image:
         image.save(path, exif=orientation, icc_profile=DISPLAY_P3, quality=95)
@@ -86,6 +93,11 @@ def test_oriented_srgb_formats_placeholder_download_and_recovery(tmp_path):
 
     with TestClient(create_app(settings)) as client, start_worker(settings):
         asset = scan(client)[source.name]
+        metadata = client.get(f"{BASE}/assets/{asset['id']}?details=browser").json()
+        assert metadata["lens"] == "35 mm Prime"
+        assert metadata["shutter_seconds"] == pytest.approx(0.004)
+        assert metadata["aperture"] == pytest.approx(2.8)
+        assert metadata["focal_length_mm"] == 35 and metadata["iso"] == 200
         paths = {
             name: media_path(settings, asset, name)
             for name in VARIANTS
