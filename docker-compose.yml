@@ -21,6 +21,20 @@ x-photocull-library: &library
   bind:
     create_host_path: false
 
+x-photocull-derivatives-env: &derivatives-env
+  PHOTOCULL_DERIVATIVES_ENABLED:
+  PHOTOCULL_DERIVATIVES_HOT_DIR:
+  PHOTOCULL_DERIVATIVES_LARGE_DIR:
+  PHOTOCULL_DERIVATIVES_HOT_MIB:
+  PHOTOCULL_DERIVATIVES_LARGE_MIB:
+  PHOTOCULL_DERIVATIVES_PREWARM:
+  PHOTOCULL_DERIVATIVES_AVIF_QUALITY:
+  PHOTOCULL_DERIVATIVES_WEBP_QUALITY:
+  PHOTOCULL_DERIVATIVES_JPEG_QUALITY:
+  PHOTOCULL_DERIVATIVES_ORIGINAL_DOWNLOAD:
+  PHOTOCULL_DERIVATIVES_ORIGINAL_STREAMING:
+  PHOTOCULL_DERIVATIVES_ACCEL_REDIRECT:
+
 services:
   api:
     build:
@@ -31,8 +45,10 @@ services:
     restart: unless-stopped
     mem_limit: 500m
     environment:
+      <<: *derivatives-env
       PHOTOCULL_CONFIG: /etc/photocull/photocull.yaml
       PHOTOCULL_BROWSER_STRIP_LOCATION:
+      PHOTOCULL_ALLOWED_HOSTS:
       PHOTOCULL_BIND_HOST: 127.0.0.1
       PHOTOCULL_BIND_PORT: '8000'
     volumes:
@@ -56,6 +72,7 @@ services:
     cpus: ${PHOTOCULL_WORKER_CPUS:-2.0}
     mem_limit: ${PHOTOCULL_WORKER_MEM_LIMIT:-2g}
     environment:
+      <<: *derivatives-env
       PHOTOCULL_CONFIG: /etc/photocull/photocull.yaml
       PHOTOCULL_BROWSER_STRIP_LOCATION:
       PHOTOCULL_MODEL_DIR: /models

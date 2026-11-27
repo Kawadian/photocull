@@ -35,7 +35,7 @@ type Rule = {
   preview_id: string | null; status: string | null; summary?: { count: number }; unread: boolean
   preview_error?: string; error?: string
 }
-type Capability = { strip_location?: boolean; write_checks: WriteCheck[]; export: boolean; destructive: boolean; retention_days: number; destructive_reason?: string; export_reason?: string }
+type Capability = { write_checks: WriteCheck[]; export: boolean; destructive: boolean; retention_days: number; destructive_reason?: string; export_reason?: string }
 type Job = {
   id: string; actor: string; request: Plan; created_at: number; finished_at: number | null
   cancelled: number; next_cursor?: number | null; counts: Record<string, number>; items?: { ordinal: number; path: string; status: string; phase?: string; error: string }[]
@@ -85,7 +85,7 @@ function ArchiveForm({ capability, seed, exportOnly, busy, execute, clear, saveR
 }) {
   const [operation, setOperation] = useState<Operation>('copy')
   const [mode, setMode] = useState<Mode>('export')
-  const [includeLocation, setIncludeLocation] = useState(capability.strip_location === false)
+  const [includeLocation, setIncludeLocation] = useState(true)
   const image = ['jpeg', 'heic', 'avif'].includes(operation)
   const video = operation === 'hevc' || operation === 'av1'
   const requiresWrite = ['trash', 'rename'].includes(operation) || mode !== 'export'
@@ -132,7 +132,7 @@ function ArchiveForm({ capability, seed, exportOnly, busy, execute, clear, saveR
         </select></label>}
         {requiresOutput && <label>Location information<select value={String(includeLocation)}
           onChange={(event) => setIncludeLocation(event.target.value === 'true')}>
-          <option value="false">Exclude location information</option>
+          <option value="false">Remove location information</option>
           <option value="true">Include location information</option>
         </select></label>}
         {operation !== 'trash' && <label>On name collision<select name="collision">
@@ -156,7 +156,7 @@ function ArchiveForm({ capability, seed, exportOnly, busy, execute, clear, saveR
       </div>
       {requiresOutput && !includeLocation && <p className="insight-muted">
         {operation === 'copy' || operation === 'rename'
-          ? 'Location-free copies use JPEG for stills and MP4 for video. XMP sidecars are omitted.'
+          ? 'Location removal preserves the original format without re-encoding JPEG, HEIC, DNG or supported MP4, MOV and MKV files. XMP sidecars are omitted. For files that cannot be verified, keep location or choose a conversion explicitly.'
           : 'Location-free exports omit source metadata and sidecars.'}
         {operation === 'dng' && ' Embedded previews and thumbnails are omitted.'}
         {video && ' Video and audio tracks are kept.'}

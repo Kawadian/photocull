@@ -23,8 +23,8 @@ from photocull.api.archive import mount_archive
 from photocull.api.browse import browse_router
 from photocull.api.collections import collections_router
 from photocull.api.insights import mount_insights
-from photocull.api.media import CacheAccess, cached_media, mount_media
-from photocull.config import MLSettings, Settings, Stage, load_settings
+from photocull.api.media import CacheAccess, cached_media, mount_media, worker_recipe
+from photocull.config import MLSettings, Settings, Stage, host_name, load_settings
 from photocull.db import connect, initialize
 from photocull.db.browse import photo_details
 from photocull.db.bursts import (
@@ -58,6 +58,7 @@ from photocull.db.search import (
     worker_online,
 )
 from photocull.media.cache import cache_path
+from photocull.media.derivatives import recipe
 from photocull.media.xmp import XMPConflict, XMPError, export_xmp
 
 TOKEN_HEADER = "x-photocull-token"
@@ -165,6 +166,7 @@ def _rss_mb() -> float:
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     token: bytes | None = None
+    allowed_hosts = frozenset(settings.server.allowed_hosts)
     cache_access = CacheAccess()
 
     @asynccontextmanager
@@ -217,6 +219,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def access(request: Request, call_next):
+        if allowed_hosts and host_name(request.headers.get("host", "")) not in allowed_hosts:
+            return JSONResponse({"detail": "Host is not allowed"}, status_code=421)
         if token is not None and not compare_digest(
             request.headers.get(TOKEN_HEADER, "").encode("latin-1"), token
         ):
@@ -232,9 +236,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/health")
     def health():
         libraries = {}
+        api_recipe = recipe(settings.derivatives) if settings.derivatives.enabled else None
         for name in settings.libraries:
-            libraries[name] = _get_progress(library_path(name), ml)
-        return {"status": "ok", "rss_mb": _rss_mb(), "libraries": libraries}
+            path = library_path(name)
+            current = _get_progress(path, ml)
+            with connect(path) as db:
+                active_recipe = worker_recipe(db, path)
+            current["derivatives"] = {
+                "worker_recipe": active_recipe,
+                "matches": active_recipe == api_recipe if active_recipe and api_recipe else None,
+            }
+            libraries[name] = current
+        return {
+            "status": "ok",
+            "rss_mb": _rss_mb(),
+            "derivative_recipe": api_recipe,
+            "libraries": libraries,
+        }
 
     @app.get("/api/libraries")
     def libraries():

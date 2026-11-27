@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import re
 import sqlite3
 import stat
 import time
 from collections.abc import Callable
 from contextlib import ExitStack
 from email.utils import formatdate, parsedate_to_datetime
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from threading import Lock
 from typing import Annotated, Literal
@@ -19,10 +22,13 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from photocull.config import Settings
 from photocull.db import connect
 from photocull.db.derivatives import cache_status, request_file, touch_files
+from photocull.db.search import HEARTBEAT_TIMEOUT
 from photocull.media.artifacts import open_artifact
 from photocull.media.derivatives import (
     VARIANTS,
     VERSION_PATTERN,
+    WORKER_DISABLED,
+    WORKER_RECIPE_FILE,
     Variant,
     derivative_path,
     recipe,
@@ -32,6 +38,7 @@ from photocull.media.walk import MediaJail, OutsideLibrary, open_directory, sour
 
 Id = Annotated[int, RoutePath(gt=0, le=2**63 - 1)]
 Version = Annotated[str, RoutePath(pattern=VERSION_PATTERN)]
+LOG = logging.getLogger(__name__)
 MAX_PENDING_TOUCHES = 8192
 IMMUTABLE = "private, max-age=31536000, immutable"
 NO_STORE = "private, no-store"
@@ -66,13 +73,42 @@ class CacheAccess:
                             if len(self.pending) < MAX_PENDING_TOUCHES:
                                 self.pending.setdefault((path, asset_id, variant, version), stamp)
 
+    async def flush_safely(self) -> None:
+        try:
+            await asyncio.to_thread(self.flush)
+        except sqlite3.Error:
+            LOG.exception("Could not flush derivative cache access timestamps")
+
     async def run(self) -> None:
         try:
             while True:
                 await asyncio.sleep(10)
-                await asyncio.to_thread(self.flush)
+                await self.flush_safely()
         finally:
-            await asyncio.to_thread(self.flush)
+            await self.flush_safely()
+
+
+def worker_recipe(db: sqlite3.Connection, catalog: Path) -> str | None:
+    worker = db.execute("SELECT pid, heartbeat FROM worker_status WHERE id = 1").fetchone()
+    if worker is None or time.time() - worker["heartbeat"] >= HEARTBEAT_TIMEOUT:
+        return None
+    try:
+        with open_artifact(catalog.parent / WORKER_RECIPE_FILE) as (fd, _):
+            pid, value = os.read(fd, 80).decode("ascii").split()
+    except (OSError, ValueError):
+        return None
+    if pid == str(worker["pid"]) and (
+        value == WORKER_DISABLED or re.fullmatch(r"[a-f0-9]{16}", value)
+    ):
+        return value
+    return None
+
+
+@lru_cache(maxsize=128)
+def warn_recipe(library: str, api_recipe: str, active_recipe: str) -> None:
+    LOG.warning(
+        "Derivative recipe mismatch for %s (API %s, worker %s)", library, api_recipe, active_recipe
+    )
 
 
 def not_modified(request: Request, etag: str, modified: float) -> bool:
@@ -179,7 +215,8 @@ class OpenMedia(Response):
 
 def mount_media(settings: Settings, library_path, hits: CacheAccess) -> APIRouter:
     config = settings.derivatives
-    version_suffix = "-" + recipe(config)
+    encoding = recipe(config)
+    version_suffix = "-" + encoding
     router = APIRouter()
     base = "/api/libraries/{library}/assets/{asset_id}"
 
@@ -230,6 +267,14 @@ def mount_media(settings: Settings, library_path, hits: CacheAccess) -> APIRoute
                 ):
                     hits.touch(path, asset_id, name, version)
                     return response
+        worker = worker_recipe(db, path)
+        if worker is not None and worker != encoding:
+            warn_recipe(library, encoding, worker)
+            return JSONResponse(
+                {"status": "recipe_mismatch"},
+                status_code=503,
+                headers={"Cache-Control": NO_STORE, "Retry-After": "5"},
+            )
         if entry and (
             entry["status"] == "running"
             or (entry["status"] == "pending" and entry["priority"] == 1)
@@ -306,8 +351,8 @@ def mount_media(settings: Settings, library_path, hits: CacheAccess) -> APIRoute
         path = library_path(library)
         if not (config.original_download if mode == "download" else config.original_streaming):
             raise HTTPException(404, "Original media unavailable")
-        if include_location is False:
-            raise HTTPException(422, "Original files preserve source metadata")
+        if include_location is not True:
+            raise HTTPException(422, "Original media requires include_location=true")
         with connect(path) as db:
             row = db.execute(
                 "SELECT path, kind, source_key FROM assets WHERE id = ? AND active = 1",

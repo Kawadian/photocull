@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import os
+import re
 from hashlib import sha256
+from ipaddress import IPv6Address
 from json import dumps
 from pathlib import Path
 from typing import Annotated, Literal
 
 import yaml
 from dotenv import dotenv_values
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 MediaStage = Literal["exif", "preview", "score"]
 Stage = Literal["exif", "preview", "score", "embedding"]
@@ -187,6 +196,45 @@ class ArchiveSettings(BaseModel):
     timeout_seconds: int = Field(default=86400, ge=5, le=604800)
 
 
+HOST_AUTHORITY = re.compile(r"(?:\[([0-9A-Fa-f:.]+)\]|([A-Za-z0-9.-]+))(?::([0-9]{1,5}))?")
+
+
+def host_name(authority: str) -> str | None:
+    match = HOST_AUTHORITY.fullmatch(authority)
+    if match is None:
+        return None
+    ipv6, name, port = match.groups()
+    if port and not 0 < int(port) <= 65535:
+        return None
+    if ipv6:
+        try:
+            return str(IPv6Address(ipv6))
+        except ValueError:
+            return None
+    return name.lower().removesuffix(".") or None
+
+
+class ServerSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    allowed_hosts: tuple[str, ...] = ()
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def normalize_hosts(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        hosts = []
+        for value in values:
+            authority = value.strip()
+            if authority.count(":") > 1 and not authority.startswith("["):
+                authority = f"[{authority}]"
+            match = HOST_AUTHORITY.fullmatch(authority)
+            host = host_name(authority)
+            if match is None or match[3] is not None or host is None:
+                raise ValueError("Allowed hosts must be hostnames or IP addresses without ports")
+            hosts.append(host)
+        return tuple(dict.fromkeys(hosts))
+
+
 class DerivativeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -203,6 +251,11 @@ class DerivativeSettings(BaseModel):
     original_streaming: bool = False
     accel_redirect: bool = False
 
+    @field_validator("hot_dir", "large_dir")
+    @classmethod
+    def canonical_cache(cls, value: Path | None) -> Path | None:
+        return value.resolve() if value is not None else None
+
 
 class BrowserSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -217,7 +270,7 @@ class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     libraries: dict[LibraryName, Library] = Field(default_factory=dict)
-    state_dir: Path = Path(".photocull")
+    state_dir: Path = Field(default=Path(".photocull"), validate_default=True)
     bind_host: str = "127.0.0.1"
     bind_port: int = Field(default=8000, ge=1, le=65535)
     token_file: Path | None = None
@@ -231,6 +284,12 @@ class Settings(BaseModel):
     archive: ArchiveSettings = Field(default_factory=ArchiveSettings)
     derivatives: DerivativeSettings = Field(default_factory=DerivativeSettings)
     browser: BrowserSettings = Field(default_factory=BrowserSettings)
+    server: ServerSettings = Field(default_factory=ServerSettings)
+
+    @field_validator("state_dir")
+    @classmethod
+    def canonical_state(cls, value: Path) -> Path:
+        return value.resolve()
 
     @model_validator(mode="after")
     def validate_state(self) -> Settings:
@@ -429,5 +488,10 @@ def load_settings() -> Settings:
         }:
             if (value := env.get(f"PHOTOCULL_{section.upper()}_{field.upper()}")) is not None:
                 settings[field] = value
+
+    if (hosts := env.get("PHOTOCULL_ALLOWED_HOSTS")) is not None:
+        values.setdefault("server", {})["allowed_hosts"] = [
+            host.strip() for host in hosts.split(",") if host.strip()
+        ]
 
     return Settings.model_validate(values)

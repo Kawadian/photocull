@@ -56,7 +56,7 @@ def run(args, settings, db_path):
         if action in {"preview", "apply"}:
             plan = ArchiveRequest.model_validate_json(
                 args.plan.read_text(encoding="utf-8")
-            ).with_location_policy(settings)
+            ).with_location_policy()
             if action == "preview":
                 id_ = queue(db, settings, args.library, plan)
                 build(db_path, settings, args.library, id_=id_)

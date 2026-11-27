@@ -488,10 +488,12 @@ def compare_video(before, after, codec, *, keep_metadata=True):
             )
             if a.get(key, fallback) != b.get(key, fallback):
                 raise ArchiveError(f"Video stream field changed: {key}")
-        if b.get("codec_name") != codec:
-            raise ArchiveError(f"Expected {codec} output")
+        if b.get("codec_name") != (codec or a.get("codec_name")):
+            raise ArchiveError("Video codec differs from the requested output")
         if a.get("side_data_list", []) != b.get("side_data_list", []):
             raise ArchiveError("Video rotation or other stream side data changed")
+        if codec is None:
+            continue  # Stream-copy callers verify encoded packet hashes separately.
         count_a, count_b = int(a.get("nb_read_frames", "0")), int(b.get("nb_read_frames", "0"))
         if min(count_a, count_b) <= 0 or abs(count_a - count_b) > 1:
             raise ArchiveError("Video frame count unavailable or differs by over one frame")
