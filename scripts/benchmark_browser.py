@@ -26,15 +26,15 @@ def seed(path: Path, size: int) -> None:
     def entries():
         for index in range(size):
             day = days[(index * 5) % len(days)]
-            yield f"{day}/{index:08}.jpg", day, day + "T14:30:00", "a" * 64
+            yield f"{day}/{index:08}.jpg", day, day + "T14:30:00", "a" * 64, int(index % 27 == 0)
 
     initialize(path)
     with connect(path) as db, write(db):
         db.execute("INSERT INTO scan_requests(id,status,created_at) VALUES(1,'done',0)")
         db.executemany(
             """INSERT INTO assets(path,folder,kind,size,mtime_ns,scan_id,
-                                   day,captured_at,content_hash,width,height)
-               VALUES(?,'photos','image',10000,0,1,?,?,?,1500,1000)""",
+                                   day,captured_at,content_hash,width,height,favorite)
+               VALUES(?,'photos','image',10000,0,1,?,?,?,1500,1000,?)""",
             entries(),
         )
         db.execute("""
@@ -80,6 +80,8 @@ def benchmark(root: Path, count: int, iterations: int) -> dict[str, float]:
                     "cursor_" + str(len(cases)): params,
                 }
             )
+        cases["favorites"] = {"favorite": True}
+        cases["media_date"] = {"kind": "image", "start": months[len(months) // 2] + "-01"}
 
         timings = {name: [] for name in cases}
         calendar_times = []

@@ -11,7 +11,9 @@ Each row is a reviewable pull request. Stack unfinished branches and retarget af
 | 6A · Timeline | Cross-library catalog, cursor feed, year/month/day navigation, virtualized justified grid, density and library controls, URL history, Japanese and English browser shell | Equal-time entries paginate without gaps across catalogs. A month jump works without fetching intervening pages. Desktop and 375 px mobile work with keyboard and touch. The existing review view still opens and handles its shortcuts. |
 | 6B · Derivatives and delivery | Extend the preview worker, responsive stills and placeholders, video proxies, original downloads, immutable URLs, location policy, two cache tiers, reverse proxy examples | Exercise HEIF, RAW, video posters, metadata stripping, per-operation overrides, orientation, ICC, eviction and recovery. Verify conditional requests, Range, proxy and direct API delivery. Review storage measurements and migration. Inspect the grid with the new media. |
 | 6C · Viewer | Fullscreen stills and video, progressive loading, gestures, keyboard, zoom, slideshow, metadata, faces and highlights | Exercise keyboard and touch paths, slow or failed media, source cropping and rotations, and synchronous URL navigation. Inspect screenshots at mobile and desktop sizes. |
-| 6D · Search and organization | Filters, cross-library semantic and similar search, tags, people, albums, favorites, ratings, bulk selection, archive handoff, places, days/trips and recently added | Verify link replay, bulk retries and source-safe edits across catalogs, plus mixed-library selection and organization in Playwright. |
+| 6D.1 · Filters and labels | Cross-library filters and facets, favorites, user tags, and link replay | Verify the correlation between assigned tags and matches, combined filters, and metadata-only edits. |
+| 6D.2 · Collections and organization | Manual and smart albums, batch selection and edits, archive handoff, people, tags, places, days/trips, and recent additions | Test bulk retries, cross-library membership, stored filters, and mixed-library selection in Playwright. |
+| 6D.3 · Semantic discovery | Japanese and English natural-language search and similar-photo discovery across libraries | Use the existing worker inference queue and verify that ranking combines results from the selected catalogs. |
 | 6E · Offline and release | PWA, adaptive network preferences, browser accessibility and compatibility, performance gates, end-to-end documentation | Verify installation and offline replay with a bounded cache and no client credentials. Confirm the complete profile on mobile and desktop and build the deployment images. |
 
 Before each PR, review the full diff, test edge cases and inspect Playwright screenshots on mobile and desktop. Keep the docs in sync with the shipped behavior. Run Ruff, pytest, frontend lint, build and Playwright, then push and watch CI. Pull requests remain open for user review.
@@ -36,6 +38,14 @@ Tab into the grid and use the arrow keys to move between thumbnails. Enter opens
 The viewer paints the placeholder and thumbnail while the fit image loads. It uses the native JPEG for supported zoom requests. Automatic full-resolution requests and neighbor thumbnail preloading pause on a connection marked slow or Save-Data. Use the **100%** control to request full resolution explicitly. Slideshow settings include interval, random order and a fade that honors the device's reduced-motion setting.
 
 The information panel reads existing scores, automatic tags and face group names. Toggle face boxes to see their location in the image. Video highlights from the analysis stage seek the same playback proxy, and the position carries over when changing quality. The worker reads lens, shutter time, aperture, focal length and ISO alongside the existing capture time, camera and GPS fields. The upgrade queues existing completed EXIF jobs to populate the new fields. Camera files are opened read-only. [Exiv2 tag reference](https://exiv2.org/tags.html)
+
+## Filters and labels
+
+**Filters** combines media type, favorites, manual and automatic flags, tags, people, camera, lens, place, capture dates, ratings, sharpness and aesthetic score. The browser loads choices and their counts from the selected library scope when the filter dialog opens. Places come from indexed story locations when available. Filters live in the URL and apply across all libraries by default. The month scrubber jumps within the library calendar and shows the matching photos at or before the chosen month.
+
+Open a photo's information panel to toggle its favorite or edit user tags. Favorites and user tags live in SQLite, so edits require neither a sidecar nor a writable photo directory. Tag matching folds case and normalizes Unicode. A user tag remains independent of an automatic tag with the same text. Select either tag in the panel to browse its matches.
+
+The timeline API binds every filter value as a query parameter and includes a fingerprint of the filter scope in the page cursor. The API accepts `auto:<key>` or `user:<name>` as a tag. A named person can match across catalogs using `name:<name>`. Use `id:<library>:<id>` for a specific cluster. `GET /api/browse/facets` returns available choices. Each library contributes up to 250 entries per bounded facet before merging, so less common values can be absent from the suggestions. A filter with a known stored value still searches the full catalog. Per-photo label edits use `PATCH /api/browse/{library}/assets/{id}/labels`.
 
 ## Catalog and navigation
 
@@ -107,12 +117,14 @@ Nginx reserves `/_photocull/` for internal delivery and refuses symlinks in both
 | Check | Budget and measurement |
 | --- | --- |
 | Initial JavaScript | At most 200 KiB gzipped for the main and browser entry chunks and their static dependencies. Check the build in CI. |
-| Grid API | Warm p95 below 100 ms for 72 results using 100,000 synthetic assets, nine libraries and mixed first pages, cursor seeks and month jumps. Record local and CI baselines. |
+| Grid API | Warm p95 below 100 ms for 72 results using 100,000 synthetic assets across nine libraries. Mix first pages, cursor seeks, month jumps and representative filters. Record local and CI baselines. |
 | First thumbnail | Under 3 s with a warm server cache, 375 px viewport, 400 kb/s down, 400 kb/s up and 150 ms latency. Use the Playwright Chromium network profile and record the environment. |
 | Grid scrolling | Bound mounted rows to viewport plus overscan. Sample animation frames during a sustained scroll and target a median frame interval of 16.7 ms on a 60 Hz display. |
 | API isolation | Keep the existing API dependency-import guard. Verify that catalog reads and media requests do not load decoders, FFmpeg or ML libraries. |
 
 Run `uv run --locked python -m scripts.benchmark_browser` for the API gate. The program uses nine SQLite databases, measures the HTTP response and JSON parsing in FastAPI's test client, and reports first-page, month-jump and cursor samples. Run `npm run build && node e2e/check-bundle.mjs` from `frontend` for the gzip budget. The build manifest identifies the initial entry points and their static imports.
+
+Phase 6C's local slow-link baseline was 3.75 s median across three fresh Chromium contexts through gzip-enabled nginx. These runs used a warmed 512 px AVIF and a new browser HTTP cache per run. Phase 6E includes improving the cold navigation path and gating the three-second target.
 
 ## Authentication and offline
 

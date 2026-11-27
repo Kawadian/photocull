@@ -1,4 +1,4 @@
-import { Film, ImageOff, Images } from 'lucide-react'
+import { Film, Heart, ImageOff, Images } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent, ReactNode } from 'react'
 import { mediaUrl } from '../api'
@@ -132,11 +132,15 @@ export function TimelineGrid({ assets, location, recipe, text, busy, canLoad, lo
               const name = asset.name + (location.library ? '' : ' · ' + asset.library)
                 + (asset.kind === 'video' ? ' · ' + text.video : '')
               return <button key={assetKey(asset)} className="pcb-tile" style={{ width }} type="button"
-                title={name} aria-label={name} aria-haspopup="dialog" tabIndex={index === tabIndex ? 0 : -1}
+                title={name} aria-label={name} aria-description={asset.favorite ? text.favorite : undefined}
+                aria-haspopup="dialog" tabIndex={index === tabIndex ? 0 : -1}
                 ref={(node) => { if (node) buttons.current.set(index, node); else buttons.current.delete(index) }}
                 onFocus={() => setFocused(index)} onKeyDown={(event) => moveFocus(event, index)}
                 onClick={(event) => onPhoto(asset, event.currentTarget)}>
                 <Thumbnail asset={asset} recipe={recipe} width={width} priority={index < 2} text={text} />
+                {asset.favorite && <span className="pcb-favorite-chip" aria-hidden="true">
+                  <Heart size={14} fill="currentColor" />
+                </span>}
                 {asset.kind === 'video' && <span className="pcb-video-chip" aria-hidden="true">
                   <Film size={13} />
                   {asset.duration != null && ' ' + Math.floor(asset.duration / 60) + ':'

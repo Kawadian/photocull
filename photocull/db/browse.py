@@ -7,7 +7,9 @@ from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
+from photocull.config import Settings
 from photocull.db import connect
+from photocull.db.browse_filters import Filters, asset_labels, clauses
 
 
 class TimelineKey(NamedTuple):
@@ -24,18 +26,24 @@ def _library_page(
     month: str | None,
     after: TimelineKey | None,
     recipe: str | None,
+    filters: Filters,
+    settings: Settings,
 ) -> list[tuple[TimelineKey, sqlite3.Row]]:
+    conditions, params = clauses(db, library, filters, settings)
+    where = "".join(f" AND ({condition})" for condition in conditions)
+
     def fetch(bound: str, args: tuple, count: int) -> list[sqlite3.Row]:
         return db.execute(
             f"""SELECT a.id, a.day, a.timeline_time, a.path, a.kind, a.width, a.height,
-                       a.duration, a.content_hash, p.status AS preview_status, d.blurhash
+                       a.duration, a.content_hash, a.favorite,
+                       p.status AS preview_status, d.blurhash
                 FROM assets AS a
                 LEFT JOIN jobs AS p ON p.asset_id = a.id AND p.stage = 'preview'
                 LEFT JOIN derivative_placeholders AS d
                     ON d.asset_id = a.id AND d.version = a.content_hash || '-' || ?
-                WHERE a.active = 1 {bound}
+                WHERE a.active = 1 {where} {bound}
                 ORDER BY a.day DESC, a.timeline_time DESC, a.id DESC LIMIT ?""",
-            (recipe, *args, count),
+            (recipe, *params, *args, count),
         ).fetchall()
 
     if after and library == after.library:
@@ -66,13 +74,17 @@ def timeline_page(
     limit: int,
     month: str | None,
     after: TimelineKey | None,
-    recipe: str | None = None,
+    recipe: str | None,
+    filters: Filters,
+    settings: Settings,
 ) -> tuple[list[dict], TimelineKey | None]:
     pages = []
     for library, path in libraries.items():
         with connect(path) as db:
             db.execute("BEGIN")
-            pages.append(_library_page(db, library, limit + 1, month, after, recipe))
+            pages.append(
+                _library_page(db, library, limit + 1, month, after, recipe, filters, settings)
+            )
     rows = list(islice(merge(*pages, key=lambda item: item[0], reverse=True), limit + 1))
     next_key = rows[limit - 1][0] if len(rows) > limit else None
     items = []
@@ -80,6 +92,7 @@ def timeline_page(
         item = dict(row)
         item["library"] = key.library
         item["name"] = PurePosixPath(item.pop("path")).name
+        item["favorite"] = bool(item["favorite"])
         item.pop("timeline_time")
         items.append(item)
     return items, next_key
@@ -125,4 +138,4 @@ def photo_details(db: sqlite3.Connection, asset: sqlite3.Row, face_key: str | No
         if face_key is not None
         else []
     )
-    return {**dict(camera), "faces": [dict(row) for row in faces]}
+    return {**dict(camera), **asset_labels(db, asset["id"]), "faces": [dict(row) for row in faces]}

@@ -6,6 +6,8 @@ Open **Photo browser** for a cross-library capture timeline with a justified pho
 
 The viewer supports fullscreen, touch zoom and pan, slideshow, EXIF information, face boxes and video highlights. The worker prepares responsive AVIF, WebP and JPEG images and two fast-start video proxies. Optional original downloads use the existing authentication. [Viewer guide](docs/BROWSER.md#viewer) · [Cache configuration](docs/BROWSER.md#cache-configuration-and-migration)
 
+Use **Filters** to combine catalog fields across libraries. In the viewer, mark favorites and add, remove or browse by user tags. [Filters and labels](docs/BROWSER.md#filters-and-labels)
+
 ## Run locally
 
 Use Linux, Python 3.12, [uv](https://docs.astral.sh/uv/) and Node.js 24. Install `ffmpeg` and `ffprobe` for video posters and durations (`apt install ffmpeg` on Debian or Ubuntu).

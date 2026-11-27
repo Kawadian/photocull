@@ -33,6 +33,7 @@ MIGRATIONS = (
     "0023_browser_timeline.sql",
     "0024_derivative_cache.sql",
     "0025_browser_exif.sql",
+    "0026_browser_labels.sql",
 )
 BUSY_TIMEOUT_MS = 10_000
 

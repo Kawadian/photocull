@@ -11,7 +11,18 @@ export type FaceBox = {
   bottom: number
 }
 
-export type ViewerAsset = Asset & {
+export type PhotoLabels = {
+  favorite: boolean
+  user_tags: string[]
+}
+
+export type LabelUpdate = {
+  favorite?: boolean
+  add_tags?: string[]
+  remove_tags?: string[]
+}
+
+export type ViewerAsset = Asset & PhotoLabels & {
   latitude: number | null
   longitude: number | null
   size: number

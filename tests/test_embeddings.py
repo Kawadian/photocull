@@ -120,6 +120,15 @@ def test_embedding_stages_groups_tags_and_search(settings):
             assert groups["items"][0]["tags"] == [{"tag": "cat", "label": "Cat / 猫", "score": 1.0}]
             dog = client.get(f"{BASE}/assets", params={"tag": "dog"}).json()["items"]
             assert [item["path"] for item in dog] == ["b.jpg"]
+            timeline = client.get("/api/browse/timeline", params={"tag": "auto:dog"}).json()
+            assert [item["name"] for item in timeline["items"]] == ["b.jpg"]
+            choices = client.get("/api/browse/facets").json()["tags"]
+            assert {
+                "value": "auto:dog",
+                "label": "Dog / 犬",
+                "count": 1,
+                "source": "auto",
+            } in choices
 
             for query in ("a cat", "猫の写真"):
                 items, _ = fetch_search(
