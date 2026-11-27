@@ -11,22 +11,34 @@ const operations = {
 } as const
 type Operation = keyof typeof operations
 type Mode = 'export' | 'overwrite' | 'remove'
+const conversions = new Set<Operation>(['dng', 'jpeg', 'heic', 'avif', 'hevc', 'av1'])
 type Plan = {
   operation: Operation; mode?: Mode; filters?: Record<string, unknown>; trash_ids?: string[]
+  trash_before?: string; dng_preview?: string
   collision?: 'fail' | 'rename'; preset?: string; quality?: number; template?: string; reason?: string
 }
 type FileRecord = { path: string; size: number; original?: string; sha256?: string }
 type Preview = {
   confirmation: string; count: number; source_bytes: number; estimated_output_bytes: number
-  estimated_reduction_bytes: number; estimated_after_purge_bytes: number; estimated_seconds: number
-  next_id: number | null
+  affected_bytes: number; estimated_reduction_bytes: number; estimated_after_purge_bytes: number; estimated_seconds: number
+  id: string; status: "pending" | "running" | "ready" | "error"; error?: string
+  matched_count: number; matched_bytes: number; skipped_count: number; next_cursor: number | null
   items: { relative: string; files: { source: FileRecord; target: string | null; remove: boolean }[] }[]
   skipped: { path: string; reason: string }[]
 }
-type Capability = { export: boolean; destructive: boolean; retention_days: number; destructive_reason?: string; export_reason?: string }
+type WriteCheck = {
+  path: string; passed: boolean | null; empty_bytes?: number; checks?: string[]
+  trash?: string; trash_same_mount?: boolean | null; error?: string; trash_error?: string
+}
+type Rule = {
+  id: string; name: string; request: Plan; interval_hours: number; next_at: number | null
+  preview_id: string | null; status: string | null; summary?: { count: number }; unread: boolean
+  preview_error?: string; error?: string
+}
+type Capability = { write_checks: WriteCheck[]; export: boolean; destructive: boolean; retention_days: number; destructive_reason?: string; export_reason?: string }
 type Job = {
   id: string; actor: string; request: Plan; created_at: number; finished_at: number | null
-  cancelled: number; counts: Record<string, number>; items?: { ordinal: number; path: string; status: string; phase?: string; error: string }[]
+  cancelled: number; next_cursor?: number | null; counts: Record<string, number>; items?: { ordinal: number; path: string; status: string; phase?: string; error: string }[]
 }
 type Trash = { id: string; created_at: number; reason: string; files: FileRecord[]; renamed_to: boolean }
 type Page<T, Cursor = string> = { items: T[]; next_cursor: Cursor | null }
@@ -67,14 +79,15 @@ function More({ any, previous, next }: { any: boolean; previous: () => void; nex
   </div>
 }
 
-function ArchiveForm({ capability, seed, busy, execute, clear }: {
-  capability: Capability; seed?: number[]; busy: boolean; execute: (plan: Plan) => void; clear: () => void
+function ArchiveForm({ capability, seed, busy, execute, clear, saveRule }: {
+  capability: Capability; seed?: number[]; busy: boolean; execute: (plan: Plan) => void
+  clear: () => void; saveRule: (plan: Plan) => void
 }) {
   const [operation, setOperation] = useState<Operation>('copy')
   const [mode, setMode] = useState<Mode>('export')
   const image = ['jpeg', 'heic', 'avif'].includes(operation)
   const video = operation === 'hevc' || operation === 'av1'
-  const requiresWrite = operation === 'trash' || mode !== 'export'
+  const requiresWrite = ['trash', 'rename'].includes(operation) || mode !== 'export'
   const requiresOutput = operation !== 'trash' && mode !== 'overwrite'
 
   function parsed(event: FormEvent<HTMLFormElement>) {
@@ -84,8 +97,10 @@ function ArchiveForm({ capability, seed, busy, execute, clear }: {
     const num = (key: string) => str(key) ? Number(str(key)) : undefined
     const list = (key: string) => str(key).split(/[ ,]+/).filter(Boolean)
     const maxRating = num('max_rating')
-    execute({
-      operation, mode, reason: str('reason'), collision: str('collision') === 'rename' ? 'rename' : 'fail',
+    const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null
+    const submit = submitter?.value === 'save-rule' ? saveRule : execute
+    submit({
+      operation, mode, dng_preview: str('dng_preview') || undefined, reason: str('reason'), collision: str('collision') === 'rename' ? 'rename' : 'fail',
       quality: num('quality'), preset: str('preset') || undefined, template: str('template') || undefined,
       filters: {
         ids: list('ids').map(Number), after_id: num('after_id'),
@@ -104,7 +119,7 @@ function ArchiveForm({ capability, seed, busy, execute, clear }: {
       <div className="archive-fields">
         <label>Action<select value={operation} onChange={(e) => { setOperation(e.target.value as Operation); setMode('export') }}>
           {Object.entries(operations).filter(([id]) => !['restore', 'purge', 'undo'].includes(id)).map(([id, name]) =>
-            <option key={id} value={id} disabled={id === 'trash' && !capability.destructive}>{name}</option>)}
+            <option key={id} value={id} disabled={['trash', 'rename'].includes(id) && !capability.destructive}>{name}</option>)}
         </select></label>
         {!['copy', 'trash'].includes(operation) && <label>Destination<select value={mode} onChange={(e) => setMode(e.target.value as Mode)}>
           <option value="export">Separate export folder</option>
@@ -116,6 +131,10 @@ function ArchiveForm({ capability, seed, busy, execute, clear }: {
         </select></label>}
         {operation === 'rename' && <label>Filename template<input name="template" defaultValue="{date}_{stem}" maxLength={200} required
           aria-describedby="archive-template-help" /></label>}
+        {operation === 'dng' && <label>Embedded DNG preview<select name="dng_preview">
+          <option value="embed">Embed JPEG preview and thumbnail</option>
+          <option value="omit">Omit both to save more space</option>
+        </select></label>}
         {(image || video) && <>
           <label>{video ? 'CRF (lower is higher quality)' : 'Quality (higher is higher quality)'}
             <input name="quality" type="number" min={video ? 0 : 1} max={operation === 'hevc' ? 51 : operation === 'av1' ? 63 : 100} placeholder="Codec default" />
@@ -161,21 +180,28 @@ function ArchiveForm({ capability, seed, busy, execute, clear }: {
         </div>
       </details>
     </fieldset>
-    {!capability.destructive && <p className="insight-muted">{capability.destructive_reason}</p>}
+    {!capability.destructive && <p className="insight-muted">{capability.destructive_reason}
+      {' '}Set PHOTOCULL_WRITE_ROOTS to the canonical worker directory, mount it read-write, and check Write access.</p>}
     {requiresOutput && !capability.export && <p className="insight-muted">{capability.export_reason}</p>}
     <button className="button primary archive-start" disabled={busy || requiresWrite && !capability.destructive || requiresOutput && !capability.export}>
       {busy ? 'Building preview…' : 'Preview operation'}
     </button>
+    {conversions.has(operation) && <button className="button secondary archive-start" value="save-rule" disabled={busy}>
+      Save as a rule
+    </button>}
   </form>
 }
 
-function PreviewDetails({ planned, proceed }: { planned: Preview; proceed: () => void }) {
+function PreviewDetails({ planned, proceed, previous, next }: {
+  planned: Preview; proceed: () => void; previous?: () => void; next?: () => void
+}) {
   const heading = useRef<HTMLHeadingElement>(null)
-  useEffect(() => { heading.current?.focus() }, [planned])
+  useEffect(() => { heading.current?.focus() }, [planned.id])
   return <section className="insight-section archive-preview" aria-label="Operation preview">
     <h3 ref={heading} tabIndex={-1}>Preview</h3>
     <div className="archive-metrics" role="status">
-      <div><strong>{planned.count}</strong><span>Media items</span></div>
+      <div><strong>{planned.matched_count}</strong><span>Matching items · {bytes(planned.matched_bytes)}</span></div>
+      <div><strong>{planned.count}</strong><span>Eligible items · {planned.skipped_count} skipped</span></div>
       <div><strong>{bytes(planned.source_bytes)}</strong><span>Source media</span></div>
       <div><strong>{bytes(planned.estimated_output_bytes)}</strong><span>Estimated output</span></div>
       <div><strong>{bytes(planned.estimated_reduction_bytes)}</strong><span>Estimated source size reduction</span></div>
@@ -183,7 +209,7 @@ function PreviewDetails({ planned, proceed }: { planned: Preview; proceed: () =>
       <div><strong>{seconds(planned.estimated_seconds)}</strong><span>Estimated runtime</span></div>
     </div>
     <p className="insight-muted">Sizes and runtime are estimates. Originals in trash still use storage until purged.</p>
-    {planned.next_id != null && <p>More matches are available. Use asset ID {planned.next_id} in the next batch.</p>}
+    <p>Confirmation covers all eligible items across every page.</p>
     {!planned.count && <Status empty>No files are eligible for this operation.</Status>}
     {!!planned.items.length && <ul className="archive-list">
       {planned.items.map((item) => <li key={item.relative}>
@@ -197,6 +223,7 @@ function PreviewDetails({ planned, proceed }: { planned: Preview; proceed: () =>
     {!!planned.skipped.length && <details><summary>{planned.skipped.length} skipped</summary><ul className="archive-list">
       {planned.skipped.map((item) => <li key={item.path}><strong>{item.path}</strong><div>{item.reason}</div></li>)}
     </ul></details>}
+    <More any={!!previous} previous={() => previous?.()} next={next} />
     <div><button className="button primary" disabled={!planned.count} onClick={proceed}>Review and confirm</button></div>
   </section>
 }
@@ -207,7 +234,8 @@ function TrashPanel({ url, capability, version, preview, busy, clear }: {
   const [pages, setPages] = useState<string[]>([])
   const [checked, setChecked] = useState<string[]>([])
   const [collision, setCollision] = useState<'fail' | 'rename'>('fail')
-  const result = useRemote<Page<Trash>>(`${url}/trash${pages.length ? `?before=${pages.at(-1)}` : ''}`, version)
+  const [cutoff, setCutoff] = useState('')
+  const result = useRemote<Page<Trash> & { total_count: number; total_bytes: number }>(`${url}/trash${pages.length ? `?before=${pages.at(-1)}` : ''}`, version)
   const selected = result?.data?.items.filter((item) => checked.includes(item.id)) ?? []
   function move(operation: 'restore' | 'undo' | 'purge') {
     preview({ operation, trash_ids: selected.map((item) => item.id), collision })
@@ -217,6 +245,17 @@ function TrashPanel({ url, capability, version, preview, busy, clear }: {
     {!capability.destructive && <p className="insight-muted">{capability.destructive_reason}</p>}
     <ReadState result={result} empty={!result?.data?.items.length} text="Trash is empty." />
     {!!result?.data?.items.length && <>
+      <p>{result.data.total_count} trash entries · {bytes(result.data.total_bytes)} in trash</p>
+      <form className="insight-actions" onSubmit={(event) => {
+        event.preventDefault()
+        preview({ operation: 'purge', trash_before: cutoff })
+      }}>
+        <label>Trash entries before (UTC)<input type="date" value={cutoff} required
+          disabled={busy || !capability.destructive} onChange={(e) => { setCutoff(e.target.value); clear() }} /></label>
+        <button className="button secondary" disabled={busy || !capability.destructive || !cutoff}>
+          Preview oldest-first purge
+        </button>
+      </form>
       <div className="insight-actions">
         <label>On restore collision<select value={collision} disabled={busy} onChange={(e) => { setCollision(e.target.value as 'fail' | 'rename'); clear() }}>
           <option value="fail">Skip conflicting entry</option><option value="rename">Add a numeric suffix</option>
@@ -246,21 +285,33 @@ function JobsPanel({ url, version, id, setId, action, busy }: {
   action: (path: string) => void; busy: boolean
 }) {
   const result = useRemote<{ items: Job[] }>(`${url}/jobs`, version)
-  const detailed = useRemote<Job>(id ? `${url}/jobs/${id}` : null, version)
+  function select(id?: string) { setId(id) }
   return <section className="insight-section" aria-label="Archive jobs">
     <ReadState result={result} empty={!result?.data?.items.length} text="No archive jobs yet." />
     {!!result?.data?.items.length && <ul className="archive-list archive-job-list">
       {result.data.items.map((job) => <li key={job.id}>
-        <button className="button secondary" aria-pressed={id === job.id} onClick={() => setId(id === job.id ? undefined : job.id)}>
+        <button className="button secondary" aria-pressed={id === job.id} onClick={() => select(id === job.id ? undefined : job.id)}>
           {operations[job.request.operation]} · {timestamp(job.created_at)}
         </button>
         <div>{job.finished_at ? 'Finished' : job.cancelled ? 'Cancelling' : 'Queued or running'}</div>
         <div>{Object.entries(job.counts).map(([status, count]) => `${count} ${status}`).join(' · ')}</div>
       </li>)}
     </ul>}
-    {id && <ReadState result={detailed} />}
-    {detailed?.data && <JobDetails job={detailed.data} busy={busy} action={action} />}
+    {id && <JobPage key={id} url={url} id={id} version={version} busy={busy} action={action} />}
   </section>
+}
+
+function JobPage({ url, id, version, ...props }: {
+  url: string; id: string; version: number; busy: boolean; action: (path: string) => void
+}) {
+  const [pages, setPages] = useState<number[]>([])
+  const detail = useRemote<Job>(`${url}/jobs/${id}?after=${pages.at(-1) ?? 0}`, version)
+  const next = detail?.data?.next_cursor
+  return <><ReadState result={detail} />
+    {detail?.data && <JobDetails job={detail.data} {...props} />}
+    <More any={!!pages.length} previous={() => setPages((old) => old.slice(0, -1))}
+      next={next ? () => setPages((old) => [...old, next]) : undefined} />
+  </>
 }
 
 function JobDetails({ job, busy, action }: { job: Job; busy: boolean; action: (path: string) => void }) {
@@ -345,7 +396,66 @@ function AuditPanel({ url, version }: { url: string; version: number }) {
   </section>
 }
 
-const panels = ['Plan', 'Jobs', 'Trash', 'Storage', 'Duplicates', 'Audit'] as const
+function WriteAccess({ capability, busy, recheck }: {
+  capability: Capability; busy: boolean; recheck: () => void
+}) {
+  return <section className="insight-section" aria-label="Archive write access">
+    <p>Set PHOTOCULL_WRITE_ROOTS to the canonical worker directories. Mount approved subtrees
+      read-write and keep the rest of the library read-only.</p>
+    {!capability.destructive && <Status empty>{capability.destructive_reason}</Status>}
+    <div><button className="button secondary" disabled={busy || !capability.write_checks.length}
+      onClick={recheck}>Run worker filesystem checks</button></div>
+    <ul className="archive-list">{capability.write_checks.map((check) => <li key={check.path}>
+      <strong>{check.path}</strong>
+      <div>{check.passed === null ? 'Waiting for worker' : check.passed ? 'Self-test passed' : 'Self-test failed'}</div>
+      {check.error && <div>{check.error}</div>}
+      {check.checks?.length ? <div>{check.checks.join(' · ')}</div> : null}
+      {check.empty_bytes != null && <div>{bytes(check.empty_bytes)} available when tested</div>}
+      {check.trash && <div>Trash location · {check.trash}</div>}
+      {check.trash_same_mount != null && <div>{check.trash_same_mount ? 'Same mount' : 'Different mount · verified copy and removal'}</div>}
+      {check.trash_error && <div>{check.trash_error}</div>}
+    </li>)}</ul>
+  </section>
+}
+
+function RulesPanel({ list, busy, action, open }: {
+  list?: { data?: { items: Rule[] }; error?: string }; busy: boolean
+  action: (path: string) => void; open: (rule: Rule) => void
+}) {
+  return <section className="insight-section" aria-label="Archive rules">
+    <p>Save conversion filters from Plan. Scheduled rules prepare previews for review.</p>
+    <ReadState result={list} empty={!list?.data?.items.length} text="No archive rules saved." />
+    <ul className="archive-list">{list?.data?.items.map((rule) => <li key={rule.id}>
+      <strong>{rule.name}</strong>
+      <div>{operations[rule.request.operation]} · {rule.interval_hours ? `Every ${rule.interval_hours} h` : 'Manual preview only'}</div>
+      {rule.next_at && <div>Next preview · {timestamp(rule.next_at)}</div>}
+      {(rule.error || rule.preview_error) && <div role="alert">{rule.error || rule.preview_error}</div>}
+      {rule.status === 'ready' && <div>{rule.unread ? 'New preview · ' : ''}{rule.summary?.count ?? 0} eligible items</div>}
+      {['running', 'pending'].includes(rule.status ?? '') && <div>Preparing preview…</div>}
+      <div className="insight-actions">
+        <button className="button secondary" disabled={busy || !rule.preview_id} onClick={() => open(rule)}>Review latest preview</button>
+        <button className="button secondary" disabled={busy || ['running', 'pending'].includes(rule.status ?? '')}
+          onClick={() => action(`rules/${rule.id}/preview`)}>Prepare preview</button>
+        {rule.interval_hours > 0 && <button className="button secondary" disabled={busy}
+          onClick={() => action(`rules/${rule.id}/pause`)}>Pause schedule</button>}
+        <button className="button secondary" disabled={busy} onClick={() => action(`rules/${rule.id}/delete`)}>Remove rule</button>
+      </div>
+    </li>)}</ul>
+  </section>
+}
+
+function consequences(plan: Plan) {
+  if (plan.operation === 'purge') return 'This permanently deletes the listed files and sidecars. It cannot be undone in Photocull.'
+  if (plan.operation === 'restore') return 'Verified files leave trash and return to the destinations listed in the preview.'
+  if (plan.operation === 'undo') return 'The original names and sidecars are restored, and the verified renamed copies are removed.'
+  if (plan.operation === 'rename' && plan.mode === 'overwrite') return 'Verified files are renamed and the original names can be restored from Trash while the backups are retained.'
+  if (plan.operation === 'trash') return 'Originals move to Trash and can be restored while the backups are retained.'
+  if (plan.mode === 'overwrite') return 'Verified outputs replace the originals. The originals can be restored from Trash while the backups are retained.'
+  if (plan.mode === 'remove') return 'Verified outputs stay in the export folder. Originals move to Trash and can be restored while the backups are retained.'
+  return 'Verified outputs go to the separate export folder. Originals stay in place.'
+}
+
+const panels = ['Plan', 'Jobs', 'Trash', 'Rules', 'Write access', 'Storage', 'Duplicates', 'Audit'] as const
 
 export function Archive({ base, online }: { base: string; online: boolean }) {
   const url = `${base}/archive`
@@ -354,17 +464,26 @@ export function Archive({ base, online }: { base: string; online: boolean }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [seed, setSeed] = useState<number[]>()
-  const [planned, setPlanned] = useState<{ plan: Plan; result: Preview }>()
+  const [planned, setPlanned] = useState<{ plan: Plan; id: string }>()
+  const [previewPages, setPreviewPages] = useState<number[]>([])
   const [confirm, setConfirm] = useState(false)
+  const [rulePlan, setRulePlan] = useState<Plan>()
   const [jobId, setJobId] = useState<string>()
   const capability = useRemote<Capability>(url, version)
+  const rules = useRemote<{ items: Rule[] }>(`${url}/rules`, version)
+  const unread = rules?.data?.items.filter((rule) => rule.unread).length ?? 0
+  const checksPending = capability?.data?.write_checks.some((check) => check.passed === null)
+  const previewPage = useRemote<Preview>(planned ? `${url}/previews/${planned.id}?after=${previewPages.at(-1) ?? 0}` : null, version)
+  const result = previewPage?.data
+  const preparing = !!planned && (!result || ['pending', 'running'].includes(result.status))
+  const nextPreviewPage = result?.next_cursor
   const refresh = () => setVersion((n) => n + 1)
 
   useEffect(() => {
-    if (!['Jobs', 'Trash', 'Audit'].includes(panel)) return
-    const timer = window.setInterval(() => setVersion((n) => n + 1), 2000)
+    const delay = preparing || checksPending || ['Jobs', 'Trash', 'Rules', 'Write access', 'Audit'].includes(panel) ? 1500 : 8000
+    const timer = window.setInterval(() => setVersion((n) => n + 1), delay)
     return () => window.clearInterval(timer)
-  }, [panel])
+  }, [panel, preparing, checksPending])
 
   async function mutate(path: string, body: object = {}) {
     setError('')
@@ -384,8 +503,9 @@ export function Archive({ base, online }: { base: string; online: boolean }) {
     setPlanned(undefined)
     setBusy(true)
     try {
-      const result = await request<Preview>(`${url}/preview`, json('POST', plan))
-      setPlanned({ plan, result })
+      const result = await request<{ id: string }>(`${url}/preview`, json('POST', plan))
+      setPreviewPages([])
+      setPlanned({ plan, id: result.id })
     } catch (e) {
       setError(message(e))
     } finally {
@@ -394,8 +514,8 @@ export function Archive({ base, online }: { base: string; online: boolean }) {
   }
 
   async function apply() {
-    if (!planned) return
-    const id = await mutate('jobs', { plan: planned.plan, confirmation: planned.result.confirmation })
+    if (!planned || result?.status !== 'ready') return
+    const id = await mutate('jobs', { plan: planned.plan, confirmation: result.confirmation })
     if (id) {
       setJobId(id)
       setPanel('Jobs')
@@ -404,11 +524,28 @@ export function Archive({ base, online }: { base: string; online: boolean }) {
     }
   }
 
+  async function saveRule(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const form = new FormData(event.currentTarget)
+    const id = await mutate('rules', { name: form.get('name'), plan: rulePlan, interval_hours: Number(form.get('interval') || 0) })
+    if (id) {
+      setRulePlan(undefined)
+      setPanel('Rules')
+    }
+  }
+
   const cfg = capability?.data
   const screens: Record<typeof panels[number], ReactNode> = {
-    Plan: cfg && <ArchiveForm capability={cfg} seed={seed} busy={busy} execute={preview} clear={() => setPlanned(undefined)} />,
+    Plan: cfg && <ArchiveForm capability={cfg} seed={seed} busy={busy || preparing} execute={preview} clear={() => setPlanned(undefined)} saveRule={(plan) => { setError(''); setRulePlan(plan) }} />,
     Jobs: <JobsPanel url={url} version={version} id={jobId} setId={setJobId} action={mutate} busy={busy} />,
-    Trash: cfg && <TrashPanel url={url} capability={cfg} version={version} preview={preview} busy={busy} clear={() => setPlanned(undefined)} />,
+    Trash: cfg && <TrashPanel url={url} capability={cfg} version={version} preview={preview} busy={busy || preparing} clear={() => setPlanned(undefined)} />,
+    Rules: <RulesPanel list={rules} busy={busy} action={mutate} open={(rule) => {
+      if (!rule.preview_id) return
+      setPreviewPages([])
+      setPlanned({ plan: rule.request, id: rule.preview_id })
+      void mutate(`rules/${rule.id}/seen`)
+    }} />,
+    'Write access': cfg && <WriteAccess capability={cfg} busy={busy} recheck={() => { void mutate('selftest') }} />,
     Storage: <StoragePanel url={url} version={version} />,
     Duplicates: <DuplicatePanel url={url} version={version} selectIds={(ids) => { setSeed(ids); setPanel('Plan') }} />,
     Audit: <AuditPanel url={url} version={version} />,
@@ -417,24 +554,39 @@ export function Archive({ base, online }: { base: string; online: boolean }) {
     <h2 id="archive-heading">Archive</h2>
     <nav className="insight-actions" aria-label="Archive sections">
       {panels.map((name) => <button key={name} className="button secondary" aria-current={panel === name ? 'page' : undefined}
-        disabled={busy} onClick={() => { setError(''); setPlanned(undefined); setPanel(name) }}>{name}</button>)}
+        disabled={busy} onClick={() => { setError(''); setPlanned(undefined); setPanel(name) }}>{name}{name === 'Rules' && unread > 0 ? ` (${unread} new)` : ''}</button>)}
     </nav>
     <ReadState result={capability} retry={refresh} />
     {!online && <p className="insight-muted">The worker is offline. Confirmed jobs will wait in the queue.</p>}
-    {error && !confirm && <Status error={error} />}
+    {error && !confirm && !rulePlan && <Status error={error} />}
     {screens[panel]}
-    {planned && <PreviewDetails planned={planned.result} proceed={() => { setError(''); setConfirm(true) }} />}
-    {confirm && planned && <Dialog title={operations[planned.plan.operation]} busy={busy} onClose={() => setConfirm(false)}>
-      <p>{planned.result.count} {planned.result.count === 1 ? 'item' : 'items'} · {bytes(planned.result.source_bytes)} of source media.</p>
-      <p>Estimated bytes freed after purge: {bytes(planned.result.estimated_after_purge_bytes)}.</p>
-      {planned.plan.operation === 'purge' ? <p>Permanent deletion cannot be undone.</p>
-        : planned.plan.mode && planned.plan.mode !== 'export' || planned.plan.operation === 'trash'
-          ? <p>Originals will be moved to trash after verification.</p> : null}
+    {planned && preparing && <Status pending={!previewPage?.error} error={previewPage?.error} retry={refresh} />}
+    {result?.error && <Status error={result.error} />}
+    {result?.status === 'ready' && <PreviewDetails planned={result}
+      previous={previewPages.length ? () => setPreviewPages((old) => old.slice(0, -1)) : undefined}
+      next={nextPreviewPage ? () => setPreviewPages((old) => [...old, nextPreviewPage]) : undefined}
+      proceed={() => { setError(''); setConfirm(true) }} />}
+    {confirm && planned && result?.status === 'ready' && <Dialog title={operations[planned.plan.operation]} busy={busy} onClose={() => setConfirm(false)}>
+      <p>{result.count} {result.count === 1 ? 'item' : 'items'} · {bytes(result.source_bytes)} of source media.</p>
+      {result.affected_bytes > 0 && <p>{bytes(result.affected_bytes)} of originals and sidecars affected.</p>}
+      <p>{consequences(planned.plan)}</p>
       {error && <Status error={error} />}
       <div className="dialog-actions">
         <button autoFocus className="button secondary" disabled={busy} onClick={() => setConfirm(false)}>Go back</button>
         <button className="button primary" disabled={busy} onClick={apply}>{busy ? 'Queueing…' : 'Confirm and queue'}</button>
       </div>
+    </Dialog>}
+    {rulePlan && <Dialog title="Save conversion rule" busy={busy} onClose={() => setRulePlan(undefined)}>
+      <form className="insight-form" onSubmit={saveRule}>
+        <label>Rule name<input name="name" maxLength={80} required /></label>
+        <label>Preview interval in hours<input type="number" name="interval" min={0} max={8760} defaultValue={0} required /></label>
+        <p>Use 0 for manual previews. Every conversion requires its own confirmation.</p>
+        {error && <Status error={error} />}
+        <div className="dialog-actions">
+          <button className="button secondary" type="button" disabled={busy} onClick={() => setRulePlan(undefined)}>Go back</button>
+          <button className="button primary" disabled={busy}>Save rule</button>
+        </div>
+      </form>
     </Dialog>}
   </main>
 }

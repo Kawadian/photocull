@@ -6,10 +6,14 @@ from typing import Annotated, Literal
 from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from photocull.archive import ArchiveError, ArchiveRequest, TrashID, capabilities, preview
-from photocull.db import connect
+from photocull.archive import ArchiveError, ArchiveRequest, TrashID, capabilities
+from photocull.db import connect, write
 from photocull.db.archive import audit_page, cancel, enqueue, jobs, retry_recovery, trash
+from photocull.db.archive_preview import page, queue
 from photocull.db.archive_report import duplicates, storage
+from photocull.db.archive_rules import ArchiveRule, rules
+from photocull.db.archive_rules import action as rule_action
+from photocull.db.archive_rules import save as save_rule
 
 Key = Annotated[str, Field(pattern=r"^[a-f0-9]{32}$")]
 Digest = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
@@ -48,10 +52,27 @@ def mount_archive(app: FastAPI, settings, library_path):
         with connect(library_path(library)) as db:
             return capabilities(db, settings, library)
 
-    @app.post(f"{base}/preview")
+    @app.post(f"{base}/selftest", status_code=202)
+    def recheck(library: str):
+        with connect(library_path(library)) as db, write(db):
+            if not capabilities(db, settings, library)["write_checks"]:
+                raise HTTPException(409, "Configure PHOTOCULL_WRITE_ROOTS before testing.")
+            if db.execute("SELECT 1 FROM archive_jobs WHERE finished_at IS NULL").fetchone():
+                raise HTTPException(409, "Wait for the active archive job to finish.")
+            db.execute("DELETE FROM archive_write_checks")
+        return {"status": "queued"}
+
+    @app.post(f"{base}/preview", status_code=202)
     def dry_run(library: str, body: ArchiveRequest):
         with connect(library_path(library)) as db:
-            return invoke(preview, db, settings, library, body)
+            return {"id": invoke(queue, db, settings, library, body)}
+
+    @app.get(f"{base}/previews/{{preview_id}}")
+    def preview_details(
+        library: str, preview_id: Key, after: Annotated[int, Query(ge=0, le=2**63 - 1)] = 0
+    ):
+        with connect(library_path(library)) as db:
+            return invoke(page, db, preview_id, after)
 
     @app.post(f"{base}/jobs", status_code=202)
     def submit(library: str, body: Confirmation, request: Request):
@@ -67,9 +88,11 @@ def mount_archive(app: FastAPI, settings, library_path):
             return {"items": jobs(db)}
 
     @app.get(f"{base}/jobs/{{job_id}}")
-    def job_details(library: str, job_id: Key):
+    def job_details(
+        library: str, job_id: Key, after: Annotated[int, Query(ge=0, le=2**63 - 1)] = 0
+    ):
         with connect(library_path(library)) as db:
-            return invoke(jobs, db, job_id)
+            return invoke(jobs, db, job_id, after)
 
     @app.post(f"{base}/jobs/{{job_id}}/cancel", status_code=202)
     def stop(library: str, job_id: Key, request: Request):
@@ -106,3 +129,21 @@ def mount_archive(app: FastAPI, settings, library_path):
     ):
         with connect(library_path(library)) as db:
             return duplicates(db, by, after)
+
+    @app.get(f"{base}/rules")
+    def list_rules(library: str):
+        with connect(library_path(library)) as db:
+            return {"items": rules(db)}
+
+    @app.post(f"{base}/rules", status_code=201)
+    def add_rule(library: str, body: ArchiveRule):
+        with connect(library_path(library)) as db:
+            return {"id": invoke(save_rule, db, body)}
+
+    @app.post(f"{base}/rules/{{rule_id}}/{{command}}", status_code=202)
+    def change_rule(
+        library: str, rule_id: Key, command: Literal["preview", "seen", "pause", "delete"]
+    ):
+        with connect(library_path(library)) as db:
+            invoke(rule_action, db, rule_id, command)
+            return {"id": rule_id}

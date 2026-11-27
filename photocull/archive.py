@@ -17,7 +17,7 @@ from photocull.media.walk import EXTENSIONS, MediaJail, excluded, open_directory
 
 MAX_ITEMS = 500
 ID = Annotated[int, Field(gt=0, le=2**63 - 1)]
-TrashID = Annotated[str, Field(pattern=r"^[a-f0-9]{32}-[1-9][0-9]{0,2}$")]
+TrashID = Annotated[str, Field(pattern=r"^[a-f0-9]{32}-[1-9][0-9]{0,18}$")]
 ShortText = Annotated[str, Field(max_length=200)]
 EXTENSION = {
     "dng": ".dng",
@@ -91,15 +91,20 @@ class ArchiveRequest(BaseModel):
     filters: Filters = Field(default_factory=Filters)
     trash_ids: tuple[TrashID, ...] = Field(default=(), max_length=MAX_ITEMS)
     collision: Literal["fail", "rename"] = "fail"
+    trash_before: date | None = None
     reason: ShortText = ""
     quality: int | None = Field(default=None, ge=0, le=100)
     preset: Literal["fast", "balanced", "slow"] = "balanced"
-    template: ShortText = "{date}_{stem}"
     dng_preview: Literal["embed", "omit"] = "embed"
+    template: ShortText = "{date}_{stem}"
 
     @property
     def destructive(self) -> bool:
         return self.mode != "export" or self.operation in {"trash", "restore", "purge", "undo"}
+
+    @property
+    def requires_write_access(self) -> bool:
+        return self.destructive or self.operation == "rename"
 
     @property
     def exports(self) -> bool:
@@ -112,8 +117,12 @@ class ArchiveRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_options(self):
-        if (self.operation in {"restore", "purge", "undo"}) != bool(self.trash_ids):
-            raise ValueError("Restore, purge and undo require explicit trash IDs")
+        if self.trash_before and (self.operation != "purge" or self.trash_ids):
+            raise ValueError("Only purge can use a cutoff instead of explicit trash IDs")
+        if (self.operation in {"restore", "purge", "undo"}) != bool(
+            self.trash_ids or self.trash_before
+        ):
+            raise ValueError("Choose trash IDs or a purge cutoff")
         if (
             self.operation in {"copy", "restore", "purge", "trash", "undo"}
             and self.mode != "export"
@@ -165,7 +174,7 @@ def descriptor(path: Path, info: os.stat_result, digest: str | None = None) -> d
 
 
 def source_write_roots(settings: Settings, library: str) -> tuple[Path, ...]:
-    base = settings.libraries[library].root.resolve()
+    base = settings.libraries[library].root
     return tuple(
         root
         for root in settings.archive.write_roots
@@ -184,18 +193,36 @@ def capabilities(db, settings, library):
     source_roots = source_write_roots(settings, library)
     export = config.export_roots.get(library)
     trash = config.trash_roots.get(library)
+    required = set(source_roots)
+    trash_parent = permitted(trash, config.write_roots) if trash else None
+    if trash_parent:
+        required.add(trash_parent)
+    proofs = {
+        Path(row["path"]): json.loads(row["result"])
+        for row in db.execute("SELECT path,result FROM archive_write_checks")
+        if Path(row["path"]) in required
+    }
+
+    def passed(path):
+        proof = proofs.get(path, {})
+        return proof.get("passed", False) and current.get(path, proof.get("writable", False))
+
     reason = None
     if not source_roots:
         reason = "No PHOTOCULL_WRITE_ROOTS directory covers this library."
-    elif not any(current.get(root, True) for root in source_roots):
-        reason = "The worker sees this library's archive write roots as read-only or unavailable."
-    elif trash and not any(
-        current.get(area, True) for area in config.write_roots if trash.is_relative_to(area)
-    ):
-        reason = "The configured trash parent is read-only or unavailable to the worker."
+    elif not any(passed(root) for root in source_roots):
+        reason = "The worker must pass the filesystem self-test on an archive write root."
+    elif trash_parent and not passed(trash_parent):
+        reason = "The worker must pass the filesystem self-test on the configured trash root."
     return {
         "destructive": reason is None,
         "destructive_reason": reason,
+        "write_checks": [
+            (proofs[root] | {"passed": passed(root)})
+            if root in proofs
+            else {"path": str(root), "passed": None}
+            for root in sorted(required)
+        ],
         "export": export is not None and current.get(export, True),
         "export_reason": (
             "Configure an archive export directory for this library."
@@ -210,7 +237,7 @@ def capabilities(db, settings, library):
 
 def validate_capability(settings: Settings, library: str, request: ArchiveRequest) -> None:
     policy = settings.archive
-    if request.destructive and not policy.write_roots:
+    if request.requires_write_access and not policy.write_roots:
         raise ArchiveError("Destructive actions disabled. Configure PHOTOCULL_WRITE_ROOTS.")
     if request.exports and library not in policy.export_roots:
         raise ArchiveError("Configure an archive export directory for this library.")
@@ -327,7 +354,7 @@ def asset_query(request: ArchiveRequest, *, asset_id=None) -> tuple[str, list]:
               LEFT JOIN asset_scores s ON s.asset_id = a.id
               LEFT JOIN burst_members bm ON bm.asset_id = a.id
               LEFT JOIN bursts b ON b.id = bm.burst_id
-              WHERE {" AND ".join(clauses)} ORDER BY a.id LIMIT {MAX_ITEMS + 1}"""
+              WHERE {" AND ".join(clauses)} ORDER BY a.id"""
     return sql, values
 
 
@@ -525,91 +552,163 @@ def resolve_collisions(item: dict, request: ArchiveRequest, reserved: set[Path])
     raise ArchiveError(f"Destination already exists: {primary}")
 
 
-def estimates(request: ArchiveRequest, items: list[dict]) -> dict:
-    ratio = {"dng": 0.75, "jpeg": 0.75, "heic": 0.55, "avif": 0.50, "hevc": 0.65, "av1": 0.55}
-    size = sum(item["files"][0]["source"]["size"] for item in items)
-    removed = sum(
-        file["source"]["size"] for item in items for file in item["files"] if file["remove"]
-    )
-    encoded = int(size * ratio.get(request.operation, 1))
-    sidecar_bytes = sum(
-        file["source"]["size"] for item in items for file in item["files"][1:] if file["target"]
-    )
-    if request.operation in {"trash", "purge"}:
-        encoded = 0
-    per_item = {"dng": 3, "heic": 3, "avif": 5, "jpeg": 1}.get(request.operation, 0.15)
-    seconds = sum(
-        max(per_item, (item["duration"] or 0) * (2 if request.operation == "av1" else 1))
-        if request.operation in VIDEO
-        else per_item
-        for item in items
-    )
-    return {
-        "source_bytes": size,
-        "estimated_output_bytes": encoded + sidecar_bytes,
-        "estimated_reduction_bytes": max(0, size - encoded),
-        "estimated_after_purge_bytes": max(0, removed - encoded - sidecar_bytes)
-        if request.destructive
-        else 0,
-        "estimated_seconds": round(seconds + size / (60 * 1024**2), 1),
-    }
+class PreviewTotals:
+    def __init__(self):
+        self.count = self.matched = self.source_bytes = self.matched_bytes = 0
+        self.removed_bytes = self.sidecar_bytes = 0
+        self.duration = 0.0
+
+    def record(self, item, size, request):
+        self.matched += 1
+        self.matched_bytes += size
+        if item is None:
+            return
+        self.count += 1
+        files = item["files"]
+        self.source_bytes += files[0]["source"]["size"]
+        self.removed_bytes += sum(f["source"]["size"] for f in files if f["remove"])
+        self.sidecar_bytes += sum(f["source"]["size"] for f in files[1:] if f["target"])
+        self.duration += item["duration"] or 0 if request.operation in VIDEO else 0
+
+    def summary(self, request):
+        op = request.operation
+        ratio = {"dng": 0.75, "jpeg": 0.75, "heic": 0.55, "avif": 0.5, "hevc": 0.65, "av1": 0.55}
+        if op == "dng" and request.dng_preview == "embed":
+            ratio["dng"] = 0.82
+        encoded = 0 if op in {"trash", "purge"} else int(self.source_bytes * ratio.get(op, 1))
+        output = encoded + self.sidecar_bytes
+        floor = {"dng": 3, "heic": 3, "avif": 5, "jpeg": 1}.get(op, 0.15)
+        seconds = max(self.count * floor, self.duration * (2 if op == "av1" else 1))
+        return {
+            "count": self.count,
+            "matched_count": self.matched,
+            "matched_bytes": self.matched_bytes,
+            "skipped_count": self.matched - self.count,
+            "source_bytes": self.source_bytes,
+            "affected_bytes": self.removed_bytes,
+            "estimated_output_bytes": output,
+            "estimated_reduction_bytes": max(0, self.source_bytes - encoded),
+            "estimated_after_purge_bytes": max(0, self.removed_bytes - output)
+            if request.destructive
+            else 0,
+            "estimated_seconds": round(seconds + self.source_bytes / (60 * 1024**2), 1),
+        }
 
 
-def preview(db, settings: Settings, library: str, request: ArchiveRequest) -> dict:
+def validate_preview(db, settings, library, request):
     validate_capability(settings, library, request)
     access = capabilities(db, settings, library)
-    if request.destructive and not access["destructive"]:
+    if request.requires_write_access and not access["destructive"]:
         raise ArchiveError(access["destructive_reason"])
     if request.exports and not access["export"]:
         raise ArchiveError(access["export_reason"])
-    items, skipped, reserved, inputs = [], [], set(), set()
+    if not (request.trash_ids or request.trash_before):
+        asset_query(request)
+
+
+def trash_candidates(db, request):
     if request.trash_ids:
-        rows = []
-        for id_ in dict.fromkeys(request.trash_ids):
-            row = db.execute("SELECT * FROM archive_trash WHERE id = ?", (id_,)).fetchone()
-            if row is None:
-                skipped.append({"path": id_, "reason": "Unknown trash entry"})
-            elif db.execute(
-                "SELECT 1 FROM archive_items WHERE status='recovery' "
-                "AND json_extract(plan,'$.trash_id')=? LIMIT 1",
-                (id_,),
-            ).fetchone():
-                skipped.append(
-                    {"path": id_, "reason": "Retry the blocked recovery for this entry first."}
-                )
-            else:
-                rows.append(row)
-        jail = None
+        for key in dict.fromkeys(request.trash_ids):
+            row = db.execute("SELECT * FROM archive_trash WHERE id=?", (key,)).fetchone()
+            yield key, row
     else:
-        sql, params = asset_query(request)
-        rows = db.execute(sql, params).fetchall()
-        jail = MediaJail(settings.libraries[library], settings.state_dir) if rows else None
+        for row in db.execute(
+            "SELECT * FROM archive_trash WHERE status='available' AND created_at < unixepoch(?) "
+            "ORDER BY created_at,id",
+            (request.trash_before.isoformat(),),
+        ):
+            yield row["id"], row
+
+
+def check_planned_write_roots(item, request, roots, proven):
+    if not request.requires_write_access:
+        return
+    for file in item["files"]:
+        paths = [file["source"]["path"]] if file["remove"] else []
+        if file["target"] and not request.exports:
+            paths.append(file["target"])
+        if undo := file.get("undo"):
+            paths.append(undo["path"])
+        for value in paths:
+            root = permitted(Path(value), roots)
+            if root not in proven:
+                raise ArchiveError(f"Write root needs a passing filesystem self-test: {root}")
+
+
+def preview_rows(db, settings, library, request):
+    from contextlib import closing
+
+    reserved, inputs = set(), set()
+    roots = settings.archive.write_roots
+    proven = (
+        {
+            Path(check["path"])
+            for check in capabilities(db, settings, library)["write_checks"]
+            if check["passed"]
+        }
+        if request.requires_write_access
+        else set()
+    )
+    is_trash = bool(request.trash_ids or request.trash_before)
+    jail = None if is_trash else MediaJail(settings.libraries[library], settings.state_dir)
     listing = lru_cache(maxsize=4)(sidecar_listing)
-    for ordinal, row in enumerate(rows[:MAX_ITEMS], 1):
-        label = row["path"] if jail else row["id"]
-        try:
-            item = (
-                asset_plan(settings, library, jail, request, row, ordinal, listing)
-                if jail
-                else from_trash(settings, library, request, row)
-            )
-            affected = {file["source"]["path"] for file in item["files"] if file["remove"]}
-            if affected & inputs:
-                raise ArchiveError("Another item already changes this source")
-            resolve_collisions(item, request, reserved)
-            inputs.update(affected)
-            items.append(item)
-        except (OSError, ValueError, RuntimeError) as error:
-            skipped.append({"path": label, "reason": str(error)})
-    body = request.model_dump(mode="json")
-    token = hashlib.sha256(
-        packed([library, settings.archive.model_dump(mode="json"), body, items]).encode()
+    with closing(
+        trash_candidates(db, request) if is_trash else db.execute(*asset_query(request))
+    ) as rows:
+        for ordinal, row in enumerate(rows, 1):
+            label, size = (row["path"], row["size"]) if jail else (row[0], 0)
+            try:
+                if jail:
+                    item = asset_plan(settings, library, jail, request, row, ordinal, listing)
+                else:
+                    key, entry = row
+                    if entry is None:
+                        raise ArchiveError("Unknown trash entry")
+                    size = sum(file["size"] for file in json.loads(entry["files"]))
+                    if db.execute(
+                        "SELECT 1 FROM archive_items WHERE status='recovery' "
+                        "AND json_extract(plan,'$.trash_id')=? LIMIT 1",
+                        (key,),
+                    ).fetchone():
+                        raise ArchiveError("Retry the blocked recovery for this entry first.")
+                    item = from_trash(settings, library, request, entry)
+                check_planned_write_roots(item, request, roots, proven)
+                affected = {file["source"]["path"] for file in item["files"] if file["remove"]}
+                if affected & inputs:
+                    raise ArchiveError("Another item already changes this source")
+                resolve_collisions(item, request, reserved)
+                inputs.update(affected)
+            except (OSError, ValueError, RuntimeError) as error:
+                yield False, {"path": label, "reason": str(error)}, size
+            else:
+                yield True, item, size
+
+
+def policy_key(settings, library):
+    config = settings.libraries[library]
+    return hashlib.sha256(
+        packed(
+            [library, config.model_dump(mode="json"), settings.archive.model_dump(mode="json")]
+        ).encode()
     ).hexdigest()
-    return {
-        "confirmation": token,
-        "items": items,
-        "skipped": skipped,
-        "count": len(items),
-        "next_id": rows[MAX_ITEMS - 1]["id"] if len(rows) > MAX_ITEMS else None,
-        **estimates(request, items),
-    }
+
+
+def preview_digest(request, policy):
+    digest = hashlib.sha256()
+    digest.update(packed([policy, request.model_dump(mode="json")]).encode() + b"\n")
+    return digest
+
+
+def preview(db, settings: Settings, library: str, request: ArchiveRequest) -> dict:
+    """Build small internal previews for retention and synthetic integration tests."""
+    validate_preview(db, settings, library, request)
+    items, skipped = [], []
+    totals = PreviewTotals()
+    digest = preview_digest(request, policy_key(settings, library))
+    for eligible, row, size in preview_rows(db, settings, library, request):
+        digest.update(packed([eligible, row]).encode() + b"\n")
+        totals.record(row if eligible else None, size, request)
+        (items if eligible else skipped).append(row)
+    summary = totals.summary(request)
+    digest.update(packed(summary).encode())
+    return {"confirmation": digest.hexdigest(), "items": items, "skipped": skipped, **summary}

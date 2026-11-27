@@ -5,10 +5,10 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import date
 from pathlib import Path
-from threading import get_native_id
+from threading import Lock, get_native_id
 
 from photocull.archive import (
     VIDEO,
@@ -24,14 +24,32 @@ from photocull.archive import (
     validate_capability,
 )
 from photocull.db import connect, write
-from photocull.db.archive import audit, insert_job
-from photocull.media.walk import MediaJail, open_directory, source_key
+from photocull.db.archive import audit, insert_job, materialize
+from photocull.db.archive_preview import build as build_preview
+from photocull.db.archive_preview import prune as prune_previews
+from photocull.db.archive_rules import schedule as schedule_rules
+from photocull.media.walk import MediaJail, OutsideLibrary, open_directory, source_key
 from photocull.worker import archive_fs as fs
+from photocull.worker import archive_selftest
 from photocull.worker.archive_media import Tools, convert, probe_video, video_stream
 from photocull.worker.archive_media import duration as video_duration
 
 LOG = logging.getLogger(__name__)
 CONVERSIONS = VIDEO | {"dng", "jpeg", "heic", "avif"}
+
+
+def lower_thread_priority():
+    tid = get_native_id()
+    os.setpriority(os.PRIO_PROCESS, tid, max(10, os.getpriority(os.PRIO_PROCESS, tid)))
+
+
+def prepare_preview(service):
+    lower_thread_priority()
+    build_preview(service.db_path, service.settings, service.library, stop=service.stop)
+
+
+class StalePlan(ArchiveError):
+    pass
 
 
 class Paused(Exception):
@@ -43,8 +61,9 @@ class Cancelled(Exception):
 
 
 class ArchiveWork:
-    def __init__(self, settings, library, stop):
+    def __init__(self, settings, library, stop, gate=None):
         self.settings, self.library, self.stop = settings, library, stop
+        self.gate = gate if gate is not None else Lock()
         self.config = settings.archive
         self.db_path = settings.library_state(library) / "index.db"
         self.source_roots = self.config.write_roots
@@ -57,12 +76,18 @@ class ArchiveWork:
         return permitted(path, (self.export,) if export and self.export else self.source_roots)
 
     def check_read(self, db, item, plan, request):
+        try:
+            self.check_selection(db, item, plan, request)
+        except (FileNotFoundError, NotADirectoryError, OutsideLibrary) as error:
+            raise StalePlan(str(error)) from error
+
+    def check_selection(self, db, item, plan, request):
         if item["asset_id"] is None:
             row = db.execute(
                 "SELECT status FROM archive_trash WHERE id = ?", (item["trash_id"],)
             ).fetchone()
             if row is None or row["status"] != "available":
-                raise ArchiveError("Trash entry changed")
+                raise StalePlan("Trash entry changed")
             return
         jail = MediaJail(self.settings.libraries[self.library], self.settings.state_dir)
         with jail.open_media(item["relative"]) as (fd, actual):
@@ -70,13 +95,13 @@ class ArchiveWork:
                 str(actual) != plan[0]["source"]["path"]
                 or source_key(os.fstat(fd)) != plan[0]["source"]["key"]
             ):
-                raise ArchiveError("Indexed source changed. Preview again.")
-        if request.destructive:
-            row = db.execute(*asset_query(request, asset_id=item["asset_id"])).fetchone()
-            if not row or not row["active"] or row["revision"] != item["revision"]:
-                raise ArchiveError("Asset rating or selection changed. Preview again.")
-        if sidecar_state(actual) != (item["sidecars"], item["shared"]):
-            raise ArchiveError("Sidecars or file pairing changed. Preview again.")
+                raise StalePlan("Indexed source changed. Preview again.")
+        row = db.execute(*asset_query(request, asset_id=item["asset_id"])).fetchone()
+        if not row or row["revision"] != item["revision"]:
+            raise StalePlan("Asset rating or selection changed. Preview again.")
+        files, shared = sidecar_state(actual)
+        if files != item["sidecars"] or (shared and not item["shared"]):
+            raise StalePlan("Sidecars or file pairing changed. Preview again.")
 
     def trash_root(self, source, device):
         if self.trash:
@@ -86,6 +111,26 @@ class ArchiveWork:
         while folder != root and folder.parent.stat().st_dev == device:
             folder = folder.parent
         return folder / ".photocull-trash"
+
+    def verify_write_mount(self, db, path):
+        root = self.root(path)
+        row = db.execute(
+            "SELECT result FROM archive_write_checks WHERE path=?", (str(root),)
+        ).fetchone()
+        report = json.loads(row["result"]) if row else {}
+        if not report.get("passed"):
+            raise ArchiveError(f"Write root has no passing worker filesystem self-test: {root}")
+        with open_directory(root) as directory:
+            if (
+                not archive_selftest.writable(directory)
+                or archive_selftest.mount_identity(directory) != report["identity"]
+            ):
+                raise ArchiveError(f"Write root changed or became read-only: {root}")
+        mount = archive_selftest.nearest_mount(path.parent, root)
+        if not archive_selftest.same_mount(mount, report["identity"]):
+            raise ArchiveError(
+                f"Configure and test the nested mount as a write root: {path.parent}"
+            )
 
     def staging(self, path, ticket, *, create=False, export=False):
         root = self.root(path, export=export)
@@ -137,16 +182,26 @@ class ArchiveWork:
             for i, record in enumerate(plan):
                 old = record["source"]
                 source = Path(old["path"])
-                record["source"] = original = old | fs.fingerprint(source, pulse, old)
+                if record["remove"]:
+                    self.verify_write_mount(db, source)
+                try:
+                    record["source"] = original = old | fs.fingerprint(source, pulse, old)
+                except (FileNotFoundError, ArchiveError) as error:
+                    raise StalePlan(str(error)) from error
                 if record["remove"]:
                     self.staging(source, ticket, create=True)
                 if undo := record.get("undo"):
                     path = Path(undo["path"])
-                    record["undo"] = fs.fingerprint(path, pulse, undo)
+                    self.verify_write_mount(db, path)
+                    try:
+                        record["undo"] = fs.fingerprint(path, pulse, undo)
+                    except (FileNotFoundError, ArchiveError) as error:
+                        raise StalePlan(str(error)) from error
                     self.staging(path, ticket, create=True)
                 if record["remove"] and request.operation not in {"restore", "purge", "undo"}:
                     root = self.trash_root(source, os.stat(source).st_dev)
                     path = root / ticket / f"{i}{source.suffix.lower()}"
+                    self.verify_write_mount(db, path)
                     with fs.directories(path.parent, self.root(path), mode=0o700):
                         pass
                     if child_stat(path):
@@ -155,9 +210,11 @@ class ArchiveWork:
                 if not record["target"]:
                     continue
                 target = Path(record["target"])
+                if not request.exports:
+                    self.verify_write_mount(db, target)
                 self.staging(target, ticket, create=True, export=request.exports)
                 if target != source and child_stat(target):
-                    raise ArchiveError(f"Destination already exists: {target}")
+                    raise StalePlan(f"Destination appeared after preview: {target}")
                 staged = Path(record["staged"])
                 if i == 0 and request.operation in CONVERSIONS:
                     db.execute(
@@ -196,14 +253,24 @@ class ArchiveWork:
                         not (info := child_stat(Path(file["path"])))
                         or source_key(info) != file["key"]
                     ):
-                        raise ArchiveError(f"Source changed during preparation: {file['path']}")
+                        raise StalePlan(f"Source changed during preparation: {file['path']}")
             pulse()
         except BaseException:
             self.cleanup(plan, request)
             raise
         return plan
 
-    def commit(self, plan, request, pulse):
+    def commit(self, db, plan, request, pulse):
+        # Recheck live mount identity before any durable filesystem action or journal replay.
+        for record in plan:
+            paths = [record.get("backup"), record["source"]["path"] if record["remove"] else None]
+            if not request.exports:
+                paths.append(record["target"])
+            if undo := record.get("undo"):
+                paths.append(undo["path"])
+            for value in paths:
+                if value:
+                    self.verify_write_mount(db, Path(value))
         # All stages use the same durable intent. Replay accepts already-completed effects
         # only when their filesystem identities and verified content agree with the intent.
         for record in plan:
@@ -305,20 +372,19 @@ class ArchiveWork:
                     "UPDATE archive_trash SET status = ? WHERE id = ?",
                     ("purged" if request.operation == "purge" else "restored", item["trash_id"]),
                 )
-            if (
-                request.destructive
-                and not request.exports
-                and item["asset_id"]
-                and plan[0]["target"]
-            ):
-                old = item["relative"]
-                base = self.settings.libraries[self.library].root.resolve()
-                new = str(Path(plan[0]["target"]).relative_to(base))
-                if old != new:
+            relink = self.reindex_entry(db, item, plan, request)
+            if relink:
+                updated = db.execute(
+                    "UPDATE archive_reindex SET ready=1 "
+                    "WHERE path=? AND asset_id=? AND after_hash=?",
+                    (relink[0], relink[2], relink[4]),
+                )
+                if not updated.rowcount:
+                    # Journals from before catalog relinking can finish after an upgrade.
                     db.execute(
-                        "INSERT OR REPLACE INTO archive_rating_transfer "
-                        "SELECT ?,?,rating,rejected FROM assets WHERE id=?",
-                        (new, plan[0]["output"]["sha256"], item["asset_id"]),
+                        "INSERT INTO archive_reindex VALUES(?,?,?,?,?,1) "
+                        "ON CONFLICT(path) DO NOTHING",
+                        relink,
                     )
             audit(db, *args, "completed", {"files": details})
             db.execute(
@@ -327,9 +393,55 @@ class ArchiveWork:
                 args[:2],
             )
 
+    def reindex_entry(self, db, item, plan, request):
+        if not plan[0]["target"] or (request.mode != "overwrite" and request.operation != "undo"):
+            return None
+        base = self.settings.libraries[self.library].root.resolve()
+        target = str(Path(plan[0]["target"]).relative_to(base))
+        source_path, asset_id = item["relative"], item["asset_id"]
+        before = plan[0]["source"]["sha256"]
+        if request.operation == "undo":
+            undo = plan[0]["undo"]
+            source_path, before = str(Path(undo["path"]).relative_to(base)), undo["sha256"]
+            source = db.execute(
+                "SELECT id FROM assets WHERE path=? AND content_hash=?", (source_path, before)
+            ).fetchone()
+            if source is None:
+                return None
+            asset_id = source["id"]
+        return target, source_path, asset_id, before, plan[0]["output"]["sha256"]
+
+    @contextmanager
+    def publish_gate(self, pulse):
+        while not self.gate.acquire(timeout=0.2):
+            pulse()
+        try:
+            pulse()
+            yield
+        finally:
+            self.gate.release()
+
+    def save_intent(self, db, item, request, plan, args):
+        with write(db):
+            if db.execute("SELECT cancelled FROM archive_jobs WHERE id=?", args[:1]).fetchone()[0]:
+                raise Cancelled
+            db.execute(
+                "UPDATE archive_items SET journal=?,phase='publishing' "
+                "WHERE job_id=? AND ordinal=?",
+                (packed(plan), *args[:2]),
+            )
+            if relink := self.reindex_entry(db, item, plan, request):
+                inserted = db.execute(
+                    "INSERT INTO archive_reindex(path,source_path,asset_id,before_hash,after_hash) "
+                    "VALUES(?,?,?,?,?) ON CONFLICT(path) DO NOTHING RETURNING path",
+                    relink,
+                ).fetchone()
+                if inserted is None:
+                    raise ArchiveError("Another archive operation owns this catalog path.")
+            audit(db, *args, "prepared", {"files": plan})
+
     def process(self, row):
-        tid = get_native_id()
-        os.setpriority(os.PRIO_PROCESS, tid, max(10, os.getpriority(os.PRIO_PROCESS, tid)))
+        lower_thread_priority()
         request = ArchiveRequest.model_validate_json(row["request"])
         item = json.loads(row["plan"])
         args = (row["job_id"], row["ordinal"], row["actor"])
@@ -367,28 +479,29 @@ class ArchiveWork:
                             "Worker interrupted this item three times. "
                             "Inspect logs and preview again."
                         )
-                    plan = self.prepare(db, item, request, ticket, args[:2], pulse)
-                    with write(db):
-                        if db.execute(
-                            "SELECT cancelled FROM archive_jobs WHERE id = ?", args[:1]
-                        ).fetchone()[0]:
-                            self.cleanup(plan, request)
-                            plan = None
-                            raise Cancelled
-                        db.execute(
-                            "UPDATE archive_items SET journal=?,phase='publishing' "
-                            "WHERE job_id=? AND ordinal=?",
-                            (packed(plan), *args[:2]),
-                        )
-                        audit(db, *args, "prepared", {"files": plan})
-                self.commit(plan, request, pause)
-                self.finish(db, row, item, plan, request, ticket)
+                    prepared = self.prepare(db, item, request, ticket, args[:2], pulse)
+                    try:
+                        with self.publish_gate(pulse):
+                            self.check_read(db, item, item["files"], request)
+                            self.save_intent(db, item, request, prepared, args)
+                            plan = prepared
+                            self.commit(db, plan, request, pause)
+                            self.finish(db, row, item, plan, request, ticket)
+                    finally:
+                        if plan is None:
+                            self.cleanup(prepared, request)
+                else:
+                    with self.publish_gate(pause):
+                        self.commit(db, plan, request, pause)
+                        self.finish(db, row, item, plan, request, ticket)
             except Paused:
                 return
             except (ValueError, Cancelled, OSError, RuntimeError, KeyError, TypeError) as error:
-                status = (
-                    "cancelled" if isinstance(error, Cancelled) else "recovery" if plan else "error"
-                )
+                status = "error"
+                if plan:
+                    status = "recovery"
+                elif isinstance(error, (Cancelled, StalePlan)):
+                    status = "cancelled" if isinstance(error, Cancelled) else "skipped"
                 detail = str(error) or status
                 with write(db):
                     db.execute(
@@ -396,7 +509,7 @@ class ArchiveWork:
                         "WHERE job_id = ? AND ordinal = ?",
                         (status, detail, *args[:2]),
                     )
-                    audit(db, *args, status, {"error": detail})
+                    audit(db, *args, status, {"path": item["relative"], "error": detail})
                 if status != "cancelled":
                     LOG.warning(
                         "Archive %s item %s (%s): %s", row["job_id"], row["ordinal"], status, detail
@@ -409,6 +522,7 @@ class ArchiveWork:
             )
 
     def claim(self, db, limit):
+        materialize(db)
         sql = """
             SELECT i.*,j.actor,j.request,j.cancelled FROM archive_items i
             JOIN archive_jobs j ON j.id=i.job_id
@@ -427,33 +541,43 @@ class ArchiveWork:
             )
         return rows
 
+    def check_filesystems(self):
+        lower_thread_priority()
+        with connect(self.db_path) as db:
+            self.update_permissions(db)
+            prune_previews(db)
+
     def update_permissions(self, db):
         now = time.time()
         if now < self.next_permissions:
             return
         self.next_permissions = now + 30
-        paths = set(source_write_roots(self.settings, self.library))
+        roots = set(source_write_roots(self.settings, self.library))
         if self.trash:
-            paths.add(self.root(self.trash))
-        if self.export:
-            paths.add(self.export)
-        values = []
+            roots.add(self.root(self.trash))
+        paths = roots | ({self.export} if self.export else set())
+        values, checks = [], []
         for path in paths:
-            writable = False
+            writable, identity = False, None
             try:
                 with open_directory(path) as fd:
-                    writable = not (os.fstatvfs(fd).f_flag & os.ST_RDONLY) and os.access(
-                        ".",
-                        os.W_OK | os.X_OK,
-                        dir_fd=fd,
-                        effective_ids=True,
-                    )
-            except OSError:
+                    writable = archive_selftest.writable(fd)
+                    identity = archive_selftest.mount_identity(fd)
+            except (OSError, ArchiveError):
                 pass
             values.append((str(path), writable, now))
+            if path in roots:
+                row = db.execute(
+                    "SELECT result FROM archive_write_checks WHERE path=?", (str(path),)
+                ).fetchone()
+                report = json.loads(row["result"]) if row else {}
+                if report.get("identity") != identity or report.get("writable") != writable:
+                    report = archive_selftest.describe(self.settings, self.library, path)
+                    checks.append((str(path), packed(report), now))
         with write(db):
             db.execute("DELETE FROM archive_permissions")
             db.executemany("INSERT INTO archive_permissions VALUES(?,?,?)", values)
+            db.executemany("INSERT OR REPLACE INTO archive_write_checks VALUES(?,?,?)", checks)
 
     def maintenance(self, db):
         now = time.time()
@@ -484,7 +608,8 @@ class ArchiveWork:
 
     def settle(self, db):
         row = db.execute(
-            "SELECT * FROM archive_jobs WHERE finished_at IS NULL AND NOT EXISTS ("
+            "SELECT * FROM archive_jobs WHERE finished_at IS NULL "
+            "AND (manifest_remaining=0 OR cancelled=1) AND NOT EXISTS ("
             "SELECT 1 FROM archive_items WHERE job_id=archive_jobs.id "
             "AND status IN ('pending','running'))"
         ).fetchone()
@@ -492,7 +617,8 @@ class ArchiveWork:
             request = ArchiveRequest.model_validate_json(row["request"])
             with write(db):
                 db.execute(
-                    "UPDATE archive_jobs SET finished_at=? WHERE id=?", (time.time(), row["id"])
+                    "UPDATE archive_jobs SET finished_at=?,preview_id=NULL WHERE id=?",
+                    (time.time(), row["id"]),
                 )
                 audit(db, row["id"], 0, row["actor"], "finished", {})
                 if request.destructive and request.operation != "purge":
@@ -503,8 +629,7 @@ class ArchiveWork:
                     )
 
     def video_metadata(self, row):
-        tid = get_native_id()
-        os.setpriority(os.PRIO_PROCESS, tid, max(10, os.getpriority(os.PRIO_PROCESS, tid)))
+        lower_thread_priority()
         codec, rate, width, height, duration, captured_at, make, model = (
             "",
             None,
@@ -564,11 +689,13 @@ class ArchiveWork:
 
 
 class Archives:
-    def __init__(self, settings, stop, stack):
+    def __init__(self, settings, stop, stack, gates):
         self.pool = stack.enter_context(
             ThreadPoolExecutor(max_workers=settings.archive.parallelism)
         )
-        self.libraries = [ArchiveWork(settings, name, stop) for name in sorted(settings.libraries)]
+        self.libraries = [
+            ArchiveWork(settings, name, stop, gates[name]) for name in sorted(settings.libraries)
+        ]
         self.pending = set()
         self.limit = settings.archive.parallelism
         self.cursor = 0
@@ -577,7 +704,7 @@ class Archives:
         for worker in self.libraries:
             worker.recover()
             with connect(worker.db_path) as db:
-                worker.update_permissions(db)
+                db.execute("DELETE FROM archive_write_checks")
 
     def step(self, idle):
         now = time.monotonic()
@@ -598,13 +725,29 @@ class Archives:
             service = self.libraries[index]
             if self.active is not None and self.active is not service:
                 continue
+            if not self.pending and time.time() >= service.next_permissions:
+                self.active = service
+                self.pending.add(self.pool.submit(service.check_filesystems))
+                self.cursor = (index + 1) % len(self.libraries)
+                return
             with connect(service.db_path) as db:
-                service.update_permissions(db)
                 service.settle(db)
                 if not db.execute(
                     "SELECT 1 FROM archive_jobs WHERE finished_at IS NULL"
                 ).fetchone():
                     service.maintenance(db)
+                if not self.pending:
+                    schedule_rules(db, service.settings, service.library)
+                if (
+                    not self.pending
+                    and db.execute(
+                        "SELECT 1 FROM archive_previews WHERE status IN ('pending','running')"
+                    ).fetchone()
+                ):
+                    self.active = service
+                    self.pending.add(self.pool.submit(prepare_preview, service))
+                    self.cursor = (index + 1) % len(self.libraries)
+                    return
                 rows = service.claim(db, available)
                 if rows:
                     self.active = service

@@ -32,6 +32,11 @@ def main() -> None:
     mode.add_argument("--dry-run", action="store_true", help="preview changes (default)")
     mode.add_argument("--write", action="store_true", help="write confirmed by the operator")
     add_command(commands)
+    if sys.argv[1:3] == ["archive", "selftest"]:
+        from photocull.archive_cli import selftest
+
+        selftest(sys.argv[3:])
+        return
     args = parser.parse_args()
     settings = load_settings()
     if args.command == "libraries":
