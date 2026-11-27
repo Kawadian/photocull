@@ -17,10 +17,13 @@ from photocull.api import create_app
 from photocull.api.media import CacheAccess
 from photocull.config import DerivativeSettings, Library, Settings
 from photocull.db import connect, initialize, write
+from photocull.db.derivatives import DerivativeJob
+from photocull.media.cache import cache_path
 from photocull.media.color import DISPLAY_P3, SRGB
 from photocull.media.derivatives import VARIANTS, derivative_path, recipe
 from photocull.media.images import register_heif
-from photocull.worker.derivatives import Derivatives
+from photocull.media.walk import source_key
+from photocull.worker.derivatives import Derivatives, _generate
 from tests.archive_fixtures import synthetic_dng
 from tests.worker_harness import start_worker, wait_for
 
@@ -327,4 +330,83 @@ def test_cache_roots_stay_outside_the_photo_library(tmp_path):
             derivatives=DerivativeSettings(
                 hot_dir=tmp_path / "cache", large_dir=tmp_path / "cache/large"
             ),
+        )
+
+
+def test_cached_media_rejects_symlinks_and_preserves_missing_detail_fallback(tmp_path):
+    settings = settings_for(tmp_path)
+    source = settings.libraries["photos"].root / "camera.jpg"
+    source_jpeg(source)
+    with TestClient(create_app(settings)) as client, start_worker(settings):
+        asset = scan(client)[source.name]
+        state = settings.library_state("photos")
+        thumbnail = cache_path(state, "thumbs", asset["id"], asset["content_hash"])
+        asset_url = f"{BASE}/assets/{asset['id']}/media/"
+        preview = client.get(asset_url + "preview")
+        assert preview.status_code == 200
+        assert client.get(asset_url + "detail").content == preview.content
+        thumbnail.unlink()
+        thumbnail.symlink_to(source)
+        assert client.get(asset_url + "thumb").status_code == 404
+
+
+def test_cache_generation_and_cleanup_stay_inside_the_cache_tree(tmp_path):
+    settings = settings_for(tmp_path)
+    library = "photos"
+    root = settings.libraries[library].root
+    source = root / "camera.jpg"
+    source_jpeg(source)
+    variant = VARIANTS["grid-256.jpg"]
+    revision = "a" * 64 + "-" + recipe(settings.derivatives)
+    target = derivative_path(settings, library, 1, variant, revision)
+    target.parent.parent.mkdir(parents=True)
+    target.parent.symlink_to(root, target_is_directory=True)
+    legacy_dir = settings.library_state(library)
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "thumbs").symlink_to(root, target_is_directory=True)
+    protected = (root / ".derivative-existing", root / target.name)
+    for file in protected:
+        file.write_bytes(b"original fixture")
+    before = sorted(file.name for file in root.iterdir())
+    job = DerivativeJob(
+        1, source.name, "image", source_key(source.stat()), revision, variant.name, 1
+    )
+    assert not _generate(settings, library, [job], lambda: None)[0]
+
+    path = legacy_dir / "index.db"
+    initialize(path)
+    with ExitStack() as stack:
+        db = stack.enter_context(connect(path))
+        with write(db):
+            db.execute("INSERT INTO scan_requests(id,status,created_at) VALUES(1,'done',0)")
+            db.execute(
+                """INSERT INTO assets(id,path,folder,kind,size,mtime_ns,content_hash,scan_id,day)
+                   VALUES (1,'camera.jpg','','image',0,0,?,1,'2025-01-01')""",
+                ("a" * 64,),
+            )
+            db.execute(
+                """INSERT INTO derivative_files
+                   (asset_id,variant,version,tier,status,priority,requested_at,last_access,byte_size)
+                   VALUES (1,?,?,'hot','running',1,0,0,0)""",
+                (variant.name, revision),
+            )
+        Derivatives(settings, [SimpleNamespace(db=db, state=legacy_dir)], stack, Event())
+    assert sorted(file.name for file in root.iterdir()) == before
+    assert all(file.read_bytes() == b"original fixture" for file in protected)
+
+
+def test_browser_configuration_defaults_and_external_state(tmp_path):
+    settings = Settings()
+    assert settings.browser.strip_location is True
+    assert settings.derivatives.hot_mib == 1536
+    assert settings.derivatives.large_mib == 4096
+    assert settings.derivatives.prewarm == 64
+    assert settings.derivatives.original_download is False
+    assert settings.derivatives.original_streaming is False
+    media = tmp_path / "library"
+    with pytest.raises(ValueError, match="State directory must be outside media roots"):
+        Settings(
+            libraries={"photos": Library(root=media)},
+            state_dir=media / ".photocull",
+            derivatives=DerivativeSettings(enabled=False),
         )

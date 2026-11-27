@@ -4,7 +4,9 @@ import os
 import re
 import stat
 from contextlib import contextmanager, suppress
+from fnmatch import fnmatchcase
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from photocull.media.walk import open_directory
 
@@ -41,7 +43,7 @@ def transfer_directory(state: Path, *, create: bool = False):
 
 
 @contextmanager
-def open_regular(parent: int, name: str):
+def open_regular(parent: int | None, name: str):
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
     try:
         info = os.fstat(fd)
@@ -50,3 +52,47 @@ def open_regular(parent: int, name: str):
         yield fd, info
     finally:
         os.close(fd)
+
+
+@contextmanager
+def open_artifact(path: Path):
+    with open_directory(path.parent.absolute()) as parent, open_regular(parent, path.name) as file:
+        yield file
+
+
+@contextmanager
+def stage_artifact(target: Path, prefix: str):
+    # Keep the parent pinned through creation, encoding and atomic publication.
+    with (
+        open_directory(target.parent.absolute(), create=True) as parent,
+        NamedTemporaryFile(dir=f"/proc/self/fd/{parent}", prefix=prefix, delete=False) as file,
+    ):
+        try:
+            yield file
+        finally:
+            with suppress(FileNotFoundError):
+                os.unlink(Path(file.name).name, dir_fd=parent)
+
+
+def unlink_artifact(path: Path) -> None:
+    with (
+        suppress(FileNotFoundError, NotADirectoryError),
+        open_directory(path.parent.absolute()) as parent,
+    ):
+        os.unlink(path.name, dir_fd=parent)
+
+
+def prune_artifacts(directory: Path, pattern: str, *, keep: str | None = None) -> None:
+    with (
+        suppress(FileNotFoundError, NotADirectoryError),
+        open_directory(directory.absolute()) as parent,
+        os.scandir(parent) as entries,
+    ):
+        for entry in entries:
+            if (
+                entry.name != keep
+                and fnmatchcase(entry.name, pattern)
+                and not entry.is_dir(follow_symlinks=False)
+            ):
+                with suppress(FileNotFoundError):
+                    os.unlink(entry.name, dir_fd=parent)

@@ -10,6 +10,7 @@ from fastapi import Path as RoutePath
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, StringConstraints
 
+from photocull.api.media import cached_media
 from photocull.config import Settings
 from photocull.db import connect, write
 from photocull.db.catalog import mark_catalog_updated
@@ -408,11 +409,9 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
                 (asset_id, key, asset["content_hash"]),
             ).fetchone()
         target = video_path(path.parent, asset_id, asset["content_hash"], key)
-        if row is None or not target.is_file():
+        if row is None:
             raise HTTPException(404, "Video preview unavailable")
-        return FileResponse(
-            target, media_type="video/mp4", headers={"Cache-Control": "private, no-cache"}
-        )
+        return cached_media(target, "video/mp4")
 
     @app.get(PREFIX + "/assets/{asset_id}/video/captions")
     def video_captions(library: str, asset_id: Id):

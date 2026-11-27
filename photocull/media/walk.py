@@ -69,12 +69,21 @@ class MediaEntry:
 
 
 @contextmanager
-def open_directory(path: Path) -> Iterator[int]:
+def open_directory(path: Path, *, create: bool = False) -> Iterator[int]:
     """Pin an absolute, canonical directory without following replacement symlinks."""
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError("Expected an absolute directory path without parent traversal")
     fd = os.open("/", DIRECTORY_FLAGS)
     try:
         for part in path.parts[1:]:
-            child = os.open(part, DIRECTORY_FLAGS, dir_fd=fd)
+            try:
+                child = os.open(part, DIRECTORY_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                with suppress(FileExistsError):
+                    os.mkdir(part, mode=0o755, dir_fd=fd)
+                child = os.open(part, DIRECTORY_FLAGS, dir_fd=fd)
             os.close(fd)
             fd = child
         yield fd

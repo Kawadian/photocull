@@ -23,7 +23,7 @@ from photocull.api.archive import mount_archive
 from photocull.api.browse import browse_router
 from photocull.api.collections import collections_router
 from photocull.api.insights import mount_insights
-from photocull.api.media import CacheAccess, mount_media
+from photocull.api.media import CacheAccess, cached_media, mount_media
 from photocull.config import MLSettings, Settings, Stage, load_settings
 from photocull.db import connect, initialize
 from photocull.db.browse import photo_details
@@ -538,13 +538,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if row is None:
                 raise HTTPException(404, "Preview unavailable")
         target = cache_path(db_path.parent, VARIANTS[variant], asset_id, row["content_hash"])
-        if variant == "detail" and not target.is_file():
-            target = cache_path(db_path.parent, "previews", asset_id, row["content_hash"])
-        if not target.is_file():
-            raise HTTPException(404, "Preview unavailable")
-        return FileResponse(
-            target, media_type="image/jpeg", headers={"Cache-Control": "private, no-cache"}
-        )
+        fallback = None
+        if variant == "detail":
+            fallback = cache_path(db_path.parent, "previews", asset_id, row["content_hash"])
+        return cached_media(target, "image/jpeg", fallback=fallback)
 
     @app.post("/api/libraries/{library}/scans", status_code=202)
     def enqueue_scan(library: str):
