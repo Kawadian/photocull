@@ -67,6 +67,12 @@ def jpeg_exif(coordinates: Coordinates) -> bytes:
 
 
 STILLS = {".jpg", ".jpeg", ".heic", ".heif", ".hif", ".dng"}
+DNG_PRIVATE_TAGS = (
+    "OriginalRawFileData",
+    "OriginalRawFileName",
+    "OriginalRawFileDigest",
+    "DNGPrivateData",
+)
 VIDEO_CONTAINERS = {".mp4": "mp4", ".m4v": "mp4", ".mov": "mov", ".mkv": "matroska"}
 
 
@@ -92,9 +98,15 @@ def strip_copy(tools: Tools, source: Path, output: Path) -> None:
             "-GPSCoordinates=",
             "-LocationInformation=",
             "-LocationName=",
+            *(f"-{tag}=" for tag in DNG_PRIVATE_TAGS if suffix == ".dng"),
             output,
         )
         if suffix == ".dng":
+            tagged = json.loads(
+                tools.run("exiftool", "-j", *(f"-{tag}" for tag in DNG_PRIVATE_TAGS), output)
+            )[0]
+            if tagged.keys() & set(DNG_PRIVATE_TAGS):
+                raise ArchiveError("Cannot verify private or embedded metadata in this DNG")
             if raw_parameters(tools, source) != raw_parameters(tools, output):
                 raise ArchiveError("DNG pixel data or calibration changed")
         else:
