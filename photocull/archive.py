@@ -13,7 +13,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from photocull.config import Settings
 from photocull.db.catalog import AUTO_REJECT_REASON
-from photocull.media.location import portable_suffix
 from photocull.media.walk import EXTENSIONS, MediaJail, excluded, open_directory, source_key
 
 MAX_ITEMS = 500
@@ -122,12 +121,10 @@ class ArchiveRequest(BaseModel):
         # Old requests without a policy retain their recorded export behavior.
         return self.exports and self.include_location is False
 
-    def with_location_policy(self, settings: Settings) -> ArchiveRequest:
+    def with_location_policy(self) -> ArchiveRequest:
         if not self.exports:
             return self
-        return self.model_copy(
-            update={"include_location": settings.browser.includes_location(self.include_location)}
-        )
+        return self.model_copy(update={"include_location": self.include_location is not False})
 
     @model_validator(mode="after")
     def validate_options(self):
@@ -248,7 +245,6 @@ def capabilities(db, settings, library):
             else None
         ),
         "retention_days": config.retention_days,
-        "strip_location": settings.browser.strip_location,
     }
 
 
@@ -421,8 +417,6 @@ def destination_for(settings, library, request, row, source, ordinal):
     else:
         name = source.name
     if request.exports:
-        if request.strip_location and request.operation in {"copy", "rename"}:
-            name = Path(name).with_suffix(portable_suffix(row["kind"])).name
         return settings.archive.export_roots[library] / row["folder"] / name
     return source.with_name(name)
 
@@ -468,7 +462,6 @@ def asset_plan(settings, library, jail, request, row, ordinal, listing):
         )
     return {
         "asset_id": row["id"],
-        **({"kind": row["kind"]} if request.strip_location else {}),
         "relative": row["path"],
         "files": files,
         "duration": row["archive_duration"],

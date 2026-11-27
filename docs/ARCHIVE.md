@@ -155,6 +155,14 @@ Retention is off by default. Enabling it approves worker-managed purge of expire
 
 The worker skips outputs that grow. Duplicate matches and filename pairs remain review suggestions because visual similarity and shared names do not establish whether a file can be discarded. Rename templates use the fixed tokens above.
 
+## Location information in exports
+
+Archive copies, export renames and keeper exports preserve the original media byte for byte by default, including GPS and embedded metadata. Archive preserves its usual sidecar behavior. Keeper exports include existing XMP only when requested. The Browser’s sharing and report preference has no effect on these defaults.
+
+Choose **Remove location information** to scrub only the exported copy. ExifTool removes location metadata from JPEG, HEIC/HEIF/HIF and DNG and removes descriptive XMP, IPTC and camera MakerNotes that can also carry location. It preserves orientation, color and the image format, with decoded pixel verification for JPEG and supported HEIF and raw-sample and calibration verification for DNG. Supported MP4/M4V, MOV and MKV files use FFmpeg stream copy with container and stream metadata removed. The worker checks stream properties and encoded audio/video packet hashes. Removal omits XMP sidecars.
+
+Unsupported formats, additional or timed metadata tracks, and files that fail verification require retaining metadata or choosing an explicit Archive conversion. The worker never silently re-encodes a copy or changes its extension. The original remains available with its metadata. Archive conversions apply the selected codec and its existing verification when the operator chooses that operation.
+
 ## Saved conversion rules
 
 Choose a conversion in **Plan**, enter its filters and quality, and choose **Save as a rule**. For example, select HEVC, CRF 25, minimum width 3840, minimum video bitrate 30,000 kbps and minimum age 1095 days. The default interval of 0 creates a manual preview rule. Set a positive interval to have the worker prepare a new snapshot periodically. **Rules** indicates when a new preview is available, and offers **Pause schedule** and manual **Prepare preview**. Every rule result goes through the standard confirmation dialog before conversion. Trash retention is configured separately.

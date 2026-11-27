@@ -12,7 +12,6 @@ import zipfile
 from contextlib import ExitStack, contextmanager, suppress
 from html import escape
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 from photocull.db import write
 from photocull.db.catalog import mark_catalog_updated
@@ -21,7 +20,6 @@ from photocull.db.stories import segments
 from photocull.db.transfers import ExportRequest, ReportRequest, select_assets
 from photocull.media.artifacts import artifact_name, open_regular, transfer_directory
 from photocull.media.cache import cache_path
-from photocull.media.location import portable_suffix
 from photocull.media.walk import MediaJail, SourceChanged, open_directory, source_key
 from photocull.worker.location import clean_copy
 
@@ -63,7 +61,7 @@ def identity(info: os.stat_result) -> tuple[int, int]:
     return info.st_dev, info.st_ino
 
 
-def file_name(asset, *, sidecar=False, strip_location=False):
+def file_name(asset, *, sidecar=False):
     # A stable ID keeps names unique. Portable filenames also make ZIP extraction safe.
     name = Path(asset["path"]).name
     stem, extension = os.path.splitext(name)
@@ -72,8 +70,6 @@ def file_name(asset, *, sidecar=False, strip_location=False):
     # Preserve supported camera/file extensions. Never copy separators or
     # control characters from a filesystem name into an archive member.
     suffix = extension.lower() if re.fullmatch(r"\.[A-Za-z0-9]{1,12}", extension) else ""
-    if strip_location:
-        suffix = portable_suffix(asset["kind"])
     return f"{asset['id']}-{stem or 'media'}{'.xmp' if sidecar else suffix}"
 
 
@@ -385,21 +381,16 @@ class Transfers:
                     raise SourceChanged(f"{asset['path']} changed since indexing; rescan and retry")
                 if config.include_location is False:
                     with (
-                        TemporaryDirectory(
-                            dir=self.state, prefix=".keeper-copy-"
-                        ) as output_directory,
                         clean_copy(
                             self.settings,
                             fd,
-                            asset["kind"],
-                            Path(output_directory) / "media",
+                            Path(asset["path"]).suffix,
+                            self.state,
                             lambda: self.check(job_id, pulse),
                         ) as staged,
                         staged.open("rb") as clean,
                     ):
-                        transfer(
-                            clean.fileno(), file_name(asset, strip_location=True), count_bytes=True
-                        )
+                        transfer(clean.fileno(), file_name(asset), count_bytes=True)
                     if source_key(os.fstat(fd)) != asset["source_key"]:
                         raise SourceChanged(f"{asset['path']} changed while exporting")
                 else:
@@ -420,6 +411,7 @@ class Transfers:
     def report(self, job, pulse):
         job_id = job["id"]
         request = ReportRequest.model_validate_json(job["request"])
+        include_location = self.settings.browser.includes_location(request.include_location)
         args = (
             request.start.isoformat() if request.start else "",
             request.end.isoformat() if request.end else "9999-99-99",
@@ -446,8 +438,8 @@ class Transfers:
                 while items := segments(self.db, day, position, 16):
                     for item in items:
                         self.check(job_id, pulse)
-                        self.report_segment(output, item)
-                        used_geonames |= item["title"] is not None
+                        self.report_segment(output, item, include_location)
+                        used_geonames |= include_location and item["title"] is not None
                         position = item["position"]
                 output.write(b"</section>\n")
                 count += 1
@@ -463,19 +455,21 @@ class Transfers:
                 )
             output.write(b"</main>\n")
 
-    def report_segment(self, output, item):
-        title = item["title"] or (
-            f"{item['latitude']:.3f}, {item['longitude']:.3f}"
-            if item["latitude"] is not None
-            else "Location unavailable"
-        )
+    def report_segment(self, output, item, include_location):
+        title = f"Part {item['position']}"
+        if include_location:
+            title = item["title"] or (
+                f"{item['latitude']:.3f}, {item['longitude']:.3f}"
+                if item["latitude"] is not None
+                else "Location unavailable"
+            )
         time_range = " – ".join(value[11:16] for value in (item["started"], item["ended"]) if value)
         count = item["count"]
         output.write(
             f'<article><h3>{escape(title)}</h3><p class="details">'
             f'{escape(time_range)} · {count} items</p><div class="gallery">'.encode()
         )
-        for asset in item["representatives"]:
+        for index, asset in enumerate(item["representatives"], 1):
             path = cache_path(self.state, "thumbs", asset["id"], asset["content_hash"])
             try:
                 with (
@@ -488,7 +482,7 @@ class Transfers:
                 continue
             if len(image) > 512 * 1024:
                 continue
-            label = escape(Path(asset["path"]).name)
+            label = escape(Path(asset["path"]).name) if include_location else f"Photo {index}"
             output.write(
                 b'<figure><img loading="lazy" alt="'
                 + label.encode()

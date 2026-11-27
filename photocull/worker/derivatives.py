@@ -18,11 +18,19 @@ from photocull.media.artifacts import (
     stage_artifact,
     unlink_artifact,
 )
-from photocull.media.derivatives import VARIANTS, VIDEO_LIMITS, derivative_path, recipe
+from photocull.media.derivatives import (
+    VARIANTS,
+    VIDEO_LIMITS,
+    WORKER_DISABLED,
+    WORKER_RECIPE_FILE,
+    derivative_path,
+    recipe,
+)
 from photocull.media.walk import MediaJail, SourceChanged, open_directory, source_key
 
 LOG = logging.getLogger(__name__)
 MIB = 1024 * 1024
+FILE_BUDGET_DIVISOR = 8
 
 
 def encode_image(pixels, variant, settings, file, *, coordinates=None) -> None:
@@ -103,11 +111,12 @@ def _generate(settings: Settings, library: str, jobs: list[queue.DerivativeJob],
                 stack.enter_context(pixels)
             blurhash = image_blurhash(pixels)
         for job in jobs:
-            pulse()
-            variant = VARIANTS[job.variant]
-            target = derivative_path(settings, library, job.asset_id, variant, job.version)
-            budget = (config.hot_mib if variant.tier == "hot" else config.large_mib) * MIB
             try:
+                pulse()
+                variant = VARIANTS[job.variant]
+                target = derivative_path(settings, library, job.asset_id, variant, job.version)
+                tier_mib = config.hot_mib if variant.tier == "hot" else config.large_mib
+                budget = tier_mib * MIB // FILE_BUDGET_DIVISOR
                 coordinates = (
                     read_coordinates(settings, fd, pulse) if variant.include_location else None
                 )
@@ -134,8 +143,10 @@ def _generate(settings: Settings, library: str, jobs: list[queue.DerivativeJob],
                             raise ValueError("File exceeds the derivative cache limit")
                         os.fchmod(staged_fd, 0o600 if variant.include_location else 0o644)
                     staged.replace(staged.with_name(target.name))
-                sizes[job.variant] = size
-            except (OSError, RuntimeError, ValueError) as error:
+                    sizes[job.variant] = size
+            except InterruptedError:
+                break
+            except Exception as error:
                 LOG.warning(
                     "Derivative %s/%s %s failed: %s", library, job.asset_id, job.variant, error
                 )
@@ -153,6 +164,15 @@ class Derivatives:
         self.next_warmup = 0.0
         self.cursor = 0
         self.warm_cursor = 0
+        advertised = self.recipe if self.enabled else WORKER_DISABLED
+        for name in self.catalogs:
+            target = settings.library_state(name) / WORKER_RECIPE_FILE
+            with stage_artifact(target, ".recipe-") as file:
+                file.write(f"{os.getpid()} {advertised}\n".encode("ascii"))
+                file.close()
+                staged = Path(file.name)
+                staged.replace(staged.with_name(target.name))
+        LOG.info("Derivative worker recipe: %s", advertised)
         if self.enabled:
             self.pool = stack.enter_context(
                 ThreadPoolExecutor(max_workers=1, initializer=os.nice, initargs=(8,))

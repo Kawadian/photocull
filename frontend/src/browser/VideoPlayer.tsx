@@ -30,7 +30,7 @@ export function VideoPlayer({ library, asset, media, text, children }: {
   const player = useRef<HTMLVideoElement>(null)
   const seek = useRef(0)
   const base = libraryUrl(library)
-  const url = quality === 'original' ? base + '/assets/' + asset.id + '/original?mode=stream'
+  const url = quality === 'original' ? base + '/assets/' + asset.id + '/original?mode=stream&include_location=true'
     : media.recipe ? derivativeUrl(base, asset, 'video-' + quality + '.mp4', media.recipe) : ''
   const readiness = useDerivativeAvailability(start && quality !== 'original' ? url : '', start)
   const key = url + ':' + start

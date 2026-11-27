@@ -277,9 +277,11 @@ def test_day_stories_report_and_keeper_outputs(tmp_path):
                 {"kind": "copy", "destination": "archive", "xmp": True, "include_location": True},
             ),
             ("report", "reports", {"start": "2025-01-01"}),
+            ("report", "reports", {"start": "2025-01-01", "include_location": True}),
+            ("report", "reports", {"start": "2025-01-01", "include_location": False}),
         ):
             job = payload(client.post(f"{URL}/{path}", json=body))["id"]
-            wait_for(lambda kind=kind, job=job: completed(kind, job))
+            result = wait_for(lambda kind=kind, job=job: completed(kind, job))
             if kind == "export":
                 files = list((export / job).iterdir())
                 assert {file.read_bytes() for file in files} == {
@@ -289,8 +291,17 @@ def test_day_stories_report_and_keeper_outputs(tmp_path):
             else:
                 report = client.get(f"{URL}/transfers/{job}/download")
                 report.raise_for_status()
-                assert "Town &amp; &lt;West&gt;, JP" in report.text
+                include = body.get("include_location", False)
+                assert result["include_location"] is include
+                for value in (
+                    "Town &amp; &lt;West&gt;, JP",
+                    "36.000, 139.000",
+                    "GeoNames",
+                    "日本.jpg",
+                ):
+                    assert (value in report.text) is include
                 assert "data:image/jpeg;base64," in report.text
+                assert report.headers["Cache-Control"] == "private, no-store"
                 assert "Content-Security-Policy" in report.headers
         assert {path.name: path.read_bytes() for path in root.iterdir()} == originals
 

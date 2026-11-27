@@ -28,13 +28,12 @@ from photocull.db.archive import audit, insert_job, materialize
 from photocull.db.archive_preview import build as build_preview
 from photocull.db.archive_preview import prune as prune_previews
 from photocull.db.archive_rules import schedule as schedule_rules
-from photocull.media.artifacts import open_regular
 from photocull.media.walk import MediaJail, OutsideLibrary, open_directory, source_key
 from photocull.worker import archive_fs as fs
 from photocull.worker import archive_selftest
 from photocull.worker.archive_media import Tools, convert, probe_video, video_stream
 from photocull.worker.archive_media import duration as video_duration
-from photocull.worker.location import clean_copy
+from photocull.worker.location import strip_copy
 
 LOG = logging.getLogger(__name__)
 CONVERSIONS = VIDEO | {"dng", "jpeg", "heic", "avif"}
@@ -222,12 +221,13 @@ class ArchiveWork:
                 if i == 0 and request.strip_location and request.operation in {"copy", "rename"}:
                     snapshot = staged.with_name(f"input{source.suffix}")
                     fs.copy_file(source, snapshot, original, pulse)
-                    with (
-                        open_directory(staged.parent) as parent,
-                        open_regular(parent, snapshot.name) as (fd, _),
-                        clean_copy(self.settings, fd, item["kind"], staged, pulse) as clean,
-                    ):
-                        clean.replace(clean.with_name(staged.name))
+                    with open_directory(staged.parent) as directory:
+                        pinned = Path(f"/proc/self/fd/{directory}")
+                        strip_copy(
+                            Tools(self.config, pulse, pass_fds=(directory,)),
+                            pinned / snapshot.name,
+                            pinned / staged.name,
+                        )
                     snapshot.unlink()
                     fs.sync_result(staged, original)
                     record["output"] = fs.fingerprint(staged, pulse)
