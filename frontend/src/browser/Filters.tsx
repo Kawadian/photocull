@@ -75,11 +75,13 @@ export const filterText: Record<Language, typeof en> = {
   },
 }
 
-export function FiltersDialog({ location, apply, close, text }: {
+export function FiltersDialog({ location, apply, close, text, busy, error }: {
   location: BrowserLocation
   apply: (values: FilterValues) => void
   close: () => void
   text: Strings
+  busy?: boolean
+  error?: string
 }) {
   const dialog = useRef<HTMLDialogElement>(null)
   const [draft, setDraft] = useState(location.filters)
@@ -190,9 +192,10 @@ export function FiltersDialog({ location, apply, close, text }: {
           </button>}
         </div>}
       </div>
+      {error && <p className="pcb-filter-error" role="alert">{error}</p>}
       <footer>
-        <button type="button" className="pcb-control" onClick={() => apply({})}>{labels.reset}</button>
-        <button type="submit" className="pcb-control pcb-apply">{labels.apply}</button>
+        <button type="button" className="pcb-control" disabled={busy} onClick={() => apply({})}>{labels.reset}</button>
+        <button type="submit" className="pcb-control pcb-apply" disabled={busy}>{labels.apply}</button>
       </footer>
     </form>
   </dialog>

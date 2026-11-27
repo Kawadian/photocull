@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 from photocull.api.archive import mount_archive
 from photocull.api.browse import browse_router
+from photocull.api.collections import collections_router
 from photocull.api.insights import mount_insights
 from photocull.api.media import CacheAccess, mount_media
 from photocull.config import MLSettings, Settings, Stage, load_settings
@@ -44,6 +45,7 @@ from photocull.db.catalog import (
     get_asset,
 )
 from photocull.db.catalog import set_rating as save_rating
+from photocull.db.collections import MIGRATIONS as COLLECTION_MIGRATIONS
 from photocull.db.insights import asset_insights, public_keys
 from photocull.db.jobs import progress, request_scan, retry_job, scan_error_page
 from photocull.db.search import (
@@ -176,6 +178,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             token = value
         for name in settings.libraries:
             initialize(settings.library_state(name) / "index.db")
+        initialize(settings.state_dir / "browser.db", COLLECTION_MIGRATIONS)
         task = asyncio.create_task(cache_access.run())
         try:
             yield
@@ -593,6 +596,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     mount_insights(app, settings, library_path)
     mount_archive(app, settings, library_path)
     app.include_router(browse_router(settings))
+    app.include_router(collections_router(settings))
     app.include_router(mount_media(settings, library_path, cache_access))
     if (settings.static_dir / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=settings.static_dir / "assets"), name="frontend")

@@ -58,11 +58,11 @@ def write(db: sqlite3.Connection) -> Iterator[None]:
         raise
 
 
-def initialize(path: Path) -> None:
+def initialize(path: Path, migrations: tuple[str, ...] = MIGRATIONS) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with connect(path) as db:
         if (
-            db.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+            db.execute("PRAGMA user_version").fetchone()[0] == len(migrations)
             and db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         ):
             return
@@ -72,10 +72,10 @@ def initialize(path: Path) -> None:
         db.execute("PRAGMA journal_mode = WAL")
         with write(db):
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version > len(MIGRATIONS):
+            if version > len(migrations):
                 raise RuntimeError(f"{path} was created with a newer Photocull")
             directory = files(__package__).joinpath("migrations")
-            for number, filename in enumerate(MIGRATIONS[version:], start=version + 1):
+            for number, filename in enumerate(migrations[version:], start=version + 1):
                 statement = ""
                 for line in directory.joinpath(filename).read_text(encoding="utf-8").splitlines():
                     statement += f"{line}\n"

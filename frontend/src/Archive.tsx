@@ -457,13 +457,13 @@ function consequences(plan: Plan) {
 
 const panels = ['Plan', 'Jobs', 'Trash', 'Rules', 'Write access', 'Storage', 'Duplicates', 'Audit'] as const
 
-export function Archive({ base, online }: { base: string; online: boolean }) {
+export function Archive({ base, online, initialSeed }: { base: string; online: boolean; initialSeed?: number[] }) {
   const url = `${base}/archive`
   const [panel, setPanel] = useState<typeof panels[number]>('Plan')
   const [version, setVersion] = useState(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [seed, setSeed] = useState<number[]>()
+  const [seed, setSeed] = useState(initialSeed)
   const [planned, setPlanned] = useState<{ plan: Plan; id: string }>()
   const [previewPages, setPreviewPages] = useState<number[]>([])
   const [confirm, setConfirm] = useState(false)

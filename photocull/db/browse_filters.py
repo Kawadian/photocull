@@ -97,30 +97,32 @@ def apply_labels(db: sqlite3.Connection, asset_id: int, change: LabelUpdate) -> 
             is None
         ):
             return None
-        removed = db.executemany(
-            "DELETE FROM browser_tags WHERE asset_id = ? AND name_key = ?",
-            ((asset_id, tag_key(name)) for name in change.remove_tags),
-        ).rowcount
-        added = db.executemany(
-            "INSERT OR IGNORE INTO browser_tags(asset_id, name_key, name) VALUES (?, ?, ?)",
-            (
-                (asset_id, tag_key(name), unicodedata.normalize("NFC", name))
-                for name in change.add_tags
-            ),
-        ).rowcount
-        toggled = (
-            change.favorite is not None
-            and db.execute(
-                "UPDATE assets SET favorite = ? WHERE id = ? AND favorite <> ?",
-                (change.favorite, asset_id, change.favorite),
-            ).rowcount
-        )
-        labels = asset_labels(db, asset_id)
-        if len(labels["user_tags"]) > 64:
-            raise ValueError("A photo can have at most 64 user tags")
-        if removed or added or toggled:
+        labels, changed = modify_labels(db, asset_id, change)
+        if changed:
             mark_catalog_updated(db)
         return labels
+
+
+def modify_labels(db: sqlite3.Connection, asset_id: int, change: LabelUpdate) -> tuple[dict, bool]:
+    removed = db.executemany(
+        "DELETE FROM browser_tags WHERE asset_id = ? AND name_key = ?",
+        ((asset_id, tag_key(name)) for name in change.remove_tags),
+    ).rowcount
+    added = db.executemany(
+        "INSERT OR IGNORE INTO browser_tags(asset_id, name_key, name) VALUES (?, ?, ?)",
+        ((asset_id, tag_key(name), unicodedata.normalize("NFC", name)) for name in change.add_tags),
+    ).rowcount
+    toggled = (
+        change.favorite is not None
+        and db.execute(
+            "UPDATE assets SET favorite = ? WHERE id = ? AND favorite <> ?",
+            (change.favorite, asset_id, change.favorite),
+        ).rowcount
+    )
+    labels = asset_labels(db, asset_id)
+    if len(labels["user_tags"]) > 64:
+        raise ValueError("A photo can have at most 64 user tags")
+    return labels, bool(removed or added or toggled)
 
 
 def clauses(db: sqlite3.Connection, library: str, filters: Filters, settings: Settings):

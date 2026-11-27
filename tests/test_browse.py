@@ -230,3 +230,100 @@ def test_library_labels_facets_and_filtered_cursors(timeline):
     assert [
         item["library"] for item in timeline.get(TIMELINE, params=combined).json()["items"]
     ] == ["zulu"]
+
+
+def test_cross_library_album_membership_and_saved_filters(timeline):
+    albums = "/api/browse/albums"
+    manual_response = timeline.post(albums, json={"name": "  Family trip  "})
+    assert manual_response.status_code == 201
+    manual = manual_response.json()
+    assert manual["name"] == "Family trip"
+    assert timeline.post(albums, json={"name": "family TRIP"}).status_code == 409
+    endpoint = f"{albums}/{manual['id']}"
+    selection = {
+        "assets": [{"library": name, "id": asset} for name, asset in [("alpha", 1), ("zulu", 1)]]
+    }
+    member_request = endpoint + "/members"
+    assert timeline.post(member_request, json=selection).json() == {"changed": 2}
+    assert timeline.post(member_request, json=selection).json() == {"changed": 0}
+    assert (
+        timeline.get("/api/browse/alpha/assets/1/albums").json()["items"][0]["id"] == manual["id"]
+    )
+    assert timeline.get("/api/browse/alpha/assets/2/albums").json() == {"items": []}
+    assert timeline.get(albums).json()["items"][0]["count"] == 2
+    assert timeline.get(MONTHS, params={"album": manual["id"]}).json() == {"items": ["2025-04"]}
+
+    params = {"album": manual["id"], "limit": 1}
+    page = timeline.get(TIMELINE, params=params).json()
+    assert [(item["library"], item["id"]) for item in page["items"]] == [("zulu", 1)]
+    assert timeline.get(TIMELINE, params={"cursor": page["next_cursor"]}).status_code == 422
+    page2 = timeline.get(TIMELINE, params=params | {"cursor": page["next_cursor"]}).json()
+    assert [(item["library"], item["id"]) for item in page2["items"]] == [("alpha", 1)]
+    assert timeline.post(member_request, json=selection | {"operation": "remove"}).json() == {
+        "changed": 2
+    }
+    assert timeline.get(TIMELINE, params=params).json()["items"] == []
+
+    smart_settings = {
+        "kind": "smart",
+        "name": "My favorites",
+        "library": "alpha",
+        "filters": {"favorite": True},
+    }
+    smart = timeline.post(albums, json=smart_settings).json()
+    assert timeline.post(f"{albums}/{smart['id']}/members", json=selection).status_code == 422
+    assert timeline.get(TIMELINE, params={"album": smart["id"]}).json()["items"] == []
+    bulk = "/api/browse/selection/labels"
+    body = selection | {"favorite": True, "rating": 4, "add_tags": ["Sunsets"]}
+    assert timeline.patch(bulk, json=body).json()["items"] == [
+        {"library": lib, "count": 1, "status": "done"} for lib in ("alpha", "zulu")
+    ]
+    assert timeline.patch(bulk, json=body).status_code == 200
+    smart_page = timeline.get(TIMELINE, params={"album": smart["id"], "library": "zulu"}).json()
+    assert [(item["library"], item["id"]) for item in smart_page["items"]] == [("alpha", 1)]
+    assert timeline.get(MONTHS, params={"album": smart["id"]}).json() == {"items": ["2025-04"]}
+    for library in ("alpha", "zulu"):
+        asset = timeline.get(f"/api/libraries/{library}/assets/1?details=browser").json()
+        assert asset["revision"] == 1
+        assert asset["rating"] == 4
+        assert asset["user_tags"] == ["Sunsets"]
+
+    update = smart_settings | {"filters": {"start": "2025-03-31"}, "expected_revision": 0}
+    assert timeline.patch(f"{albums}/{smart['id']}", json=update).json()["revision"] == 1
+    assert timeline.patch(f"{albums}/{smart['id']}", json=update).status_code == 409
+    assert timeline.delete(f"{albums}/{smart['id']}?revision=0").status_code == 409
+    assert timeline.delete(f"{albums}/{smart['id']}?revision=1").status_code == 204
+    assert timeline.get(TIMELINE, params={"album": smart["id"]}).status_code == 404
+    assert timeline.get(albums, headers={"X-Photocull-Token": ""}).status_code == 401
+
+
+def test_batch_selection_reports_and_retries_independent_catalogs(timeline):
+    bulk = "/api/browse/selection/labels"
+    body = {
+        "assets": [{"library": "alpha", "id": 1}, {"library": "zulu", "id": 900}],
+        "favorite": True,
+    }
+    albums = "/api/browse/albums"
+    album = timeline.post(albums, json={"name": "Source check"}).json()["id"]
+    members = f"{albums}/{album}/members"
+    assert timeline.post(members, json={"assets": body["assets"]}).status_code == 409
+    assert timeline.get(TIMELINE, params={"album": album}).json()["items"] == []
+    assert timeline.patch(bulk, json=body).json()["items"] == [
+        {"library": "alpha", "count": 1, "status": "done"},
+        {"library": "zulu", "count": 1, "status": "stale"},
+    ]
+    assert timeline.patch(bulk, json={"assets": body["assets"] * 101}).status_code == 422
+    for asset_id in (1, 2, 3):
+        labels = f"/api/browse/alpha/assets/{asset_id}/labels"
+        for batch in range(3):
+            tags = [f"tag-{i}" for i in range(batch * 22, min((batch + 1) * 22, 64))]
+            assert timeline.patch(labels, json={"add_tags": tags}).status_code == 200
+    body = {
+        "assets": [{"library": "alpha", "id": i} for i in (1, 2)],
+        "rating": 5,
+        "add_tags": ["too-many"],
+    }
+    assert timeline.patch(bulk, json=body).json()["items"] == [
+        {"library": "alpha", "count": 2, "status": "tag_limit"}
+    ]
+    assert timeline.get("/api/libraries/alpha/assets/1").json()["rating"] == 0

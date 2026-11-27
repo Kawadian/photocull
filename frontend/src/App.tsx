@@ -34,14 +34,15 @@ function Header({ connected, online, onHelp }: {
   )
 }
 
-function Workspace({ libraries, library, selectLibrary }: {
+function Workspace({ libraries, library, selectLibrary, archiveSeed }: {
   libraries: Library[]
   library: string
   selectLibrary: (library: string) => void
+  archiveSeed?: number[]
 }) {
   const base = `/api/libraries/${library}`
   const { progress, connected } = useProgress(base)
-  const [view, setView] = useState<View>('review')
+  const [view, setView] = useState<View>(archiveSeed ? 'archive' : 'review')
   const [videoStart, setVideoStart] = useState<number>()
   const [insightFilter, setInsightFilter] = useState<{ params: string; label: string; assetId?: number }>()
   const [by, setBy] = useState<GroupBy>('folder')
@@ -267,7 +268,7 @@ function Workspace({ libraries, library, selectLibrary }: {
           </select>
         </label>}
       </nav>
-      {view === 'archive' ? <Archive key={library} base={base} online={!!progress?.worker_online} /> :
+      {view === 'archive' ? <Archive key={library} base={base} online={!!progress?.worker_online} initialSeed={archiveSeed} /> :
       view !== 'review' ? <InsightsScreen key={view} view={view} base={base}
         capability={capabilities?.data} version={version} openReview={openReview}
         videoStart={videoStart} error={capabilities?.error} retry={() => setRefresh((value) => value + 1)} /> : <>
@@ -335,12 +336,22 @@ function Workspace({ libraries, library, selectLibrary }: {
 export function App() {
   const [retry, setRetry] = useState(0)
   const result = useRemote<{ items: Library[] }>('/api/libraries', retry)
-  const [chosen, setChosen] = useState<string>()
+  const [handoff] = useState(() => {
+    const query = new URLSearchParams(window.location.search)
+    if (query.get('view') !== 'archive') return null
+    const library = query.get('library')
+    const rawIds = query.get('ids')?.split(',') ?? []
+    if (!library || !rawIds.length || rawIds.length > 200 || rawIds.some((id) => !/^[1-9][0-9]*$/.test(id)
+        || !Number.isSafeInteger(Number(id)))) return null
+    return { library, ids: [...new Set(rawIds.map(Number))] }
+  })
+  const [chosen, setChosen] = useState(handoff?.library)
   const libraries = result?.data?.items ?? []
   const active = libraries.find(({ name }) => name === chosen)?.name ?? libraries[0]?.name
 
   if (active) {
-    return <Workspace key={active} libraries={libraries} library={active} selectLibrary={setChosen} />
+    return <Workspace key={active} libraries={libraries} library={active} selectLibrary={setChosen}
+      archiveSeed={active === handoff?.library ? handoff.ids : undefined} />
   }
   return (
     <div className="app">

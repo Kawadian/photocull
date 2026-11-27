@@ -12,8 +12,9 @@ Each row is a reviewable pull request. Stack unfinished branches and retarget af
 | 6B · Derivatives and delivery | Extend the preview worker, responsive stills and placeholders, video proxies, original downloads, immutable URLs, two cache tiers, reverse proxy examples | Exercise HEIF, RAW, video posters, metadata stripping, orientation, ICC, eviction and recovery. Verify conditional requests, Range, proxy and direct API delivery. Review storage measurements and migration. Inspect the grid with the new media. |
 | 6C · Viewer | Fullscreen stills and video, progressive loading, gestures, keyboard, zoom, slideshow, metadata, faces and highlights | Exercise keyboard and touch paths, slow or failed media, source cropping and rotations, and synchronous URL navigation. Inspect screenshots at mobile and desktop sizes. |
 | 6D.1 · Filters and labels | Cross-library filters and facets, favorites, user tags, and link replay | Verify the correlation between assigned tags and matches, combined filters, and metadata-only edits. |
-| 6D.2 · Collections and organization | Manual and smart albums, batch selection and edits, archive handoff, people, tags, places, days/trips, and recent additions | Test bulk retries, cross-library membership, stored filters, and mixed-library selection in Playwright. |
+| 6D.2 · Collections and organization | Manual and smart albums, batch selection and edits, archive handoff and album membership in the viewer | Test bulk retries, cross-library membership, stored filters, and mixed-library selection in Playwright. |
 | 6D.3 · Semantic discovery | Japanese and English natural-language search and similar-photo discovery across libraries | Use the existing worker inference queue and verify that ranking combines results from the selected catalogs. |
+| 6D.4 · Discovery views | Dedicated people, tags, places, days/trips, and recent additions | Reuse indexed facets and stories, keep full URL navigation, and check incremental loading. |
 | 6E · Offline and release | PWA, adaptive network preferences, browser accessibility and compatibility, performance gates, end-to-end documentation | Verify installation and offline replay with a bounded cache and no client credentials. Confirm the complete profile on mobile and desktop and build the deployment images. |
 
 Before each PR, review the full diff, test edge cases and inspect Playwright screenshots on mobile and desktop. Keep the docs in sync with the shipped behavior. Run Ruff, pytest, frontend lint, build and Playwright, then push and watch CI. Pull requests remain open for user review.
@@ -54,6 +55,14 @@ Use a bounded keyset query against each selected library's SQLite catalog, then 
 Use the History API for browser routing and lazy-load each view. Virtualize justified rows against the viewport. Keep one thumbnail in the Tab order and support arrow-key movement among photos. Load extra pages from the scroll boundary. Offer month selection through a menu and the timeline scrubber.
 
 `GET /api/browse/timeline` accepts `library`, `month` (YYYY-MM), `limit` (1–120, default 72) and an opaque `cursor` returned by the prior page. Keep the same library and month when continuing a page. `GET /api/browse/months` returns the occupied months in the selected library or across all libraries. The feed reflects the live catalogs. Indexing can add photos or update capture dates during a browse session, so refresh to see those changes from the top.
+
+## Albums and batch organization
+
+Albums appear in **Albums**. A manual album can contain photos and videos from any configured library. In a filtered timeline, **New album** starts with the smart album option and saves the current filters and library scope. Use **Edit saved filters** inside a smart album to change the query. Both kinds have links that reopen after a reload. Manual album membership appears in photo information. Editing or deleting an album changes the catalog only.
+
+Enter **Select photos** or hold a thumbnail on a touchscreen. Shift-click or Shift plus an arrow key extends the selection from the last individually selected item. Apply ratings, favorites, user tags or manual album membership to up to 200 loaded items at a time. **Export selection** opens the existing archive planner with the selected IDs for that library. For mixed selections open the planner for each labeled library. The export still goes through the existing preview and confirmation.
+
+The SQLite file `<state>/browser.db` holds album names and revisions, stored filters and manual membership keys of `(library, asset_id)`. Back it up with catalog state. Manual membership changes are atomic in this file, and repeat adds/removals are idempotent. Members that leave the active catalog disappear from the gallery. A membership remains saved if its asset becomes active again. A rename or saved filter edit uses an expected revision. Timeline pagination binds cursors to the album and filter revision. Selected tag, favorite and rating edits commit per library; the batch UI reports failed libraries and keeps their selection for retry.
 
 ## Derivatives and playback
 

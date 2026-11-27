@@ -1,6 +1,9 @@
 import { Heart, Plus, ScanFace, Star, X } from 'lucide-react'
 import { useState } from 'react'
 import type { ReactNode } from 'react'
+import { useRemote } from '../api'
+import { collectionText } from './collections'
+import type { Album, AssetRef } from './collections'
 import type { FilterValues } from './filterValues'
 import type { Language } from './location'
 import { formatDate } from './strings'
@@ -19,7 +22,7 @@ function exposure(value: number | null, number: Intl.NumberFormat) {
 }
 
 export function PhotoInformation({ asset, loading, error, retry, text, lang, boxes, toggleBoxes,
-  rate, busy, editLabels, labelSaving, labelFailed, filterBy }: {
+  rate, busy, editLabels, labelSaving, labelFailed, filterBy, albumAsset, openAlbum }: {
   asset?: ViewerAsset
   loading: boolean
   error?: string
@@ -34,8 +37,13 @@ export function PhotoInformation({ asset, loading, error, retry, text, lang, box
   labelSaving: boolean
   labelFailed: boolean
   filterBy: (filter: FilterValues) => void
+  albumAsset: AssetRef
+  openAlbum: (album: Album) => void
 }) {
   const [tag, setTag] = useState('')
+  const albums = useRemote<{ items: Album[] }>(asset
+    ? '/api/browse/' + encodeURIComponent(albumAsset.library) + '/assets/' + albumAsset.id + '/albums' : null)
+  const memberships = albums?.data?.items ?? []
   const number = new Intl.NumberFormat(lang, { maximumFractionDigits: 1 })
   const percent = new Intl.NumberFormat(lang, { style: 'percent', maximumFractionDigits: 1 })
   const date = asset?.captured_at
@@ -117,6 +125,12 @@ export function PhotoInformation({ asset, loading, error, retry, text, lang, box
         <button type="button" className="pcb-control" aria-pressed={boxes} onClick={toggleBoxes}>
           <ScanFace size={16} aria-hidden="true" /> {text.faceBoxes}
         </button>
+      </section>}
+      {!!memberships.length && <section>
+        <h3>{collectionText[lang].albums}</h3>
+        <ul className="pcb-information-chips">{memberships.map((album) => <li key={album.id}>
+          <button type="button" onClick={() => openAlbum(album)}>{album.name}</button>
+        </li>)}</ul>
       </section>}
       <dl className="pcb-facts">
         <Fact label={text.dimensions}>{asset.width && asset.height ? asset.width + ' × ' + asset.height : null}</Fact>
