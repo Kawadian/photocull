@@ -247,6 +247,8 @@ class Settings(BaseModel):
                 if target.is_relative_to(area) or area.is_relative_to(target):
                     raise ValueError(f"export root {name} overlaps a media or state directory")
         media = tuple(root.resolve() for lib in self.libraries.values() for root in lib.roots)
+        if any(state.is_relative_to(root) for root in media):
+            raise ValueError("State directory must be outside media roots")
         for root in self.archive.write_roots:
             if not root.is_absolute() or root == Path("/") or root != root.resolve():
                 raise ValueError("Archive write roots must be canonical absolute directories")

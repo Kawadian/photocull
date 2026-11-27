@@ -6,7 +6,7 @@ import sqlite3
 import stat
 import time
 from collections.abc import Callable
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack
 from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path, PurePosixPath
 from threading import Lock
@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from photocull.config import Settings
 from photocull.db import connect
 from photocull.db.derivatives import cache_status, request_file, touch_files
-from photocull.media.artifacts import open_regular
+from photocull.media.artifacts import open_artifact
 from photocull.media.derivatives import (
     VARIANTS,
     VERSION_PATTERN,
@@ -86,14 +86,20 @@ def not_modified(request: Request, etag: str, modified: float) -> bool:
     return False
 
 
+def cached_info(target: Path) -> os.stat_result | None:
+    try:
+        with open_directory(target.parent.absolute()) as parent:
+            info = os.stat(target.name, dir_fd=parent, follow_symlinks=False)
+    except OSError:
+        return None
+    return info if stat.S_ISREG(info.st_mode) else None
+
+
 def derivative_response(
     request: Request, target: Path, mime: str, etag: str, redirect: str | None = None
 ):
-    try:
-        info = target.stat(follow_symlinks=False)
-    except OSError:
-        return None
-    if not stat.S_ISREG(info.st_mode):
+    info = cached_info(target)
+    if info is None:
         return None
     if redirect is not None:
         return Response(headers={"X-Accel-Redirect": redirect, "Content-Type": mime})
@@ -105,16 +111,29 @@ def derivative_response(
     }
     if not_modified(request, etag, info.st_mtime):
         return Response(status_code=304, headers=headers)
-    return OpenMedia(lambda stack: stack.enter_context(_open_cache(target)), mime, headers)
+    return cached_media(target, mime, headers=headers)
 
 
-@contextmanager
-def _open_cache(target: Path):
-    with (
-        open_directory(target.parent.absolute()) as parent,
-        open_regular(parent, target.name) as opened,
-    ):
-        yield opened
+def cached_media(
+    target: Path,
+    mime: str,
+    *,
+    headers: dict[str, str] | None = None,
+    fallback: Path | None = None,
+):
+    def open_cached(stack: ExitStack):
+        try:
+            return stack.enter_context(open_artifact(target))
+        except FileNotFoundError:
+            if fallback is None:
+                raise
+            return stack.enter_context(open_artifact(fallback))
+
+    return OpenMedia(
+        open_cached,
+        mime,
+        headers or {"Cache-Control": "private, no-cache", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 class OpenMedia(Response):
@@ -145,6 +164,16 @@ class OpenMedia(Response):
                     headers=self.file_headers,
                     filename=self.filename,
                 )
+            # The ASGI server must open the path while the pinned descriptor is still live.
+            if "http.response.pathsend" in scope.get("extensions", {}):
+                scope = {
+                    **scope,
+                    "extensions": {
+                        key: value
+                        for key, value in scope["extensions"].items()
+                        if key != "http.response.pathsend"
+                    },
+                }
             await response(scope, receive, send)
 
 
@@ -179,10 +208,10 @@ def mount_media(settings: Settings, library_path, hits: CacheAccess) -> APIRoute
         entry = cache_status(db, asset_id, name, version)
         target = derivative_path(settings, library, asset_id, variant, version)
         if entry and entry["status"] == "ready":
-            if delivery and target.is_file():
+            if delivery and cached_info(target) is not None:
                 hits.touch(path, asset_id, name, version)
                 return OpenMedia(
-                    lambda stack: stack.enter_context(_open_cache(target)),
+                    lambda stack: stack.enter_context(open_artifact(target)),
                     variant.mime,
                     {
                         "Cache-Control": NO_STORE,
