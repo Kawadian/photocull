@@ -95,6 +95,7 @@ class ArchiveRequest(BaseModel):
     quality: int | None = Field(default=None, ge=0, le=100)
     preset: Literal["fast", "balanced", "slow"] = "balanced"
     template: ShortText = "{date}_{stem}"
+    dng_preview: Literal["embed", "omit"] = "embed"
 
     @property
     def destructive(self) -> bool:

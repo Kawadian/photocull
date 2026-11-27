@@ -235,7 +235,8 @@ def raw_parameters(tools, path):
     return params, digest
 
 
-def dng(tools, source, target):
+def dng(tools, source, target, request):
+    preview = "true" if request.dng_preview == "embed" else "false"
     before, digest = raw_parameters(tools, source)
     tools.run(
         "dnglab",
@@ -245,9 +246,9 @@ def dng(tools, source, target):
         "--embed-raw",
         "false",
         "--dng-preview",
-        "false",
+        preview,
         "--dng-thumbnail",
-        "false",
+        preview,
         "--crop",
         "best",
         "--jobs",
@@ -284,9 +285,39 @@ def dng(tools, source, target):
             old, new = old or full, new or full
         if old != new:
             raise ArchiveError(f"DNG raw calibration differs: {key}")
-    types = json.loads(tools.run("exiftool", "-j", "-n", "-Compression", "-DNGVersion", target))[0]
-    if types.get("Compression") != 7 or not types.get("DNGVersion"):
+    types = json.loads(
+        tools.run(
+            "exiftool",
+            "-j",
+            "-n",
+            "-a",
+            "-G1",
+            "-Compression",
+            "-DNGVersion",
+            "-PhotometricInterpretation",
+            "-SubfileType",
+            "-PreviewImage",
+            target,
+        )
+    )[0]
+    raw_groups = [
+        key.split(":")[0]
+        for key, value in types.items()
+        if key.endswith(":PhotometricInterpretation")
+        and (
+            value in {32803, 34892}
+            or value == 2
+            and types.get(key.replace("PhotometricInterpretation", "SubfileType")) == 0
+        )
+    ]
+    if (
+        not raw_groups
+        or not all(types.get(f"{group}:Compression") == 7 for group in raw_groups)
+        or not types.get("IFD0:DNGVersion")
+    ):
         raise ArchiveError("Expected a lossless JPEG-compressed DNG")
+    if request.dng_preview == "embed" and not any(k.endswith(":PreviewImage") for k in types):
+        raise ArchiveError("The requested embedded DNG preview is missing")
     compare_metadata(tools, source, target)
 
 
@@ -537,7 +568,7 @@ def video(tools, source, target, request):
 
 def convert(tools, source, target, request):
     if request.operation == "dng":
-        dng(tools, source, target)
+        dng(tools, source, target, request)
     elif request.operation in VIDEO:
         video(tools, source, target, request)
     else:
