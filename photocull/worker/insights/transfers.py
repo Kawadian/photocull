@@ -12,6 +12,7 @@ import zipfile
 from contextlib import ExitStack, contextmanager, suppress
 from html import escape
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from photocull.db import write
 from photocull.db.catalog import mark_catalog_updated
@@ -20,7 +21,9 @@ from photocull.db.stories import segments
 from photocull.db.transfers import ExportRequest, ReportRequest, select_assets
 from photocull.media.artifacts import artifact_name, open_regular, transfer_directory
 from photocull.media.cache import cache_path
+from photocull.media.location import portable_suffix
 from photocull.media.walk import MediaJail, SourceChanged, open_directory, source_key
+from photocull.worker.location import clean_copy
 
 COPY_BYTES = 1024 * 1024
 REPORT_HEADER = """<!doctype html>
@@ -60,7 +63,7 @@ def identity(info: os.stat_result) -> tuple[int, int]:
     return info.st_dev, info.st_ino
 
 
-def file_name(asset, *, sidecar=False):
+def file_name(asset, *, sidecar=False, strip_location=False):
     # A stable ID keeps names unique. Portable filenames also make ZIP extraction safe.
     name = Path(asset["path"]).name
     stem, extension = os.path.splitext(name)
@@ -69,6 +72,8 @@ def file_name(asset, *, sidecar=False):
     # Preserve supported camera/file extensions. Never copy separators or
     # control characters from a filesystem name into an archive member.
     suffix = extension.lower() if re.fullmatch(r"\.[A-Za-z0-9]{1,12}", extension) else ""
+    if strip_location:
+        suffix = portable_suffix(asset["kind"])
     return f"{asset['id']}-{stem or 'media'}{'.xmp' if sidecar else suffix}"
 
 
@@ -118,6 +123,11 @@ class Transfers:
         self.settings = worker.settings
 
     def recover(self):
+        for staged in self.state.glob(".keeper-copy-*"):
+            # TemporaryDirectory uses private worker-owned directories and removes them normally.
+            # A stopped process can leave its render behind before publication.
+            if staged.is_dir() and not staged.is_symlink():
+                shutil.rmtree(staged)
         for job in self.db.execute(
             "SELECT * FROM transfers WHERE status IN ('running','cancelling')"
         ).fetchall():
@@ -362,11 +372,31 @@ class Transfers:
             with jail.open_media(asset["path"]) as (fd, _):
                 if source_key(os.fstat(fd)) != asset["source_key"]:
                     raise SourceChanged(f"{asset['path']} changed since indexing; rescan and retry")
-                transfer(fd, file_name(asset), count_bytes=True)
+                if config.include_location is False:
+                    with (
+                        TemporaryDirectory(
+                            dir=self.state, prefix=".keeper-copy-"
+                        ) as output_directory,
+                        clean_copy(
+                            self.settings,
+                            fd,
+                            asset["kind"],
+                            Path(output_directory) / "media",
+                            lambda: self.check(job_id, pulse),
+                        ) as staged,
+                        staged.open("rb") as clean,
+                    ):
+                        transfer(
+                            clean.fileno(), file_name(asset, strip_location=True), count_bytes=True
+                        )
+                    if source_key(os.fstat(fd)) != asset["source_key"]:
+                        raise SourceChanged(f"{asset['path']} changed while exporting")
+                else:
+                    transfer(fd, file_name(asset), count_bytes=True)
                 with jail.open_media(asset["path"]) as (current, _):
                     if source_key(os.fstat(current)) != asset["source_key"]:
                         raise SourceChanged(f"{asset['path']} was replaced while exporting")
-            if config.xmp:
+            if config.xmp and config.include_location is not False:
                 with sidecar(jail, asset["path"]) as fd:
                     if fd is not None:
                         transfer(fd, file_name(asset, sidecar=True), count_bytes=False)

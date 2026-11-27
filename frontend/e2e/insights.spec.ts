@@ -51,9 +51,10 @@ test('video review, recommendations and portable downloads use the indexed libra
 
   await nav.getByRole('button', { name: 'Exports' }).click()
   await page.getByLabel('Minimum rating').selectOption('0')
+  await expect(page.getByRole('combobox', { name: 'Location information' })).toHaveValue('false')
   await page.getByRole('button', { name: 'Start export' }).click()
   const zip = page.getByRole('link', { name: 'Download ZIP' }).first()
-  await expect(zip).toBeVisible()
+  await expect(zip).toBeVisible({ timeout: 20_000 })
   const zipEvent = page.waitForEvent('download')
   await zip.click()
   expect((await zipEvent).suggestedFilename()).toBe('photocull-keepers.zip')

@@ -28,11 +28,13 @@ from photocull.db.archive import audit, insert_job, materialize
 from photocull.db.archive_preview import build as build_preview
 from photocull.db.archive_preview import prune as prune_previews
 from photocull.db.archive_rules import schedule as schedule_rules
+from photocull.media.artifacts import open_regular
 from photocull.media.walk import MediaJail, OutsideLibrary, open_directory, source_key
 from photocull.worker import archive_fs as fs
 from photocull.worker import archive_selftest
 from photocull.worker.archive_media import Tools, convert, probe_video, video_stream
 from photocull.worker.archive_media import duration as video_duration
+from photocull.worker.location import clean_copy
 
 LOG = logging.getLogger(__name__)
 CONVERSIONS = VIDEO | {"dng", "jpeg", "heic", "avif"}
@@ -99,9 +101,10 @@ class ArchiveWork:
         row = db.execute(*asset_query(request, asset_id=item["asset_id"])).fetchone()
         if not row or row["revision"] != item["revision"]:
             raise StalePlan("Asset rating or selection changed. Preview again.")
-        files, shared = sidecar_state(actual)
-        if files != item["sidecars"] or (shared and not item["shared"]):
-            raise StalePlan("Sidecars or file pairing changed. Preview again.")
+        if not request.strip_location or request.destructive:
+            files, shared = sidecar_state(actual)
+            if files != item["sidecars"] or (shared and not item["shared"]):
+                raise StalePlan("Sidecars or file pairing changed. Preview again.")
 
     def trash_root(self, source, device):
         if self.trash:
@@ -216,7 +219,19 @@ class ArchiveWork:
                 if target != source and child_stat(target):
                     raise StalePlan(f"Destination appeared after preview: {target}")
                 staged = Path(record["staged"])
-                if i == 0 and request.operation in CONVERSIONS:
+                if i == 0 and request.strip_location and request.operation in {"copy", "rename"}:
+                    snapshot = staged.with_name(f"input{source.suffix}")
+                    fs.copy_file(source, snapshot, original, pulse)
+                    with (
+                        open_directory(staged.parent) as parent,
+                        open_regular(parent, snapshot.name) as (fd, _),
+                        clean_copy(self.settings, fd, item["kind"], staged, pulse) as clean,
+                    ):
+                        clean.replace(staged)
+                    snapshot.unlink()
+                    fs.sync_result(staged, original)
+                    record["output"] = fs.fingerprint(staged, pulse)
+                elif i == 0 and request.operation in CONVERSIONS:
                     db.execute(
                         "UPDATE archive_items SET phase='encoding and verification' "
                         "WHERE job_id=? AND ordinal=?",

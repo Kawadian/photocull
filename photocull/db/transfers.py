@@ -39,6 +39,7 @@ class ExportRequest(BaseModel):
     destination: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
     selection: Selection = Field(default_factory=Selection)
     xmp: bool = False
+    include_location: bool | None = None
 
 
 class ReportRequest(BaseModel):
@@ -79,6 +80,8 @@ def public(row):
     }
     del result["output_device"]
     result["destination"] = options.get("destination")
+    if result["kind"] != "report":
+        result["include_location"] = options.get("include_location") is not False
     return result
 
 
@@ -123,7 +126,7 @@ def select_assets(config: Selection, keys: dict):
         values = [keys.get("video", ""), *values]
         values.append(config.dead)
     return (
-        f"""SELECT a.id, a.path, a.source_key, a.size FROM assets AS a {joins}
+        f"""SELECT a.id, a.path, a.source_key, a.size, a.kind FROM assets AS a {joins}
             WHERE {" AND ".join(clauses)} ORDER BY a.id""",
         values,
     )

@@ -19,10 +19,11 @@ LOG = logging.getLogger(__name__)
 MIB = 1024 * 1024
 
 
-def encode_image(pixels, variant, settings, file) -> None:
+def encode_image(pixels, variant, settings, file, *, coordinates=None) -> None:
     from PIL import Image
 
     from photocull.media.color import SRGB
+    from photocull.worker.location import jpeg_exif
 
     ext = variant.extension
     format_name, options = {
@@ -30,6 +31,8 @@ def encode_image(pixels, variant, settings, file) -> None:
         "avif": ("AVIF", {"quality": settings.avif_quality, "speed": 8, "max_threads": 1}),
         "webp": ("WEBP", {"quality": settings.webp_quality, "method": 4}),
     }[ext]
+    if variant.include_location and coordinates is not None:
+        options["exif"] = jpeg_exif(coordinates)
     # Construct clean pixels explicitly. Pillow plugins can otherwise inherit source metadata.
     with pixels.copy() as image:
         image.info.clear()
@@ -52,12 +55,12 @@ def image_blurhash(image) -> str:
 
 
 @contextmanager
-def staged_image(target: Path, pixels, variant, settings):
+def staged_image(target: Path, pixels, variant, settings, *, coordinates=None):
     target.parent.mkdir(parents=True, exist_ok=True)
     with NamedTemporaryFile(dir=target.parent, prefix=".derivative-", delete=False) as file:
         staged = Path(file.name)
         try:
-            encode_image(pixels, variant, settings, file)
+            encode_image(pixels, variant, settings, file, coordinates=coordinates)
             file.close()
             yield staged
         finally:
@@ -70,6 +73,7 @@ def _generate(settings: Settings, library: str, jobs: list[queue.DerivativeJob],
     from photocull.media.cache import cache_path
     from photocull.media.decode import decode_source
     from photocull.worker.insights.video import proxy
+    from photocull.worker.location import read_coordinates
 
     first = jobs[0]
     config = settings.derivatives
@@ -98,27 +102,31 @@ def _generate(settings: Settings, library: str, jobs: list[queue.DerivativeJob],
             variant = VARIANTS[job.variant]
             target = derivative_path(settings, library, job.asset_id, variant, job.version)
             budget = (config.hot_mib if variant.tier == "hot" else config.large_mib) * MIB
-            output = (
-                proxy(
-                    f"/proc/self/fd/{fd}",
-                    fd,
-                    1,
-                    target,
-                    pulse,
-                    limits=VIDEO_LIMITS[job.variant],
-                    max_bytes=budget,
-                )
-                if video
-                else staged_image(target, pixels, variant, config)
-            )
             try:
+                coordinates = (
+                    read_coordinates(settings, fd, pulse) if variant.include_location else None
+                )
+                output = (
+                    proxy(
+                        f"/proc/self/fd/{fd}",
+                        fd,
+                        1,
+                        target,
+                        pulse,
+                        limits=VIDEO_LIMITS[job.variant],
+                        max_bytes=budget,
+                        coordinates=coordinates,
+                    )
+                    if video
+                    else staged_image(target, pixels, variant, config, coordinates=coordinates)
+                )
                 with output as staged:
                     with jail.open_media(first.path) as (current, _):
                         verify(current)
                     size = staged.stat().st_size
                     if not 0 < size <= budget:
                         raise ValueError("File exceeds the derivative cache limit")
-                    staged.chmod(0o644)
+                    staged.chmod(0o600 if variant.include_location else 0o644)
                     staged.replace(target)
                 sizes[job.variant] = size
             except (OSError, RuntimeError, ValueError) as error:
