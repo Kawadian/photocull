@@ -44,6 +44,7 @@ class AlbumEdit(AlbumSettings):
 class AssetRef(BaseModel):
     library: LibraryName
     id: AssetId
+    expected_revision: Annotated[int, Field(ge=0, le=2**63 - 1)] | None = None
 
 
 class Selection(BaseModel):
@@ -64,6 +65,16 @@ class Membership(Selection):
 
 class BatchLabels(Selection, LabelUpdate):
     rating: Stars | None = None
+
+    @model_validator(mode="after")
+    def rating_revisions(self) -> BatchLabels:
+        if self.rating is not None:
+            keys = {(asset.library, asset.id) for asset in self.assets}
+            if any(asset.expected_revision is None for asset in self.assets):
+                raise ValueError("A rating requires an expected_revision for every asset")
+            if len(keys) != len(self.assets):
+                raise ValueError("A rating requires unique asset references")
+        return self
 
 
 class AlbumConflict(Exception):
@@ -189,10 +200,29 @@ def change_membership(
         return db.executemany(statement, rows).rowcount
 
 
-def batch_labels(db: sqlite3.Connection, ids: set[int], update: BatchLabels) -> bool:
+def batch_labels(
+    db: sqlite3.Connection, library: str, ids: set[int], update: BatchLabels
+) -> Literal["done", "stale", "conflict"]:
+    id_list = json.dumps(sorted(ids))
     with write(db):
-        if active_assets(db, ids) != ids:
-            return False
+        if update.rating is not None:
+            actual = dict(
+                db.execute(
+                    """SELECT id, revision FROM assets
+                       WHERE active = 1 AND id IN (SELECT value FROM json_each(?))""",
+                    (id_list,),
+                ).fetchall()
+            )
+            if actual.keys() != ids:
+                return "stale"
+            if any(
+                actual[asset.id] != asset.expected_revision
+                for asset in update.assets
+                if asset.library == library
+            ):
+                return "conflict"
+        elif active_assets(db, ids) != ids:
+            return "stale"
         changed = False
         if update.add_tags or update.remove_tags or update.favorite is not None:
             for asset_id in sorted(ids):
@@ -207,9 +237,9 @@ def batch_labels(db: sqlite3.Connection, ids: set[int], update: BatchLabels) -> 
                            revision = revision + 1
                        WHERE id IN (SELECT value FROM json_each(?))
                        AND (rating <> ? OR (? > 0 AND rejected = 1))""",
-                    (rating, rating, json.dumps(sorted(ids)), rating, rating),
+                    (rating, rating, id_list, rating, rating),
                 ).rowcount
             )
         if changed:
             mark_catalog_updated(db)
-        return True
+        return "done"

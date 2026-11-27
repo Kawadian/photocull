@@ -55,7 +55,7 @@ def _library_page(
     def fetch(bound: str, args: tuple, count: int) -> list[sqlite3.Row]:
         return db.execute(
             f"""SELECT a.id, a.day, a.timeline_time, a.path, a.kind, a.width, a.height,
-                       a.duration, a.content_hash, a.favorite,
+                       a.duration, a.content_hash, a.favorite, a.revision,
                        p.status AS preview_status, d.blurhash
                 FROM assets AS a
                 LEFT JOIN jobs AS p ON p.asset_id = a.id AND p.stage = 'preview'

@@ -11,8 +11,8 @@ export type Album = {
   count?: number
   revision: number
 }
-export type AssetRef = { library: string; id: number }
-export type BatchResult = { library: string; count: number; status: 'done' | 'stale' | 'busy' | 'tag_limit' }
+export type AssetRef = { library: string; id: number; expected_revision?: number }
+export type BatchResult = { library: string; count: number; status: 'done' | 'stale' | 'conflict' | 'busy' | 'tag_limit' }
 export const maxSelection = 200
 export const albumUrl = '/api/browse/albums'
 
@@ -51,7 +51,8 @@ const en = {
   noManual: 'Create a manual album before adding photos.', chooseAlbum: 'Choose an album', export: 'Export selection',
   perLibrary: 'Open the export planner for each library.', finished: 'Selection updated.',
   failedLibraries: 'The selection could not be updated in these libraries.',
-  stale: 'Photos changed. Refresh the timeline and try again.', busy: 'Catalog is busy. Try again.',
+  stale: 'Photos changed. Refresh the timeline and try again.',
+  conflict: 'An item was rated elsewhere. Close this dialog and select the photos again.', busy: 'Catalog is busy. Try again.',
   tag_limit: 'At least one photo has reached its user tag limit.',
   selectHelp: 'Tap or press Enter to select. Hold Shift to select a range.',
 }
@@ -72,6 +73,7 @@ export const collectionText: Record<Language, typeof en> = {
     noManual: '先に手動アルバムを作成してください。', chooseAlbum: 'アルバムを選択', export: '選択項目を書き出す',
     perLibrary: 'ライブラリごとに書き出し画面を開きます。', finished: '選択項目を更新しました。',
     failedLibraries: '一部のライブラリで更新できませんでした。', stale: '写真が変更されました。一覧を更新してください。',
+    conflict: '評価が他の画面で変更されました。この画面を閉じ、写真を選び直してください。',
     busy: 'カタログが処理中です。再度お試しください。', tag_limit: 'ユーザータグが上限に達している写真があります。',
     selectHelp: 'タップまたは Enter で選択し、Shift を押しながら操作すると範囲選択できます。',
   },

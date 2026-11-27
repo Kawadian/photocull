@@ -84,12 +84,12 @@ function Timeline({ location, months, navigate, jump, close, album, openAlbum, r
     const chosen = new Map(selected)
     if (anchorIndex !== -1) {
       for (const item of feed.assets.slice(Math.min(anchorIndex, itemIndex), Math.max(anchorIndex, itemIndex) + 1)) {
-        chosen.set(assetKey(item), { id: item.id, library: item.library })
+        chosen.set(assetKey(item), { id: item.id, library: item.library, expected_revision: item.revision })
         if (chosen.size > maxSelection) break
       }
     } else {
       if (chosen.has(key)) chosen.delete(key)
-      else chosen.set(key, { id: choice.id, library: choice.library })
+      else chosen.set(key, { id: choice.id, library: choice.library, expected_revision: choice.revision })
       setAnchor(key)
     }
     setSelecting(true)

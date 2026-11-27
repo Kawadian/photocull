@@ -7,7 +7,7 @@ import type { BrowserLocation } from './location'
 import type { BrowserMedia } from './ResponsiveImage'
 
 export type TimelineAsset = Pick<Asset, 'id' | 'kind' | 'day' | 'width' | 'height' | 'duration' |
-  'content_hash' | 'preview_status'> & {
+  'content_hash' | 'preview_status' | 'revision'> & {
   library: string
   name: string
   blurhash?: string | null

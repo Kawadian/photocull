@@ -135,8 +135,7 @@ def collections_router(settings: Settings) -> APIRouter:
         for library, ids in grouped.items():
             with connect(catalogs[library]) as db:
                 try:
-                    updated = batch_labels(db, ids, body)
-                    status = "done" if updated else "stale"
+                    status = batch_labels(db, library, ids, body)
                 except ValueError:
                     status = "tag_limit"
                 except sqlite3.OperationalError as error:
