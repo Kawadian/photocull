@@ -51,7 +51,7 @@ Photocull scans DNG, ARW and common RAW formats, HEIF/HEIC/HIF, AVIF, JPEG, PNG,
 
 ## Archive and storage
 
-The **Archive** view plans lossless RAW/DNG conversion, HEVC/AV1 video reduction, JPEG/HEIC/AVIF conversion, selected-file copy, and batch rename. It also shows duplicate groups and storage by year, folder, format and camera. Jobs default to separate exports. Confirmed replacement and deletion require explicit write roots and use verified staging, recoverable trash and an append-only audit. The CLI uses the same preview and confirmation contract. [Archive guide](docs/ARCHIVE.md)
+The **Archive** view plans lossless RAW/DNG conversion, HEVC/AV1 video reduction, JPEG/HEIC/AVIF conversion, selected-file copy, and batch rename. It also shows duplicate groups and storage by year, folder, format and camera. Jobs default to separate exports. One confirmation covers the full previewed set, with paginated details and worker-batched execution. Write roots must pass the worker filesystem self-test before replacement, rename or deletion. Saved conversion rules can notify you of ready previews. The CLI uses the same preview and confirmation contract. [Archive guide](docs/ARCHIVE.md)
 
 ## Review and write XMP
 

@@ -63,6 +63,7 @@ worker:
 # archive:
 #   export_roots:
 #     photos: /srv/photocull-archive
+#   # The worker tests write roots before enabling destructive archive actions.
 #   # write_roots: [/mnt/PhotoLibrary/ArchiveCandidate]
 #   # trash_roots:
 #   #   photos: /mnt/PhotoLibrary/ArchiveCandidate/.photocull-trash
