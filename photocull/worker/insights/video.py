@@ -274,8 +274,22 @@ def metrics(source, fd, threads, duration, has_audio, pulse):
 
 
 @contextmanager
-def proxy(source, fd, threads, target, pulse, *, limits=(1280, 720, "2M", "96k"), max_bytes=None):
+def proxy(
+    source,
+    fd,
+    threads,
+    target,
+    pulse,
+    *,
+    limits=(1280, 720, "2M", "96k"),
+    max_bytes=None,
+    coordinates=None,
+):
     width, height, bitrate, audio = limits
+    location = []
+    if coordinates is not None:
+        latitude, longitude = coordinates
+        location = ["-metadata", f"location={latitude:+09.5f}{longitude:+010.5f}/"]
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".video-", delete=False) as tmp:
         staged = Path(tmp.name)
@@ -311,6 +325,7 @@ def proxy(source, fd, threads, target, pulse, *, limits=(1280, 720, "2M", "96k")
             "aac",
             "-b:a",
             audio,
+            *location,
             "-movflags",
             "+faststart",
             "-progress",

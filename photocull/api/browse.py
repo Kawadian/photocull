@@ -60,6 +60,7 @@ def browse_router(settings: Settings) -> APIRouter:
         "recipe": encoding,
         "original_download": config.original_download,
         "original_streaming": config.original_streaming,
+        "strip_location": settings.browser.strip_location,
     }
 
     def select(library: str | None) -> dict[str, Path]:

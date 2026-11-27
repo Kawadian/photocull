@@ -204,6 +204,15 @@ class DerivativeSettings(BaseModel):
     accel_redirect: bool = False
 
 
+class BrowserSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    strip_location: bool = True
+
+    def includes_location(self, override: bool | None) -> bool:
+        return not self.strip_location if override is None else override
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -221,6 +230,7 @@ class Settings(BaseModel):
     insights: InsightSettings = Field(default_factory=InsightSettings)
     archive: ArchiveSettings = Field(default_factory=ArchiveSettings)
     derivatives: DerivativeSettings = Field(default_factory=DerivativeSettings)
+    browser: BrowserSettings = Field(default_factory=BrowserSettings)
 
     @model_validator(mode="after")
     def validate_state(self) -> Settings:
@@ -403,6 +413,7 @@ def load_settings() -> Settings:
         ("insights", InsightSettings),
         ("archive", ArchiveSettings),
         ("derivatives", DerivativeSettings),
+        ("browser", BrowserSettings),
     ):
         settings = values.setdefault(section, {})
         for field in model.model_fields.keys() - {

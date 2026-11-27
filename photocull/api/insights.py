@@ -211,6 +211,7 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
             "report": config.report and config.story,
             "export": config.export,
             "destinations": list(config.export_roots),
+            "strip_location": settings.browser.strip_location,
             "taste": taste,
             "stages": stages,
         }
@@ -459,8 +460,12 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
             require(config.faces, "Face grouping")
         if body.selection.dead is not None:
             require(config.video, "Video analysis")
+        include_location = settings.browser.includes_location(body.include_location)
+        if body.xmp and not include_location:
+            raise HTTPException(422, "Existing XMP sidecars can contain location metadata")
+        options = body.model_copy(update={"include_location": include_location})
         with connect(library_path(library)) as db:
-            return submit_transfer(db, body.kind, body)
+            return submit_transfer(db, options.kind, options)
 
     @app.post(PREFIX + "/reports", status_code=202)
     def report(library: str, body: ReportRequest):

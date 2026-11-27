@@ -20,7 +20,7 @@ export type View = typeof views[number]['id']
 export type InsightStage = 'faces' | 'story' | 'video' | 'aesthetic' | 'transcript' | 'taste'
 export type InsightCapabilities = {
   faces: boolean; story: boolean; video: boolean; aesthetic: boolean; transcript: boolean
-  watch: boolean; export: boolean; report: boolean; destinations: string[]
+  watch: boolean; export: boolean; report: boolean; destinations: string[]; strip_location?: boolean
   stages: Partial<Record<InsightStage, { pending: boolean; error: string | null }>>
   taste: { status: 'disabled' | 'pending' | 'ready' | 'insufficient' | 'error'
     positives: number; negatives: number; error: string | null }
@@ -529,6 +529,7 @@ function Recommendations({ base, capability, version, openReview }: ScreenProps)
 }
 
 type Transfer = {
+  include_location?: boolean
   id: string; kind: 'copy' | 'zip' | 'report'; status: 'pending' | 'running' | 'cancelling' | 'cancelled' | 'error' | 'done'
   destination: string | null; error: string | null; processed: number; total: number
   total_bytes: number; written_bytes: number; cancellable: boolean
@@ -543,6 +544,7 @@ function FlagFilter({ name, label, initial = 'any' }: { name: string; label: str
 }
 
 function Transfers({ base, version, capability, report }: ScreenProps & { report: boolean }) {
+  const [includeLocation, setIncludeLocation] = useState(capability.strip_location === false)
   const [mode, setMode] = useState('zip')
   const [poll, setPoll] = useState(0)
   const [person, setPerson] = useState('')
@@ -566,7 +568,8 @@ function Transfers({ base, version, capability, report }: ScreenProps & { report
       const data = new FormData(event.currentTarget)
       const dates = { start: data.get('start') || null, end: data.get('end') || null }
       const body = report ? dates : {
-        kind: mode, destination: data.get('destination'), xmp: data.has('xmp'),
+        kind: mode, destination: data.get('destination'), xmp: includeLocation && data.has('xmp'),
+        include_location: includeLocation,
         selection: { ...dates, minimum_rating: Number(data.get('rating')), rejected: bool(data.get('rejected')),
           auto_reject: bool(data.get('auto_reject')), dead: bool(data.get('dead')),
           person_id: person ? Number(person) : null },
@@ -599,7 +602,14 @@ function Transfers({ base, version, capability, report }: ScreenProps & { report
           <Paging {...cursor} next={people?.data?.next_cursor} forward={() => cursor.forward(people?.data?.next_cursor)} />
           <Status error={people?.error} pending={!people} retry={work.retry} />
         </>}
-        <label className="transfer-checkbox"><input type="checkbox" name="xmp" /> Include existing XMP sidecars</label>
+        <label>Location information<select value={String(includeLocation)}
+          onChange={(event) => setIncludeLocation(event.target.value === 'true')}>
+          <option value="false">Exclude location information</option>
+          <option value="true">Include location information</option>
+        </select></label>
+        {includeLocation
+          ? <label className="transfer-checkbox"><input type="checkbox" name="xmp" /> Include existing XMP sidecars</label>
+          : <p className="insight-muted">Location-free exports use JPEG for stills and MP4 for video.</p>}
       </>}
       <label>From date<input type="date" name="start" /></label>
       <label>To date<input type="date" name="end" /></label>
@@ -615,6 +625,8 @@ function Transfers({ base, version, capability, report }: ScreenProps & { report
             {item.kind === 'report' ? ' days' : ' items'}</p>
           {item.status === 'done' && item.total === 0 &&
             <p className="insight-muted">{item.kind === 'report' ? 'No matching story days.' : 'No matching keepers.'}</p>}
+          {item.include_location !== undefined && <p className="insight-muted">{item.include_location
+            ? 'Source location included when available' : 'Location information excluded'}</p>}
           {item.kind === 'copy' && item.status === 'done' && <p className="copy-target">{item.destination}/{item.id}</p>}
           {item.error && <p role="alert" className="inline-error">{item.error}</p>}
           {['running', 'cancelling'].includes(item.status) && <progress aria-label="Transfer progress"

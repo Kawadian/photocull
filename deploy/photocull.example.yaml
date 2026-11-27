@@ -19,6 +19,8 @@ worker:
   scan_overlap: false # Keep false for libraries on one spinning disk.
   stages: [exif, preview, score]
   device: cpu
+# browser:
+#   strip_location: true # Default for sharing, downloads, and export.
 # derivatives:
 #   hot_dir: /var/lib/photocull/derivatives/hot
 #   hot_mib: 1536
