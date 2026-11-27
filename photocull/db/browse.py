@@ -23,16 +23,19 @@ def _library_page(
     limit: int,
     month: str | None,
     after: TimelineKey | None,
+    recipe: str | None,
 ) -> list[tuple[TimelineKey, sqlite3.Row]]:
     def fetch(bound: str, args: tuple, count: int) -> list[sqlite3.Row]:
         return db.execute(
             f"""SELECT a.id, a.day, a.timeline_time, a.path, a.kind, a.width, a.height,
-                       a.duration, a.content_hash, p.status AS preview_status
+                       a.duration, a.content_hash, p.status AS preview_status, d.blurhash
                 FROM assets AS a
                 LEFT JOIN jobs AS p ON p.asset_id = a.id AND p.stage = 'preview'
+                LEFT JOIN derivative_placeholders AS d
+                    ON d.asset_id = a.id AND d.version = a.content_hash || '-' || ?
                 WHERE a.active = 1 {bound}
                 ORDER BY a.day DESC, a.timeline_time DESC, a.id DESC LIMIT ?""",
-            (*args, count),
+            (recipe, *args, count),
         ).fetchall()
 
     if after and library == after.library:
@@ -63,12 +66,13 @@ def timeline_page(
     limit: int,
     month: str | None,
     after: TimelineKey | None,
+    recipe: str | None = None,
 ) -> tuple[list[dict], TimelineKey | None]:
     pages = []
     for library, path in libraries.items():
         with connect(path) as db:
             db.execute("BEGIN")
-            pages.append(_library_page(db, library, limit + 1, month, after))
+            pages.append(_library_page(db, library, limit + 1, month, after, recipe))
     rows = list(islice(merge(*pages, key=lambda item: item[0], reverse=True), limit + 1))
     next_key = rows[limit - 1][0] if len(rows) > limit else None
     items = []

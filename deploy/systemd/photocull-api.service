@@ -19,8 +19,9 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-# Writable for sidecars. Match the canonical media roots in the YAML configuration.
-ReadWritePaths=-/mnt/PhotoLibrary
+# The optional large derivative tier is read-only to the API.
+ReadOnlyPaths=-/srv/photocull-cache-hdd
+# The library is read-only. Explicit XMP export can opt in via a separate drop-in.
 
 [Install]
 WantedBy=multi-user.target

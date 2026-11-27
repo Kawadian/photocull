@@ -14,7 +14,7 @@ type Mode = 'export' | 'overwrite' | 'remove'
 const conversions = new Set<Operation>(['dng', 'jpeg', 'heic', 'avif', 'hevc', 'av1'])
 type Plan = {
   operation: Operation; mode?: Mode; filters?: Record<string, unknown>; trash_ids?: string[]
-  trash_before?: string; dng_preview?: string
+  trash_before?: string; dng_preview?: string; include_location?: boolean
   collision?: 'fail' | 'rename'; preset?: string; quality?: number; template?: string; reason?: string
 }
 type FileRecord = { path: string; size: number; original?: string; sha256?: string }
@@ -85,6 +85,7 @@ function ArchiveForm({ capability, seed, busy, execute, clear, saveRule }: {
 }) {
   const [operation, setOperation] = useState<Operation>('copy')
   const [mode, setMode] = useState<Mode>('export')
+  const [includeLocation, setIncludeLocation] = useState(true)
   const image = ['jpeg', 'heic', 'avif'].includes(operation)
   const video = operation === 'hevc' || operation === 'av1'
   const requiresWrite = ['trash', 'rename'].includes(operation) || mode !== 'export'
@@ -101,6 +102,7 @@ function ArchiveForm({ capability, seed, busy, execute, clear, saveRule }: {
     const submit = submitter?.value === 'save-rule' ? saveRule : execute
     submit({
       operation, mode, dng_preview: str('dng_preview') || undefined, reason: str('reason'), collision: str('collision') === 'rename' ? 'rename' : 'fail',
+      include_location: requiresOutput ? includeLocation : undefined,
       quality: num('quality'), preset: str('preset') || undefined, template: str('template') || undefined,
       filters: {
         ids: list('ids').map(Number), after_id: num('after_id'),
@@ -126,12 +128,17 @@ function ArchiveForm({ capability, seed, busy, execute, clear, saveRule }: {
           <option value="overwrite" disabled={!capability.destructive}>Replace originals after verification</option>
           {operation !== 'rename' && <option value="remove" disabled={!capability.destructive}>Export and trash verified originals</option>}
         </select></label>}
+        {requiresOutput && <label>Location information<select value={String(includeLocation)}
+          onChange={(event) => setIncludeLocation(event.target.value === 'true')}>
+          <option value="false">Remove location information</option>
+          <option value="true">Include location information</option>
+        </select></label>}
         {operation !== 'trash' && <label>On name collision<select name="collision">
           <option value="fail">Skip conflicting file</option><option value="rename">Add a numeric suffix</option>
         </select></label>}
         {operation === 'rename' && <label>Filename template<input name="template" defaultValue="{date}_{stem}" maxLength={200} required
           aria-describedby="archive-template-help" /></label>}
-        {operation === 'dng' && <label>Embedded DNG preview<select name="dng_preview">
+        {operation === 'dng' && (!requiresOutput || includeLocation) && <label>Embedded DNG preview<select name="dng_preview">
           <option value="embed">Embed JPEG preview and thumbnail</option>
           <option value="omit">Omit both to save more space</option>
         </select></label>}
@@ -145,8 +152,15 @@ function ArchiveForm({ capability, seed, busy, execute, clear, saveRule }: {
         </>}
         <label>Audit reason <input name="reason" maxLength={200} /></label>
       </div>
+      {requiresOutput && !includeLocation && <p className="insight-muted">
+        {operation === 'copy' || operation === 'rename'
+          ? 'Location removal preserves the original format without re-encoding JPEG, HEIC, DNG or supported MP4, MOV and MKV files. XMP sidecars are omitted. For files that cannot be verified, keep location or choose a conversion explicitly.'
+          : 'Location-free exports omit source metadata and sidecars.'}
+        {operation === 'dng' && ' Embedded previews and thumbnails are omitted.'}
+        {video && ' Video and audio tracks are kept.'}
+      </p>}
       {operation === 'rename' && <p id="archive-template-help" className="insight-muted">
-        Tokens are {'{stem}, {date}, {year}, {camera}, {id}, {n}'}. The extension is kept.
+        Tokens are {'{stem}, {date}, {year}, {camera}, {id}, {n}'}.
       </p>}
     </fieldset>
     <fieldset className="insight-fieldset" disabled={busy}>
@@ -570,6 +584,9 @@ export function Archive({ base, online }: { base: string; online: boolean }) {
       <p>{result.count} {result.count === 1 ? 'item' : 'items'} · {bytes(result.source_bytes)} of source media.</p>
       {result.affected_bytes > 0 && <p>{bytes(result.affected_bytes)} of originals and sidecars affected.</p>}
       <p>{consequences(planned.plan)}</p>
+      {typeof planned.plan.include_location === 'boolean' && <p>{planned.plan.include_location
+        ? 'Export includes available source location information.'
+        : 'Export excludes source location information and XMP sidecars.'}</p>}
       {error && <Status error={error} />}
       <div className="dialog-actions">
         <button autoFocus className="button secondary" disabled={busy} onClick={() => setConfirm(false)}>Go back</button>
@@ -580,6 +597,9 @@ export function Archive({ base, online }: { base: string; online: boolean }) {
       <form className="insight-form" onSubmit={saveRule}>
         <label>Rule name<input name="name" maxLength={80} required /></label>
         <label>Preview interval in hours<input type="number" name="interval" min={0} max={8760} defaultValue={0} required /></label>
+        {typeof rulePlan.include_location === 'boolean' && <p>{rulePlan.include_location
+          ? 'Rule includes available source location information.'
+          : 'Rule excludes source location information.'}</p>}
         <p>Use 0 for manual previews. Every conversion requires its own confirmation.</p>
         {error && <Status error={error} />}
         <div className="dialog-actions">

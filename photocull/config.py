@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import os
+import re
 from hashlib import sha256
+from ipaddress import IPv6Address
 from json import dumps
 from pathlib import Path
 from typing import Annotated, Literal
 
 import yaml
 from dotenv import dotenv_values
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 MediaStage = Literal["exif", "preview", "score"]
 Stage = Literal["exif", "preview", "score", "embedding"]
@@ -187,11 +196,81 @@ class ArchiveSettings(BaseModel):
     timeout_seconds: int = Field(default=86400, ge=5, le=604800)
 
 
+HOST_AUTHORITY = re.compile(r"(?:\[([0-9A-Fa-f:.]+)\]|([A-Za-z0-9.-]+))(?::([0-9]{1,5}))?")
+
+
+def host_name(authority: str) -> str | None:
+    match = HOST_AUTHORITY.fullmatch(authority)
+    if match is None:
+        return None
+    ipv6, name, port = match.groups()
+    if port and not 0 < int(port) <= 65535:
+        return None
+    if ipv6:
+        try:
+            return str(IPv6Address(ipv6))
+        except ValueError:
+            return None
+    return name.lower().removesuffix(".") or None
+
+
+class ServerSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    allowed_hosts: tuple[str, ...] = ()
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def normalize_hosts(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        hosts = []
+        for value in values:
+            authority = value.strip()
+            if authority.count(":") > 1 and not authority.startswith("["):
+                authority = f"[{authority}]"
+            match = HOST_AUTHORITY.fullmatch(authority)
+            host = host_name(authority)
+            if match is None or match[3] is not None or host is None:
+                raise ValueError("Allowed hosts must be hostnames or IP addresses without ports")
+            hosts.append(host)
+        return tuple(dict.fromkeys(hosts))
+
+
+class DerivativeSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = True
+    hot_dir: Path | None = None
+    large_dir: Path | None = None
+    hot_mib: int = Field(default=1536, ge=16)
+    large_mib: int = Field(default=4096, ge=16)
+    avif_quality: int = Field(default=58, ge=1, le=100)
+    webp_quality: int = Field(default=80, ge=1, le=100)
+    jpeg_quality: int = Field(default=86, ge=1, le=100)
+    prewarm: int = Field(default=64, ge=0, le=2048)
+    original_download: bool = False
+    original_streaming: bool = False
+    accel_redirect: bool = False
+
+    @field_validator("hot_dir", "large_dir")
+    @classmethod
+    def canonical_cache(cls, value: Path | None) -> Path | None:
+        return value.resolve() if value is not None else None
+
+
+class BrowserSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    strip_location: bool = True
+
+    def includes_location(self, override: bool | None) -> bool:
+        return not self.strip_location if override is None else override
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     libraries: dict[LibraryName, Library] = Field(default_factory=dict)
-    state_dir: Path = Path(".photocull")
+    state_dir: Path = Field(default=Path(".photocull"), validate_default=True)
     bind_host: str = "127.0.0.1"
     bind_port: int = Field(default=8000, ge=1, le=65535)
     token_file: Path | None = None
@@ -203,6 +282,14 @@ class Settings(BaseModel):
     ml: MLSettings = Field(default_factory=MLSettings)
     insights: InsightSettings = Field(default_factory=InsightSettings)
     archive: ArchiveSettings = Field(default_factory=ArchiveSettings)
+    derivatives: DerivativeSettings = Field(default_factory=DerivativeSettings)
+    browser: BrowserSettings = Field(default_factory=BrowserSettings)
+    server: ServerSettings = Field(default_factory=ServerSettings)
+
+    @field_validator("state_dir")
+    @classmethod
+    def canonical_state(cls, value: Path) -> Path:
+        return value.resolve()
 
     @model_validator(mode="after")
     def validate_state(self) -> Settings:
@@ -219,6 +306,8 @@ class Settings(BaseModel):
                 if target.is_relative_to(area) or area.is_relative_to(target):
                     raise ValueError(f"export root {name} overlaps a media or state directory")
         media = tuple(root.resolve() for lib in self.libraries.values() for root in lib.roots)
+        if any(state.is_relative_to(root) for root in media):
+            raise ValueError("State directory must be outside media roots")
         for root in self.archive.write_roots:
             if not root.is_absolute() or root == Path("/") or root != root.resolve():
                 raise ValueError("Archive write roots must be canonical absolute directories")
@@ -255,10 +344,28 @@ class Settings(BaseModel):
                 for area in self.archive.export_roots.values()
             ):
                 raise ValueError(f"Archive trash and export roots overlap for {name}")
+        if self.derivatives.enabled:
+            self._validate_derivative_roots(state, media)
         return self
+
+    def _validate_derivative_roots(self, state: Path, media: tuple[Path, ...]) -> None:
+        hot, large = (self.derivative_root(tier).resolve() for tier in ("hot", "large"))
+        exports = (*self.insights.export_roots.values(), *self.archive.export_roots.values())
+        areas = (*media, *(path.resolve() for path in exports), *self.archive.trash_roots.values())
+        for cache in (hot, large):
+            if state.is_relative_to(cache) or any(
+                cache.is_relative_to(root) or root.is_relative_to(cache) for root in areas
+            ):
+                raise ValueError("Derivative cache must be outside media and export directories")
+        if hot.is_relative_to(large) or large.is_relative_to(hot):
+            raise ValueError("Derivative cache tiers must be separate directories")
 
     def library_state(self, name: str) -> Path:
         return self.state_dir / "libraries" / name
+
+    def derivative_root(self, tier: Literal["hot", "large"]) -> Path:
+        root = self.derivatives.hot_dir if tier == "hot" else self.derivatives.large_dir
+        return root or self.state_dir / "derivatives" / tier
 
     @property
     def model_cache(self) -> Path:
@@ -298,6 +405,11 @@ def load_settings() -> Settings:
     if roots := insights.get("export_roots"):
         _paths(roots, tuple(roots), config.parent)
     archive = values.setdefault("archive", {})
+    derivatives = values.setdefault("derivatives", {})
+    _paths(derivatives, ("hot_dir", "large_dir"), config.parent)
+    for field in ("hot_dir", "large_dir"):
+        if setting := env.get(f"PHOTOCULL_DERIVATIVES_{field.upper()}"):
+            derivatives[field] = (cwd / Path(setting).expanduser()).absolute()
     for mapping in ("export_roots", "trash_roots"):
         if roots := archive.get(mapping):
             _paths(roots, tuple(roots), config.parent)
@@ -361,6 +473,8 @@ def load_settings() -> Settings:
         ("ml", MLSettings),
         ("insights", InsightSettings),
         ("archive", ArchiveSettings),
+        ("derivatives", DerivativeSettings),
+        ("browser", BrowserSettings),
     ):
         settings = values.setdefault(section, {})
         for field in model.model_fields.keys() - {
@@ -369,8 +483,15 @@ def load_settings() -> Settings:
             "export_roots",
             "trash_roots",
             "write_roots",
+            "hot_dir",
+            "large_dir",
         }:
             if (value := env.get(f"PHOTOCULL_{section.upper()}_{field.upper()}")) is not None:
                 settings[field] = value
+
+    if (hosts := env.get("PHOTOCULL_ALLOWED_HOSTS")) is not None:
+        values.setdefault("server", {})["allowed_hosts"] = [
+            host.strip() for host in hosts.split(",") if host.strip()
+        ]
 
     return Settings.model_validate(values)

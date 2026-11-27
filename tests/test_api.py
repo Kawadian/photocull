@@ -28,7 +28,7 @@ forbidden = {
     'onnxruntime', 'insightface', 'faster_whisper', 'torch', 'torchvision',
     'open_clip', 'transformers', 'tokenizers', 'usearch', 'numkong', 'huggingface_hub',
     'faiss', 'hnswlib', 'rawpy', 'pyexiv2', 'PIL', 'numpy', 'pillow_heif', 'cv2', 'imagehash',
-    'ctranslate2', 'watchdog', 'av',
+    'ctranslate2', 'watchdog', 'av', 'blurhash',
 }
 original = builtins.__import__
 def guarded(name, *args, **kwargs):
@@ -65,6 +65,7 @@ with TemporaryDirectory() as directory:
         base = '/api/libraries/photos'
         assert client.get('/api/browse/timeline').json()['items'] == []
         assert client.get('/api/browse/months').json()['items'] == []
+        assert client.get('/api/browse/media').json()['recipe']
         assert client.get(f'{base}/jobs').json()['ml']['waiting']
         assert client.get(f'{base}/tags').status_code == 200
         assert client.get(f'{base}/similar-groups').json()['items'] == []

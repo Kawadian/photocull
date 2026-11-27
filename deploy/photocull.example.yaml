@@ -9,6 +9,8 @@ libraries:
   #   root: /srv/photocull-view
   #   allowed_roots: [/mnt/PhotoLibrary]
 # token_file: /etc/photocull/token
+# server:
+#   allowed_hosts: [photocull.local, localhost, 127.0.0.1]
 worker:
   memory_mb: 1536
   batch_size: 8
@@ -19,6 +21,20 @@ worker:
   scan_overlap: false # Keep false for libraries on one spinning disk.
   stages: [exif, preview, score]
   device: cpu
+# browser:
+#   strip_location: true # Default for shared media, rendered downloads, and trip reports.
+# derivatives:
+#   hot_dir: /var/lib/photocull/derivatives/hot
+#   hot_mib: 1536
+#   large_dir: /srv/photocull-cache-hdd
+#   large_mib: 4096
+#   prewarm: 64
+#   avif_quality: 58
+#   webp_quality: 80
+#   jpeg_quality: 86
+#   original_download: false
+#   original_streaming: false
+#   accel_redirect: false # Enable with matching internal nginx aliases.
 # scoring:
 #   min_sharpness: 0.02
 #   min_exposure: 0.08

@@ -235,8 +235,20 @@ def raw_parameters(tools, path):
     return params, digest
 
 
+def verify_location_free(tools, path):
+    tags = json.loads(tools.run("exiftool", "-j", "-n", "-a", "-G1", "-ee", path))[0]
+    for field in tags:
+        group, _, name = field.partition(":")
+        if group == "GPS" or name.casefold().startswith(("gps", "location", "geotag")):
+            raise ArchiveError(f"Location metadata remained in the export: {name}")
+        if group in {"MakerNotes", "IPTC"} or group.startswith("XMP"):
+            raise ArchiveError(f"Source metadata remained in the export: {group}")
+    if tags.get("ExifTool:Error") or tags.get("Error"):
+        raise ArchiveError("Could not verify the exported metadata")
+
+
 def dng(tools, source, target, request):
-    preview = "true" if request.dng_preview == "embed" else "false"
+    preview = "true" if request.dng_preview == "embed" and not request.strip_location else "false"
     before, digest = raw_parameters(tools, source)
     tools.run(
         "dnglab",
@@ -256,19 +268,34 @@ def dng(tools, source, target, request):
         source,
         target,
     )
-    # DNGLab copies several EXIF groups itself. Copy portable metadata it may omit.
-    tools.run(
-        "exiftool",
-        "-overwrite_original",
-        "-tagsFromFile",
-        source,
-        "-XMP:all",
-        "-IPTC:all",
-        "-GPS:all",
-        "-ICC_Profile",
-        *(f"-{field}" for field in EXIF_FIELDS),
-        target,
-    )
+    if request.strip_location:
+        # ExifTool excludes the structural DNG tags when erasing descriptive metadata.
+        tools.run(
+            "exiftool",
+            "-overwrite_original",
+            "-all=",
+            "-CommonIFD0=",
+            "--Orientation",
+            "--Make",
+            "--Model",
+            "--ICC_Profile",
+            target,
+        )
+        verify_location_free(tools, target)
+    else:
+        # DNGLab copies several EXIF groups itself. Copy portable metadata it may omit.
+        tools.run(
+            "exiftool",
+            "-overwrite_original",
+            "-tagsFromFile",
+            source,
+            "-XMP:all",
+            "-IPTC:all",
+            "-GPS:all",
+            "-ICC_Profile",
+            *(f"-{field}" for field in EXIF_FIELDS),
+            target,
+        )
     after, result = raw_parameters(tools, target)
     shape = ("rawWidth", "rawHeight")
     if (
@@ -316,9 +343,10 @@ def dng(tools, source, target, request):
         or not types.get("IFD0:DNGVersion")
     ):
         raise ArchiveError("Expected a lossless JPEG-compressed DNG")
-    if request.dng_preview == "embed" and not any(k.endswith(":PreviewImage") for k in types):
+    if preview == "true" and not any(k.endswith(":PreviewImage") for k in types):
         raise ArchiveError("The requested embedded DNG preview is missing")
-    compare_metadata(tools, source, target)
+    if not request.strip_location:
+        compare_metadata(tools, source, target)
 
 
 def still(tools, source, target, request):
@@ -326,28 +354,43 @@ def still(tools, source, target, request):
     before = json.loads(tools.run(*worker, source))
     quality = request.quality or {"jpeg": 85, "heic": 72, "avif": 70}[request.operation]
     tools.run(
-        *worker, source, target, request.operation, quality, tools.config.threads, request.preset
-    )
-    # Structured copy preserves nested EXIF, XMP and IPTC. Structural raster fields stay
-    # with the encoder. Orientation is verified independently after metadata transfer.
-    tools.run(
-        "exiftool",
-        "-overwrite_original",
-        "-tagsFromFile",
+        *worker,
         source,
-        "-GPS:all",
-        "-XMP:all",
-        "-IPTC:all",
-        "-ICC_Profile",
-        *(f"-{tag}" for tag in EXIF_FIELDS if tag != "Orientation"),
         target,
+        request.operation,
+        quality,
+        tools.config.threads,
+        request.preset,
+        "strip" if request.strip_location else "include",
     )
+    if request.strip_location:
+        verify_location_free(tools, target)
+    else:
+        # Structural raster fields stay with the encoder. Orientation is verified separately.
+        tools.run(
+            "exiftool",
+            "-overwrite_original",
+            "-tagsFromFile",
+            source,
+            "-GPS:all",
+            "-XMP:all",
+            "-IPTC:all",
+            "-ICC_Profile",
+            *(f"-{tag}" for tag in EXIF_FIELDS if tag != "Orientation"),
+            target,
+        )
     after = json.loads(tools.run(*worker, target))
     if before != after:
         raise ArchiveError(
             f"Decoded image dimensions, alpha or orientation changed: {before} → {after}"
         )
-    had_icc = compare_metadata(tools, source, target, ignore=("Orientation",))
+    if request.strip_location:
+        profile = tools.run("exiftool", "-b", "-ICC_Profile", source)
+        if profile and profile != tools.run("exiftool", "-b", "-ICC_Profile", target):
+            raise ArchiveError("Embedded ICC color profile differed")
+        had_icc = bool(profile)
+    else:
+        had_icc = compare_metadata(tools, source, target, ignore=("Orientation",))
     if not had_icc:
         still_color(tools, source, target)
 
@@ -399,12 +442,13 @@ def duration(data):
     return value
 
 
-def compare_video(before, after, codec):
+def compare_video(before, after, codec, *, keep_metadata=True):
     if len(before["streams"]) != len(after["streams"]):
         raise ArchiveError("Video stream count changed")
     if abs(duration(before) - duration(after)) > 0.1:
         raise ArchiveError("Video duration differs by over 100 ms")
-    check_tags(before["format"], after["format"])
+    if keep_metadata:
+        check_tags(before["format"], after["format"])
     chapters_a, chapters_b = before.get("chapters", []), after.get("chapters", [])
     if len(chapters_a) != len(chapters_b):
         raise ArchiveError("Video chapter count changed")
@@ -417,7 +461,8 @@ def compare_video(before, after, codec):
             "disposition"
         ):
             raise ArchiveError("Video stream type or disposition changed")
-        check_tags(a, b)
+        if keep_metadata:
+            check_tags(a, b)
         if not video_stream(a):
             for field in ("codec_name", "sample_rate", "channels", "width", "height"):
                 if a.get(field) != b.get(field):
@@ -443,10 +488,12 @@ def compare_video(before, after, codec):
             )
             if a.get(key, fallback) != b.get(key, fallback):
                 raise ArchiveError(f"Video stream field changed: {key}")
-        if b.get("codec_name") != codec:
-            raise ArchiveError(f"Expected {codec} output")
+        if b.get("codec_name") != (codec or a.get("codec_name")):
+            raise ArchiveError("Video codec differs from the requested output")
         if a.get("side_data_list", []) != b.get("side_data_list", []):
             raise ArchiveError("Video rotation or other stream side data changed")
+        if codec is None:
+            continue  # Stream-copy callers verify encoded packet hashes separately.
         count_a, count_b = int(a.get("nb_read_frames", "0")), int(b.get("nb_read_frames", "0"))
         if min(count_a, count_b) <= 0 or abs(count_a - count_b) > 1:
             raise ArchiveError("Video frame count unavailable or differs by over one frame")
@@ -505,6 +552,23 @@ def video(tools, source, target, request):
         ):
             if stream.get(key) not in (None, "unknown", "unspecified"):
                 stream_options += [f"-{option}:V:{n}", stream[key]]
+    if request.strip_location:
+        mapping = [
+            "-map",
+            "0:V",
+            "-map",
+            "0:a?",
+            "-map_metadata",
+            "-1",
+            "-map_metadata:s",
+            "-1",
+            "-map_chapters",
+            "-1",
+        ]
+        before["streams"] = streams + [s for s in before["streams"] if s["codec_type"] == "audio"]
+        before["chapters"] = []
+    else:
+        mapping = ["-map", "0", "-map_metadata", "0", "-map_chapters", "0"]
     tools.run(
         "ffmpeg",
         "-nostdin",
@@ -521,12 +585,7 @@ def video(tools, source, target, request):
         *FF_SOURCE,
         "-i",
         source,
-        "-map",
-        "0",
-        "-map_metadata",
-        "0",
-        "-map_chapters",
-        "0",
+        *mapping,
         "-c",
         "copy",
         "-c:V",
@@ -543,7 +602,7 @@ def video(tools, source, target, request):
         target,
     )
     after = probe_video(tools, target, count=True)
-    compare_video(before, after, request.operation)
+    compare_video(before, after, request.operation, keep_metadata=not request.strip_location)
     tools.run(
         "ffmpeg",
         "-nostdin",
@@ -563,7 +622,10 @@ def video(tools, source, target, request):
         "null",
         "-",
     )
-    compare_metadata(tools, source, target, video=True)
+    if request.strip_location:
+        verify_location_free(tools, target)
+    else:
+        compare_metadata(tools, source, target, video=True)
 
 
 def convert(tools, source, target, request):

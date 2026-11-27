@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react'
 import { message, request } from '../api'
 import type { Asset, Page } from '../api'
 import type { BrowserLocation } from './location'
+import type { BrowserMedia } from './ResponsiveImage'
 
 export type TimelineAsset = Pick<Asset, 'id' | 'kind' | 'day' | 'width' | 'height' | 'duration' |
-  'content_hash' | 'preview_status'> & { library: string; name: string }
+  'content_hash' | 'preview_status'> & { library: string; name: string; blurhash?: string | null }
 
 export function assetKey(asset: Pick<TimelineAsset, 'library' | 'id'>) {
   return asset.library + ':' + asset.id
@@ -28,6 +29,7 @@ type Feed = {
   assets: TimelineAsset[]
   next: string | null
   completed: Load | null
+  media?: BrowserMedia
   error?: string
 }
 
@@ -38,9 +40,9 @@ export function useTimeline({ library, month }: BrowserLocation) {
 
   useEffect(() => {
     const controller = new AbortController()
-    request<Page<TimelineAsset, string>>(browseUrl('timeline', library, month, load.cursor), {
+    request<Page<TimelineAsset, string> & { media?: BrowserMedia }>(browseUrl('timeline', library, month, load.cursor), {
       signal: controller.signal,
-    }).then(({ items, next_cursor }) => {
+    }).then(({ items, next_cursor, media }) => {
       if (controller.signal.aborted) return
       setFeed((previous) => {
         const existing = load.cursor ? previous.assets : []
@@ -49,6 +51,7 @@ export function useTimeline({ library, month }: BrowserLocation) {
           assets: [...existing, ...items.filter((item) => !seen.has(assetKey(item)))],
           next: next_cursor,
           completed: load,
+          media,
         }
       })
     }).catch((error: unknown) => {

@@ -144,3 +144,29 @@ test('write access, saved preview-only rule, and verified overwrite on mobile', 
   await expect(purge).toHaveCount(0)
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375)
 })
+
+test('previews archive copies with an explicit location policy', async ({ page, request }, info) => {
+  await page.setViewportSize({ width: 375, height: 812 })
+  const library = '/api/libraries/archive'
+  await request.post(library + '/scans')
+  await expect.poll(async () => {
+    const response = await request.get(library + '/assets')
+    return (await response.json()).items.find((asset: { path: string }) => asset.path === 'a.jpg')?.id
+  }, { timeout: 15_000 }).toBe(1)
+  await page.goto('/')
+  await page.getByLabel('Library', { exact: true }).selectOption('archive')
+  await page.getByRole('navigation', { name: 'Library views' }).getByRole('button', { name: 'Archive' }).click()
+  const location = page.getByRole('combobox', { name: 'Location information' })
+  await expect(location).toHaveValue('true')
+  await location.selectOption('false')
+  await expect(page.getByText(/Location removal preserves the original format/)).toBeVisible()
+  await page.getByRole('textbox', { name: 'Asset IDs' }).fill('1')
+  const sent = page.waitForRequest((item) => item.url().endsWith('/archive/preview') && item.method() === 'POST')
+  await page.getByRole('button', { name: 'Preview operation' }).click()
+  expect((await sent).postDataJSON().include_location).toBe(false)
+  await page.getByRole('button', { name: 'Review and confirm' }).click()
+  const confirm = page.getByRole('dialog', { name: 'Copy selected files' })
+  await expect(confirm.getByText('Export excludes source location information and XMP sidecars.')).toBeVisible()
+  await page.screenshot({ path: info.outputPath('mobile-archive-location.png') })
+  await confirm.getByRole('button', { name: 'Go back' }).click()
+})

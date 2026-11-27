@@ -21,6 +21,7 @@ from photocull.db.transfers import ExportRequest, ReportRequest, select_assets
 from photocull.media.artifacts import artifact_name, open_regular, transfer_directory
 from photocull.media.cache import cache_path
 from photocull.media.walk import MediaJail, SourceChanged, open_directory, source_key
+from photocull.worker.location import clean_copy
 
 COPY_BYTES = 1024 * 1024
 REPORT_HEADER = """<!doctype html>
@@ -118,6 +119,11 @@ class Transfers:
         self.settings = worker.settings
 
     def recover(self):
+        for staged in self.state.glob(".keeper-copy-*"):
+            # TemporaryDirectory uses private worker-owned directories and removes them normally.
+            # A stopped process can leave its render behind before publication.
+            if staged.is_dir() and not staged.is_symlink():
+                shutil.rmtree(staged)
         for job in self.db.execute(
             "SELECT * FROM transfers WHERE status IN ('running','cancelling')"
         ).fetchall():
@@ -279,6 +285,7 @@ class Transfers:
         self.db.execute("DROP TABLE IF EXISTS transfer_plan")
         self.db.execute(f"CREATE TEMP TABLE transfer_plan AS {query}", arguments)
         try:
+            self.db.execute("CREATE UNIQUE INDEX temp.transfer_plan_id ON transfer_plan(id)")
             count, total = self.db.execute(
                 "SELECT count(*), coalesce(sum(size),0) FROM transfer_plan"
             ).fetchone()
@@ -333,6 +340,16 @@ class Transfers:
         finally:
             remove_private(root_fd, staged)
 
+    def planned_assets(self):
+        after = 0
+        # Finish each SELECT before copying or writing progress. A cursor held across
+        # encoding can retain a WAL snapshot that SQLite cannot upgrade to a writer.
+        while assets := self.db.execute(
+            "SELECT * FROM transfer_plan WHERE id > ? ORDER BY id LIMIT 64", (after,)
+        ).fetchall():
+            yield from assets
+            after = assets[-1]["id"]
+
     def copy_files(self, config, job_id, pulse, output):
         jail = MediaJail(self.worker.library, self.settings.state_dir)
         written = 0
@@ -357,16 +374,31 @@ class Transfers:
             if before != source_key(os.fstat(fd)):
                 raise SourceChanged(f"Source changed while exporting {name}")
 
-        for asset in self.db.execute("SELECT * FROM transfer_plan ORDER BY id"):
+        for asset in self.planned_assets():
             self.check(job_id, pulse)
             with jail.open_media(asset["path"]) as (fd, _):
                 if source_key(os.fstat(fd)) != asset["source_key"]:
                     raise SourceChanged(f"{asset['path']} changed since indexing; rescan and retry")
-                transfer(fd, file_name(asset), count_bytes=True)
+                if config.include_location is False:
+                    with (
+                        clean_copy(
+                            self.settings,
+                            fd,
+                            Path(asset["path"]).suffix,
+                            self.state,
+                            lambda: self.check(job_id, pulse),
+                        ) as staged,
+                        staged.open("rb") as clean,
+                    ):
+                        transfer(clean.fileno(), file_name(asset), count_bytes=True)
+                    if source_key(os.fstat(fd)) != asset["source_key"]:
+                        raise SourceChanged(f"{asset['path']} changed while exporting")
+                else:
+                    transfer(fd, file_name(asset), count_bytes=True)
                 with jail.open_media(asset["path"]) as (current, _):
                     if source_key(os.fstat(current)) != asset["source_key"]:
                         raise SourceChanged(f"{asset['path']} was replaced while exporting")
-            if config.xmp:
+            if config.xmp and config.include_location is not False:
                 with sidecar(jail, asset["path"]) as fd:
                     if fd is not None:
                         transfer(fd, file_name(asset, sidecar=True), count_bytes=False)
@@ -379,6 +411,7 @@ class Transfers:
     def report(self, job, pulse):
         job_id = job["id"]
         request = ReportRequest.model_validate_json(job["request"])
+        include_location = self.settings.browser.includes_location(request.include_location)
         args = (
             request.start.isoformat() if request.start else "",
             request.end.isoformat() if request.end else "9999-99-99",
@@ -405,8 +438,8 @@ class Transfers:
                 while items := segments(self.db, day, position, 16):
                     for item in items:
                         self.check(job_id, pulse)
-                        self.report_segment(output, item)
-                        used_geonames |= item["title"] is not None
+                        self.report_segment(output, item, include_location)
+                        used_geonames |= include_location and item["title"] is not None
                         position = item["position"]
                 output.write(b"</section>\n")
                 count += 1
@@ -422,19 +455,21 @@ class Transfers:
                 )
             output.write(b"</main>\n")
 
-    def report_segment(self, output, item):
-        title = item["title"] or (
-            f"{item['latitude']:.3f}, {item['longitude']:.3f}"
-            if item["latitude"] is not None
-            else "Location unavailable"
-        )
+    def report_segment(self, output, item, include_location):
+        title = f"Part {item['position']}"
+        if include_location:
+            title = item["title"] or (
+                f"{item['latitude']:.3f}, {item['longitude']:.3f}"
+                if item["latitude"] is not None
+                else "Location unavailable"
+            )
         time_range = " – ".join(value[11:16] for value in (item["started"], item["ended"]) if value)
         count = item["count"]
         output.write(
             f'<article><h3>{escape(title)}</h3><p class="details">'
             f'{escape(time_range)} · {count} items</p><div class="gallery">'.encode()
         )
-        for asset in item["representatives"]:
+        for index, asset in enumerate(item["representatives"], 1):
             path = cache_path(self.state, "thumbs", asset["id"], asset["content_hash"])
             try:
                 with (
@@ -447,7 +482,7 @@ class Transfers:
                 continue
             if len(image) > 512 * 1024:
                 continue
-            label = escape(Path(asset["path"]).name)
+            label = escape(Path(asset["path"]).name) if include_location else f"Photo {index}"
             output.write(
                 b'<figure><img loading="lazy" alt="'
                 + label.encode()

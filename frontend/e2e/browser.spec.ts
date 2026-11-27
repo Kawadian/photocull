@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 test('opens the cross-library timeline from Review and shares navigation state', async ({ page }, info) => {
+  test.setTimeout(60_000)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/')
   await page.getByRole('link', { name: 'Photo browser' }).click()
@@ -13,6 +14,9 @@ test('opens the cross-library timeline from Review and shares navigation state',
   const second = gallery.getByRole('button', { name: 'Frame-117.jpg · gallery-2025' })
   await expect(first.locator('img')).toHaveJSProperty('complete', true)
   await expect.poll(() => first.locator('img').evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0)
+  await expect.poll(() => first.locator('img').evaluate((image: HTMLImageElement) => image.currentSrc))
+    .toMatch(/\/media\/grid-512\.avif\//)
+  await expect(first.locator('canvas')).toHaveCount(1)
   await expect(second).toBeVisible()
   await expect(gallery.getByRole('heading', { name: 'October', exact: true })).toBeVisible()
   await page.screenshot({ path: info.outputPath('desktop-timeline.png') })
@@ -48,6 +52,7 @@ test('opens the cross-library timeline from Review and shares navigation state',
   await page.setViewportSize({ width: 3840, height: 2160 })
   await expect(firstScoped).toBeVisible()
   await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 3840)
+  await page.setViewportSize({ width: 1440, height: 900 })
   await page.getByRole('link', { name: 'Review', exact: true }).click()
   await expect(page.getByRole('link', { name: 'Photo browser' })).toBeVisible()
 })
@@ -70,12 +75,15 @@ test('loads another cursor page while keeping the number of mounted tiles bounde
 })
 
 test('recovers from catalog and failed preview requests and opens a shared photo URL', async ({ page }) => {
-  await page.route('**/api/browse/timeline?*', (route) => route.fulfill({ status: 503 }), { times: 1 })
+  const timeline = '**/api/browse/timeline?*'
+  await page.route(timeline, (route) => route.fulfill({ status: 503 }))
   await page.goto('/?view=browser&library=gallery-2024&lang=en')
   await expect(page.getByRole('alert')).toContainText('Timeline unavailable')
+  await page.unroute(timeline)
   await page.getByRole('button', { name: 'Retry' }).click()
   await expect(page.getByRole('button', { name: 'Frame-118.jpg' })).toBeVisible()
 
+  await page.route('**/assets/104/media/fit-*/**', (route) => route.fulfill({ status: 202 }))
   await page.route('**/assets/104/media/preview?*', (route) => route.abort(), { times: 1 })
   await page.goto('/?view=browser&library=gallery-2024&lang=en&photo=gallery-2024%3A104')
   const dialog = page.getByRole('dialog', { name: 'Frame-104.jpg' })
@@ -83,10 +91,35 @@ test('recovers from catalog and failed preview requests and opens a shared photo
   await dialog.getByRole('button', { name: 'Retry' }).click()
   await expect.poll(() => dialog.getByRole('img').evaluate((image: HTMLImageElement) => image.naturalWidth))
     .toBeGreaterThan(0)
+  const downloadEvent = page.waitForEvent('download')
+  await dialog.getByRole('link', { name: 'Download original' }).click()
+  expect((await downloadEvent).suggestedFilename()).toBe('Frame-104.jpg')
   await dialog.getByRole('button', { name: 'Close preview' }).click()
   await expect(page).toHaveURL(/view=browser/)
   await expect(page).not.toHaveURL(/photo=/)
   await expect(dialog).toHaveCount(0)
+})
+
+test('prepares a video from its poster and switches proxy quality', async ({ page, request }, info) => {
+  test.setTimeout(60_000)
+  await request.post('/api/libraries/insights/scans')
+  await expect.poll(async () => {
+    const response = await request.get('/api/libraries/insights/assets?kind=video')
+    const { items } = await response.json()
+    return items[0]?.preview_status
+  }, { timeout: 15_000 }).toBe('done')
+  await page.goto('/?view=browser&library=insights&lang=en')
+  await page.getByRole('button', { name: 'walk.mov · Video', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'walk.mov' })
+  await expect(dialog.getByRole('img')).toBeVisible()
+  await dialog.getByRole('button', { name: 'Prepare playback' }).click()
+  const video = dialog.locator('video')
+  await expect(video).toHaveAttribute('src', /video-480\.mp4/, { timeout: 15_000 })
+  await expect.poll(() => video.evaluate((element) => (element as HTMLVideoElement).readyState))
+    .toBeGreaterThan(0)
+  await page.screenshot({ path: info.outputPath('desktop-video.png') })
+  await dialog.getByRole('combobox', { name: 'Video quality' }).selectOption('720')
+  await expect(video).toHaveAttribute('src', /video-720\.mp4/, { timeout: 15_000 })
 })
 
 test.describe('375 px touch layout', () => {

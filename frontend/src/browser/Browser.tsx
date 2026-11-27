@@ -22,6 +22,7 @@ function Timeline({ location, months, navigate, jump, close }: {
 }) {
   const text = strings[location.lang]
   const feed = useTimeline(location)
+  const media = feed.media
   const [currentMonth, setCurrentMonth] = useState('')
   const opener = useRef<HTMLButtonElement>(null)
   const index = location.photo ? feed.assets.findIndex((asset) => assetKey(asset) === location.photo) : -1
@@ -34,7 +35,7 @@ function Timeline({ location, months, navigate, jump, close }: {
   }, [location.photo])
 
   return <div className="pcb-content">
-    <TimelineGrid assets={feed.assets} location={location} text={text} busy={feed.busy}
+    <TimelineGrid assets={feed.assets} location={location} recipe={media?.recipe} text={text} busy={feed.busy}
       canLoad={!!feed.next && !feed.error} loadMore={feed.loadMore} onMonth={setCurrentMonth}
       onPhoto={(asset, button) => {
         opener.current = button
@@ -61,7 +62,8 @@ function Timeline({ location, months, navigate, jump, close }: {
     </TimelineGrid>
     <Scrubber months={months} current={currentMonth || location.month} lang={location.lang}
       label={text.scrubber} jump={jump} />
-    {location.photo && <Preview photo={location.photo} asset={feed.assets[index]}
+    {location.photo && <Preview photo={location.photo} asset={feed.assets[index]} media={media}
+      mediaLoading={!feed.completed}
       text={text} close={close}
       previous={index > 0 ? () => openPhoto(-1) : undefined}
       next={index >= 0 && index < feed.assets.length - 1 ? () => openPhoto(1) : undefined} />}

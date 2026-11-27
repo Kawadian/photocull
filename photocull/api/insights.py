@@ -10,6 +10,7 @@ from fastapi import Path as RoutePath
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, StringConstraints
 
+from photocull.api.media import cached_media
 from photocull.config import Settings
 from photocull.db import connect, write
 from photocull.db.catalog import mark_catalog_updated
@@ -211,6 +212,7 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
             "report": config.report and config.story,
             "export": config.export,
             "destinations": list(config.export_roots),
+            "strip_location": settings.browser.strip_location,
             "taste": taste,
             "stages": stages,
         }
@@ -407,11 +409,9 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
                 (asset_id, key, asset["content_hash"]),
             ).fetchone()
         target = video_path(path.parent, asset_id, asset["content_hash"], key)
-        if row is None or not target.is_file():
+        if row is None:
             raise HTTPException(404, "Video preview unavailable")
-        return FileResponse(
-            target, media_type="video/mp4", headers={"Cache-Control": "private, no-cache"}
-        )
+        return cached_media(target, "video/mp4")
 
     @app.get(PREFIX + "/assets/{asset_id}/video/captions")
     def video_captions(library: str, asset_id: Id):
@@ -459,14 +459,21 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
             require(config.faces, "Face grouping")
         if body.selection.dead is not None:
             require(config.video, "Video analysis")
+        include_location = body.include_location is not False
+        if body.xmp and not include_location:
+            raise HTTPException(422, "Existing XMP sidecars can contain location metadata")
+        options = body.model_copy(update={"include_location": include_location})
         with connect(library_path(library)) as db:
-            return submit_transfer(db, body.kind, body)
+            return submit_transfer(db, options.kind, options)
 
     @app.post(PREFIX + "/reports", status_code=202)
     def report(library: str, body: ReportRequest):
         require(config.report and config.story, "Trip report")
+        options = body.model_copy(
+            update={"include_location": settings.browser.includes_location(body.include_location)}
+        )
         with connect(library_path(library)) as db:
-            return submit_transfer(db, "report", body)
+            return submit_transfer(db, "report", options)
 
     @app.get(PREFIX + "/transfers")
     def transfers(library: str, kind: Literal["export", "report"], limit: Limit = 30):

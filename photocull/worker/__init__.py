@@ -29,6 +29,7 @@ from photocull.db.jobs import (
     recover,
     skip_unavailable_previews,
 )
+from photocull.media.artifacts import prune_artifacts, unlink_artifact
 from photocull.media.cache import cache_path
 from photocull.media.walk import MediaJail, SourceChanged, source_key
 from photocull.worker.bursts import refresh_bursts
@@ -118,15 +119,13 @@ class LibraryWorker:
                 if not count:
                     break
         for variant in CACHE_DIRS:
-            for temporary in (self.state / variant).glob(".[0-9]*-*-*"):
-                temporary.unlink(missing_ok=True)
+            prune_artifacts(self.state / variant, ".[0-9]*-*-*")
         configure_scoring(self.db, self.settings.scoring, self.pulse)
         if self.ml is not None:
             self.ml.configure()
         if self.insights is not None:
-            for staged in (self.state / "video").glob(".video-*"):
-                self.pulse()
-                staged.unlink(missing_ok=True)
+            self.pulse()
+            prune_artifacts(self.state / "video", ".video-*")
             self.insights.configure()
         if self.stories is not None:
             self.stories.configure(self.pulse)
@@ -288,7 +287,7 @@ class LibraryWorker:
         for asset_id, digest, current in rows:
             if digest != current:
                 for variant in CACHE_DIRS:
-                    cache_path(self.state, variant, asset_id, digest).unlink(missing_ok=True)
+                    unlink_artifact(cache_path(self.state, variant, asset_id, digest))
         with write(self.db):
             self.db.executemany(
                 "DELETE FROM preview_cleanup WHERE asset_id=? AND content_hash=?",
@@ -395,6 +394,7 @@ class LibraryWorker:
 
 def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=None) -> int:
     from photocull.worker.archive import Archives
+    from photocull.worker.derivatives import Derivatives
 
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     if not settings.libraries:
@@ -466,6 +466,7 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=N
             stack.callback(inference.close)
             gates = {worker.state.name: worker.archive_gate for worker in workers}
             archives = Archives(settings, stop, stack, gates)
+            derivatives = Derivatives(settings, workers, stack, stop)
             stack.callback(stop.set)
             for worker in workers:
                 stack.callback(worker.offline)
@@ -510,6 +511,7 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=N
                     return 75
                 if scans and not config.scan_overlap:
                     archives.step(idle=False)
+                    derivatives.step(available=False, idle=False)
                     stop.wait(SEARCH_POLL_SECONDS)
                     continue
 
@@ -530,6 +532,7 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=N
                         busy = True
                         break
                 archives.step(idle=not busy and not scans)
+                busy = derivatives.step(available=not scans, idle=not busy and not scans) or busy
                 if not busy:
                     stop.wait(SEARCH_POLL_SECONDS if poll_search or scans else 0.25)
     except StopWorker:

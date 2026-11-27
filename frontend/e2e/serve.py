@@ -12,6 +12,7 @@ from PIL import Image
 from photocull.api import create_app
 from photocull.config import (
     ArchiveSettings,
+    DerivativeSettings,
     InsightSettings,
     Library,
     MLSettings,
@@ -90,6 +91,7 @@ def main() -> None:
             state_dir=root / "state",
             static_dir=Path(__file__).resolve().parents[1] / "dist",
             scoring=ScoringSettings(min_sharpness=0),
+            derivatives=DerivativeSettings(prewarm=0, original_download=True),
             worker=WorkerSettings(memory_mb=3072),
             ml=MLSettings(enabled=True, tag_top_k=1, offline=True),
             archive=ArchiveSettings(

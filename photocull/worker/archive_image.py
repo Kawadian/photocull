@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 
@@ -31,7 +32,19 @@ def main():
         if not args:
             print(json.dumps(description(image)))
             return
-        output, codec, quality, threads, preset = args
+        if args == ["fingerprint"]:
+            info = description(image)
+            if image.info.get("bit_depth", 8) > 8:
+                raise ValueError("Cannot verify high-bit-depth pixels with this decoder")
+            info.update(
+                mode=image.mode,
+                pixels=hashlib.sha256(image.tobytes()).hexdigest(),
+                icc=hashlib.sha256(image.info.get("icc_profile") or b"").hexdigest(),
+                color=image.info.get("nclx_profile"),
+            )
+            print(json.dumps(info, sort_keys=True))
+            return
+        output, codec, quality, threads, preset, location_policy = args
         info = description(image)
         if image.mode not in {"RGB", "RGBA", "L", "LA", "P", "1"}:
             raise ValueError(f"Unsupported image mode for verified conversion: {image.mode}")
@@ -51,7 +64,8 @@ def main():
         if info["orientation"] != 1:
             exif[274] = info["orientation"]
         options = {"quality": int(quality)}
-        for tag in ("icc_profile", "xmp"):
+        tags = ("icc_profile", "xmp") if location_policy == "include" else ("icc_profile",)
+        for tag in tags:
             if metadata.get(tag):
                 options[tag] = metadata[tag]
         if exif:
@@ -74,6 +88,7 @@ def main():
                 }
             )
         with detached:
+            detached.info.clear()
             detached.save(
                 output, format={"jpeg": "JPEG", "heic": "HEIF", "avif": "AVIF"}[codec], **options
             )

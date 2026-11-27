@@ -1,0 +1,41 @@
+# Use with docker-compose.yml. Create and set ownership on both host paths first.
+x-photocull-hot: &hot
+  type: bind
+  source: ${PHOTOCULL_CACHE_HOT_HOST_DIR:-./.photocull/state/derivatives/hot}
+  target: /var/lib/photocull/derivatives/hot
+  bind:
+    create_host_path: false
+
+x-photocull-large: &large
+  type: bind
+  source: ${PHOTOCULL_CACHE_LARGE_HOST_DIR:-/srv/photocull-cache-hdd}
+  target: /srv/photocull-cache-hdd
+  bind:
+    create_host_path: false
+
+services:
+  api:
+    environment:
+      PHOTOCULL_DERIVATIVES_HOT_DIR: /var/lib/photocull/derivatives/hot
+      PHOTOCULL_DERIVATIVES_LARGE_DIR: /srv/photocull-cache-hdd
+      PHOTOCULL_DERIVATIVES_ACCEL_REDIRECT: 'true'
+    volumes:
+      - <<: *hot
+        read_only: true
+      - <<: *large
+        read_only: true
+
+  worker:
+    environment:
+      PHOTOCULL_DERIVATIVES_HOT_DIR: /var/lib/photocull/derivatives/hot
+      PHOTOCULL_DERIVATIVES_LARGE_DIR: /srv/photocull-cache-hdd
+    volumes:
+      - *hot
+      - *large
+
+  proxy:
+    volumes:
+      - <<: *hot
+        read_only: true
+      - <<: *large
+        read_only: true

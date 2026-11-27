@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from photocull.config import LibraryName, Settings
 from photocull.db.browse import TimelineKey, timeline_months, timeline_page
+from photocull.media.derivatives import recipe
 
 MONTH_PATTERN = r"^[0-9]{4}-(0[1-9]|1[0-2])$"
 MonthQuery = Annotated[str, Query(pattern=MONTH_PATTERN)]
@@ -40,6 +41,14 @@ class TimelineCursor(BaseModel):
 def browse_router(settings: Settings) -> APIRouter:
     router = APIRouter(prefix="/api/browse")
     catalogs = {name: settings.library_state(name) / "index.db" for name in settings.libraries}
+    config = settings.derivatives
+    encoding = recipe(config) if config.enabled else None
+    media = {
+        "recipe": encoding,
+        "original_download": config.original_download,
+        "original_streaming": config.original_streaming,
+        "strip_location": settings.browser.strip_location,
+    }
 
     def select(library: str | None) -> dict[str, Path]:
         if library is None:
@@ -52,6 +61,10 @@ def browse_router(settings: Settings) -> APIRouter:
     def months(response: Response, library: LibraryName | None = None):
         response.headers["Cache-Control"] = "private, no-cache"
         return {"items": timeline_months(select(library))}
+
+    @router.get("/media")
+    def browse_media():
+        return media
 
     @router.get("/timeline")
     def timeline(
@@ -69,13 +82,13 @@ def browse_router(settings: Settings) -> APIRouter:
                 raise HTTPException(422, "Cursor does not match the timeline scope")
             after = TimelineKey(value.day, value.time, value.library, value.asset_id)
 
-        items, next_key = timeline_page(selected, limit, month, after)
+        items, next_key = timeline_page(selected, limit, month, after, encoding)
         next_cursor = (
             TimelineCursor(**next_key._asdict(), scope=library, month=month).encode()
             if next_key
             else None
         )
         response.headers["Cache-Control"] = "private, no-cache"
-        return {"items": items, "next_cursor": next_cursor}
+        return {"items": items, "next_cursor": next_cursor, "media": media}
 
     return router

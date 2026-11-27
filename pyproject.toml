@@ -21,6 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 worker = [
+  "blurhash>=1.1.4,<2",
   "numpy>=2",
   "pillow>=12",
   "pillow-heif>=1.1",

@@ -10,6 +10,9 @@ from PIL import Image, ImageDraw, ImageOps
 
 from photocull.db import connect, initialize, write
 from photocull.media.cache import cache_path
+from photocull.media.derivatives import VARIANTS, derivative_path, recipe
+from photocull.media.walk import source_key
+from photocull.worker.derivatives import encode_image, image_blurhash
 
 PALETTES = (
     ("#ccd8d9", "#fae3b3", "#657a78", "#2b4e42", "#627845"),
@@ -70,11 +73,24 @@ def seed_gallery(settings, library: str, year: int) -> None:
             preview = jpeg(image, 1600)
             digest = hashlib.sha256(preview).hexdigest()
             name = f"Frame-{asset_id:03}.jpg"
+            source = settings.libraries[library].root / name
+            source.write_bytes(preview)
+            info = source.stat()
             db.execute(
                 """INSERT INTO assets(id,path,folder,kind,size,mtime_ns,content_hash,scan_id,
-                                      day,width,height)
-                   VALUES(?, ?, '', 'image', ?, 0, ?, 1, ?, ?, ?)""",
-                (asset_id, name, len(preview), digest, day, width, height),
+                                      day,width,height,source_key)
+                   VALUES(?, ?, '', 'image', ?, ?, ?, 1, ?, ?, ?, ?)""",
+                (
+                    asset_id,
+                    name,
+                    len(preview),
+                    info.st_mtime_ns,
+                    digest,
+                    day,
+                    width,
+                    height,
+                    source_key(info),
+                ),
             )
             db.execute(
                 """INSERT INTO jobs(asset_id,stage,content_hash,status)
@@ -83,3 +99,25 @@ def seed_gallery(settings, library: str, year: int) -> None:
             )
             cache_path(state, "thumbs", asset_id, digest).write_bytes(jpeg(image, 320))
             cache_path(state, "previews", asset_id, digest).write_bytes(preview)
+            if asset_id >= 107:
+                seed_derivatives(settings, db, library, asset_id, digest, image)
+
+
+def seed_derivatives(settings, db, library, asset_id, digest, image) -> None:
+    version = digest + "-" + recipe(settings.derivatives)
+    db.execute(
+        """INSERT INTO derivative_placeholders(asset_id,version,blurhash) VALUES(?,?,?)""",
+        (asset_id, version, image_blurhash(image)),
+    )
+    for name in ("grid-256.avif", "grid-512.avif", "fit-1280.avif", "fit-1920.avif"):
+        variant = VARIANTS[name]
+        target = derivative_path(settings, library, asset_id, variant, version)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("wb") as file:
+            encode_image(image, variant, settings.derivatives, file)
+        db.execute(
+            """INSERT INTO derivative_files
+               (asset_id,variant,version,tier,status,priority,requested_at,last_access,byte_size)
+               VALUES (?,?,?,?,'ready',1,0,0,?)""",
+            (asset_id, variant.name, version, variant.tier, target.stat().st_size),
+        )

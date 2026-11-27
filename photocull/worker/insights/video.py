@@ -7,11 +7,11 @@ import math
 import os
 import selectors
 import subprocess
-import tempfile
 import time
 from contextlib import closing, contextmanager
 from pathlib import Path
 
+from photocull.media.artifacts import prune_artifacts, stage_artifact
 from photocull.media.cache import video_path
 from photocull.media.decode import VIDEO_FORMATS
 from photocull.media.walk import MediaJail, SourceChanged, source_key
@@ -23,7 +23,7 @@ WINDOW = 4
 SPEECH_SECONDS = 30
 
 
-def chunks(args, fd, size, pulse):
+def chunks(args, fd, size, pulse, *, output_fds=()):
     # Only local formats are allowed and FFmpeg reads through a pinned source FD.
     # Drain stderr alongside stdout and keep just its tail for an actionable error.
     with (
@@ -32,7 +32,7 @@ def chunks(args, fd, size, pulse):
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            pass_fds=(fd,),
+            pass_fds=(fd, *output_fds),
         ) as process,
         selectors.DefaultSelector() as streams,
     ):
@@ -274,11 +274,24 @@ def metrics(source, fd, threads, duration, has_audio, pulse):
 
 
 @contextmanager
-def proxy(source, fd, threads, target, pulse):
-    target.parent.mkdir(exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".video-", delete=False) as tmp:
-        staged = Path(tmp.name)
-    try:
+def proxy(
+    source,
+    fd,
+    threads,
+    target,
+    pulse,
+    *,
+    limits=(1280, 720, "2M", "96k"),
+    max_bytes=None,
+    coordinates=None,
+):
+    width, height, bitrate, audio = limits
+    location = []
+    if coordinates is not None:
+        latitude, longitude = coordinates
+        location = ["-metadata", f"location={latitude:+09.5f}{longitude:+010.5f}/"]
+    with stage_artifact(target, ".video-") as tmp:
+        output = tmp.fileno()
         args = [
             *ffmpeg(source, threads),
             "-map",
@@ -287,8 +300,12 @@ def proxy(source, fd, threads, target, pulse):
             "0:a:0?",
             "-map_metadata",
             "-1",
+            "-map_metadata:s",
+            "-1",
+            "-map_chapters",
+            "-1",
             "-vf",
-            "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:"
+            f"scale='min({width},iw)':'min({height},ih)':force_original_aspect_ratio=decrease:"
             "force_divisible_by=2,format=yuv420p",
             "-c:v",
             "libx264",
@@ -299,13 +316,14 @@ def proxy(source, fd, threads, target, pulse):
             "-crf",
             "25",
             "-maxrate",
-            "2M",
+            bitrate,
             "-bufsize",
-            "4M",
+            "4M" if bitrate == "2M" else "1700k",
             "-c:a",
             "aac",
             "-b:a",
-            "96k",
+            audio,
+            *location,
             "-movflags",
             "+faststart",
             "-progress",
@@ -313,13 +331,17 @@ def proxy(source, fd, threads, target, pulse):
             "-f",
             "mp4",
             "-y",
-            str(staged),
+            f"/proc/self/fd/{output}",
         ]
-        for _ in chunks(args, fd, 1024, pulse):
+
+        def check():
+            pulse()
+            if max_bytes is not None and os.fstat(output).st_size > max_bytes:
+                raise ValueError("Video exceeds the derivative cache limit")
+
+        for _ in chunks(args, fd, 1024, check, output_fds=(output,)):
             pass
-        yield staged
-    finally:
-        staged.unlink(missing_ok=True)
+        yield Path(tmp.name)
 
 
 def transcribe(worker, source, fd, audio, pulse):
@@ -385,17 +407,12 @@ def run_stage(worker, stage, asset, key, pulse):
         try:
             with proxy(source, fd, config.threads, target, pulse) as staged:
                 verify_source()
-                staged.replace(target)
+                staged.replace(staged.with_name(target.name))
         except SourceChanged:
             raise
         except (OSError, ValueError) as error:
             verify_source()
             results["preview_error"] = str(error)
         results["preview"] = target.is_file()
-    for expired in target.parent.glob(f"{asset['id']}-*.mp4"):
-        if expired != target:
-            try:
-                expired.unlink(missing_ok=True)
-            except OSError as error:
-                LOG.warning("Could not remove obsolete video preview %s: %s", expired, error)
+    prune_artifacts(target.parent, f"{asset['id']}-*.mp4", keep=target.name)
     return results
