@@ -38,6 +38,8 @@ def write_fixtures(root: Path) -> Library:
         levels = [round(px * lightness) for px in range(256)]
         gradient.point(levels).save(root / filename, exif=exif)
     Image.new("L", (128, 96), 255).save(root / "white.jpg")
+    if root.name == "archive":
+        gradient.resize((384, 256)).convert("RGB").save(root / "zz-review.tiff")
     if root.name == "insights":
         Image.new("RGB", (120, 90), (30, 50, 220)).save(root / "blue.jpg")
         subprocess.run(

@@ -16,7 +16,7 @@ from time import perf_counter
 from photocull.archive import ArchiveRequest, packed, preview
 from photocull.config import ArchiveSettings, Library, Settings, WorkerSettings
 from photocull.db import connect, initialize
-from photocull.db.archive import enqueue, jobs
+from photocull.db.archive import insert_job, jobs
 from photocull.db.jobs import request_scan
 from photocull.media.walk import MediaJail
 from photocull.worker.archive import ArchiveWork
@@ -33,7 +33,7 @@ FORMATS = {
 }
 
 
-def run_case(base, codec):
+def run_case(base, codec, dng_preview):
     source, output = FORMATS[codec]
     library = Library(root=base / "input")
     export = base / "output"
@@ -52,9 +52,13 @@ def run_case(base, codec):
             db, scan, MediaJail(library, settings.state_dir), settings.worker, lambda: None
         ):
             pass
-        task = ArchiveRequest(operation=codec, filters={"extensions": [Path(source).suffix[1:]]})
+        task = ArchiveRequest(
+            operation=codec,
+            filters={"extensions": [Path(source).suffix[1:]]},
+            dng_preview=dng_preview,
+        )
         plan = preview(db, settings, "test", task)
-        id_ = enqueue(db, settings, "test", task, plan["confirmation"], "synthetic-benchmark")
+        id_ = insert_job(db, task, plan, "synthetic-benchmark")
         row = work.claim(db, 1)[0]
         started = perf_counter()
         work.process(row)
@@ -81,10 +85,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--case", choices=tuple(FORMATS))
+    parser.add_argument("--dng-preview", choices=("embed", "omit"), default="embed")
     parser.add_argument("--base", type=Path)
     args = parser.parse_args()
     if args.case:
-        print(packed(run_case(args.base, args.case)))
+        print(packed(run_case(args.base, args.case, args.dng_preview)))
         return
     with TemporaryDirectory(prefix="photocull-archive-benchmark-") as directory:
         base = Path(directory)
@@ -100,7 +105,16 @@ def main():
             synthetic_video(inputs / "clip.mp4", "1280x720", 8)
         for codec in FORMATS:
             result = subprocess.check_output(
-                [sys.executable, __file__, "--case", codec, "--base", os.fspath(base)],
+                [
+                    sys.executable,
+                    __file__,
+                    "--case",
+                    codec,
+                    "--base",
+                    os.fspath(base),
+                    "--dng-preview",
+                    args.dng_preview,
+                ],
                 text=True,
             )
             print(json.dumps(json.loads(result), ensure_ascii=False), flush=True)
