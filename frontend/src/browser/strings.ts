@@ -37,6 +37,7 @@ const en = {
   prepareVideo: 'Prepare playback',
   preparingVideo: 'Preparing video…',
   downloadOriginal: 'Download original',
+  originalLocation: 'Original may contain location information',
 }
 
 export const strings: Record<Language, typeof en> = {
@@ -78,6 +79,7 @@ export const strings: Record<Language, typeof en> = {
     prepareVideo: '再生を準備',
     preparingVideo: '動画を準備中…',
     downloadOriginal: '原本をダウンロード',
+    originalLocation: '原本には位置情報が含まれることがあります',
   },
 }
 

@@ -65,7 +65,7 @@ def mount_archive(app: FastAPI, settings, library_path):
     @app.post(f"{base}/preview", status_code=202)
     def dry_run(library: str, body: ArchiveRequest):
         with connect(library_path(library)) as db:
-            return {"id": invoke(queue, db, settings, library, body)}
+            return {"id": invoke(queue, db, settings, library, body.with_location_policy(settings))}
 
     @app.get(f"{base}/previews/{{preview_id}}")
     def preview_details(
@@ -78,7 +78,13 @@ def mount_archive(app: FastAPI, settings, library_path):
     def submit(library: str, body: Confirmation, request: Request):
         with connect(library_path(library)) as db:
             job_id = invoke(
-                enqueue, db, settings, library, body.plan, body.confirmation, actor(request)
+                enqueue,
+                db,
+                settings,
+                library,
+                body.plan.with_location_policy(settings),
+                body.confirmation,
+                actor(request),
             )
             return {"id": job_id}
 
@@ -138,7 +144,13 @@ def mount_archive(app: FastAPI, settings, library_path):
     @app.post(f"{base}/rules", status_code=201)
     def add_rule(library: str, body: ArchiveRule):
         with connect(library_path(library)) as db:
-            return {"id": invoke(save_rule, db, body)}
+            return {
+                "id": invoke(
+                    save_rule,
+                    db,
+                    body.model_copy(update={"plan": body.plan.with_location_policy(settings)}),
+                )
+            }
 
     @app.post(f"{base}/rules/{{rule_id}}/{{command}}", status_code=202)
     def change_rule(

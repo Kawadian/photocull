@@ -23,6 +23,7 @@ from photocull.media.artifacts import open_regular
 from photocull.media.derivatives import (
     VARIANTS,
     VERSION_PATTERN,
+    Variant,
     derivative_path,
     recipe,
     relative_path,
@@ -153,26 +154,44 @@ def mount_media(settings: Settings, library_path, hits: CacheAccess) -> APIRoute
     router = APIRouter()
     base = "/api/libraries/{library}/assets/{asset_id}"
 
-    @router.api_route(base + "/media/{name}/{version}", methods=["GET", "HEAD"])
-    def derivative(request: Request, library: str, asset_id: Id, name: str, version: Version):
-        path = library_path(library)
-        variant = VARIANTS.get(name)
-        if not config.enabled or variant is None or not version.endswith(version_suffix):
+    def asset_for_media(db, asset_id: int, version: str):
+        row = db.execute(
+            "SELECT kind, path, content_hash FROM assets WHERE id = ? AND active = 1",
+            (asset_id,),
+        ).fetchone()
+        if row is None or version != row["content_hash"] + version_suffix:
             raise HTTPException(404, "Derivative unavailable")
-        with connect(path, timeout_ms=500) as db:
-            row = db.execute(
-                "SELECT kind, content_hash FROM assets WHERE id = ? AND active = 1",
-                (asset_id,),
-            ).fetchone()
-            if (
-                row is None
-                or version != row["content_hash"] + version_suffix
-                or (variant.mime == "video/mp4" and row["kind"] != "video")
-            ):
-                raise HTTPException(404, "Derivative unavailable")
-            entry = cache_status(db, asset_id, name, version)
-            target = derivative_path(settings, library, asset_id, variant, version)
-            if entry and entry["status"] == "ready":
+        return row
+
+    def serve(
+        request: Request,
+        db,
+        path: Path,
+        library: str,
+        asset_id: int,
+        variant: Variant,
+        version: str,
+        *,
+        delivery: bool = False,
+        filename: str | None = None,
+    ):
+        name = variant.name
+        entry = cache_status(db, asset_id, name, version)
+        target = derivative_path(settings, library, asset_id, variant, version)
+        if entry and entry["status"] == "ready":
+            if delivery and target.is_file():
+                hits.touch(path, asset_id, name, version)
+                return OpenMedia(
+                    lambda stack: stack.enter_context(_open_cache(target)),
+                    variant.mime,
+                    {
+                        "Cache-Control": NO_STORE,
+                        "X-Content-Type-Options": "nosniff",
+                        "Cross-Origin-Resource-Policy": "same-origin",
+                    },
+                    filename=filename,
+                )
+            if not delivery:
                 redirect = None
                 if config.accel_redirect:
                     relative = relative_path(library, asset_id, variant, version).as_posix()
@@ -182,18 +201,18 @@ def mount_media(settings: Settings, library_path, hits: CacheAccess) -> APIRoute
                 ):
                     hits.touch(path, asset_id, name, version)
                     return response
-            if entry and (
-                entry["status"] == "running"
-                or (entry["status"] == "pending" and entry["priority"] == 1)
-            ):
-                status = "pending"
-            else:
-                try:
-                    status = request_file(db, asset_id, variant, version, time.time())
-                except sqlite3.OperationalError as error:
-                    if error.sqlite_errorcode != sqlite3.SQLITE_BUSY:
-                        raise
-                    status = "busy"
+        if entry and (
+            entry["status"] == "running"
+            or (entry["status"] == "pending" and entry["priority"] == 1)
+        ):
+            status = "pending"
+        else:
+            try:
+                status = request_file(db, asset_id, variant, version, time.time())
+            except sqlite3.OperationalError as error:
+                if error.sqlite_errorcode != sqlite3.SQLITE_BUSY:
+                    raise
+                status = "busy"
         code, delay = {"pending": (202, "2"), "busy": (503, "5"), "error": (409, "300")}[status]
         return JSONResponse(
             {"status": status},
@@ -201,11 +220,65 @@ def mount_media(settings: Settings, library_path, hits: CacheAccess) -> APIRoute
             headers={"Cache-Control": NO_STORE, "Retry-After": delay},
         )
 
+    @router.api_route(base + "/media/{name}/{version}", methods=["GET", "HEAD"])
+    def derivative(request: Request, library: str, asset_id: Id, name: str, version: Version):
+        path = library_path(library)
+        variant = VARIANTS.get(name)
+        if not config.enabled or variant is None or variant.include_location:
+            raise HTTPException(404, "Derivative unavailable")
+        with connect(path, timeout_ms=500) as db:
+            row = asset_for_media(db, asset_id, version)
+            if variant.mime == "video/mp4" and row["kind"] != "video":
+                raise HTTPException(404, "Derivative unavailable")
+            return serve(request, db, path, library, asset_id, variant, version)
+
+    @router.api_route(base + "/delivery/{version}", methods=["GET", "HEAD"])
+    def deliver(
+        request: Request,
+        library: str,
+        asset_id: Id,
+        version: Version,
+        action: Literal["share", "download"],
+        include_location: bool | None = None,
+    ):
+        path = library_path(library)
+        if not config.enabled:
+            raise HTTPException(404, "Derivative unavailable")
+        include = settings.browser.includes_location(include_location)
+        with connect(path, timeout_ms=500) as db:
+            row = asset_for_media(db, asset_id, version)
+            video = row["kind"] == "video"
+            if video:
+                variant = VARIANTS["location-video.mp4" if include else "video-720.mp4"]
+            else:
+                variant = VARIANTS["location-photo.jpg" if include else "fit-2560.jpg"]
+            filename = None
+            if action == "download":
+                filename = PurePosixPath(row["path"]).stem + "." + variant.extension
+            return serve(
+                request,
+                db,
+                path,
+                library,
+                asset_id,
+                variant,
+                version,
+                delivery=True,
+                filename=filename,
+            )
+
     @router.api_route(base + "/original", methods=["GET", "HEAD"])
-    def original(library: str, asset_id: Id, mode: Literal["download", "stream"] = "download"):
+    def original(
+        library: str,
+        asset_id: Id,
+        mode: Literal["download", "stream"] = "download",
+        include_location: bool | None = None,
+    ):
         path = library_path(library)
         if not (config.original_download if mode == "download" else config.original_streaming):
             raise HTTPException(404, "Original media unavailable")
+        if include_location is False:
+            raise HTTPException(422, "Original files preserve source metadata")
         with connect(path) as db:
             row = db.execute(
                 "SELECT path, kind, source_key FROM assets WHERE id = ? AND active = 1",

@@ -243,6 +243,7 @@ def test_day_stories_report_and_keeper_outputs(tmp_path):
                 json={
                     "kind": "zip",
                     "xmp": True,
+                    "include_location": True,
                     "selection": {"start": "2025-01-01", "end": "2025-01-01"},
                 },
             )
@@ -261,7 +262,11 @@ def test_day_stories_report_and_keeper_outputs(tmp_path):
             }
 
         for kind, path, body in (
-            ("export", "exports", {"kind": "copy", "destination": "archive", "xmp": True}),
+            (
+                "export",
+                "exports",
+                {"kind": "copy", "destination": "archive", "xmp": True, "include_location": True},
+            ),
             ("report", "reports", {"start": "2025-01-01"}),
         ):
             job = payload(client.post(f"{URL}/{path}", json=body))["id"]

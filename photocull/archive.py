@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from photocull.config import Settings
 from photocull.db.catalog import AUTO_REJECT_REASON
+from photocull.media.location import portable_suffix
 from photocull.media.walk import EXTENSIONS, MediaJail, excluded, open_directory, source_key
 
 MAX_ITEMS = 500
@@ -96,6 +97,7 @@ class ArchiveRequest(BaseModel):
     quality: int | None = Field(default=None, ge=0, le=100)
     preset: Literal["fast", "balanced", "slow"] = "balanced"
     dng_preview: Literal["embed", "omit"] = "embed"
+    include_location: bool | None = None
     template: ShortText = "{date}_{stem}"
 
     @property
@@ -115,8 +117,22 @@ class ArchiveRequest(BaseModel):
             "undo",
         }
 
+    @property
+    def strip_location(self) -> bool:
+        # Old requests without a policy retain their recorded export behavior.
+        return self.exports and self.include_location is False
+
+    def with_location_policy(self, settings: Settings) -> ArchiveRequest:
+        if not self.exports:
+            return self
+        return self.model_copy(
+            update={"include_location": settings.browser.includes_location(self.include_location)}
+        )
+
     @model_validator(mode="after")
     def validate_options(self):
+        if self.include_location is not None and not self.exports:
+            raise ValueError("Location settings apply to exported files")
         if self.trash_before and (self.operation != "purge" or self.trash_ids):
             raise ValueError("Only purge can use a cutoff instead of explicit trash IDs")
         if (self.operation in {"restore", "purge", "undo"}) != bool(
@@ -232,6 +248,7 @@ def capabilities(db, settings, library):
             else None
         ),
         "retention_days": config.retention_days,
+        "strip_location": settings.browser.strip_location,
     }
 
 
@@ -404,6 +421,8 @@ def destination_for(settings, library, request, row, source, ordinal):
     else:
         name = source.name
     if request.exports:
+        if request.strip_location and request.operation in {"copy", "rename"}:
+            name = Path(name).with_suffix(portable_suffix(row["kind"])).name
         return settings.archive.export_roots[library] / row["folder"] / name
     return source.with_name(name)
 
@@ -429,12 +448,16 @@ def asset_plan(settings, library, jail, request, row, ordinal, listing):
             "remove": request.destructive,
         }
     ]
-    related, shared = sidecar_state(source, listing)
+    related, shared = (
+        ([], False)
+        if request.strip_location and not request.destructive
+        else sidecar_state(source, listing)
+    )
     for file in related:
         prior = Path(file["path"])
-        output = related_path(target, file) if target else None
+        output = related_path(target, file) if target and not request.strip_location else None
         keep_shared = shared and not file["qualified"]
-        if output == prior or (output is None and keep_shared):
+        if output == prior or (output is None and (keep_shared or not request.destructive)):
             continue
         files.append(
             {
@@ -445,6 +468,7 @@ def asset_plan(settings, library, jail, request, row, ordinal, listing):
         )
     return {
         "asset_id": row["id"],
+        **({"kind": row["kind"]} if request.strip_location else {}),
         "relative": row["path"],
         "files": files,
         "duration": row["archive_duration"],

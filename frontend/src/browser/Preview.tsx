@@ -66,8 +66,8 @@ export function Preview({ photo, asset, media, mediaLoading, text, close, previo
     <div className="pcb-preview-top">
       <div><strong>{name}</strong>{name && <span>{library}{source?.kind === 'video' && ' · ' + text.video}</span>}</div>
       <div className="pcb-preview-actions">
-        {source && media?.original_download && <a className="pcb-icon" href={base + '/assets/' + assetId + '/original'}
-          download aria-label={text.downloadOriginal} title={text.downloadOriginal}>
+        {source && media?.original_download && <a className="pcb-icon" href={base + '/assets/' + assetId + '/original?include_location=true'}
+          download aria-label={text.downloadOriginal} title={text.originalLocation}>
           <Download size={20} aria-hidden="true" />
         </a>}
         <button className="pcb-icon" type="button" aria-label={text.close} title={text.close} onClick={close}>
