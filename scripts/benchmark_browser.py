@@ -83,6 +83,23 @@ def benchmark(root: Path, count: int, iterations: int) -> dict[str, float]:
         cases["favorites"] = {"favorite": True}
         cases["media_date"] = {"kind": "image", "start": months[len(months) // 2] + "-01"}
 
+        albums = "/api/browse/albums"
+        manual = client.post(albums, json={"name": "Synthetic mixed album"})
+        manual.raise_for_status()
+        manual_id = manual.json()["id"]
+        for library in libraries:
+            members = [{"library": library, "id": i} for i in range(1, min(size + 1, 601), 3)]
+            client.post(
+                f"{albums}/{manual_id}/members", json={"assets": members}
+            ).raise_for_status()
+        smart = client.post(
+            albums,
+            json={"name": "Synthetic favorites", "kind": "smart", "filters": {"favorite": True}},
+        )
+        smart.raise_for_status()
+        cases["manual_album"] = {"album": manual_id}
+        cases["smart_album"] = {"album": smart.json()["id"]}
+
         timings = {name: [] for name in cases}
         calendar_times = []
         for _ in range(iterations):

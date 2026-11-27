@@ -109,6 +109,7 @@ function Timeline({ location, months, navigate, jump, close, album, openAlbum, r
   return <>
     <div className="pcb-selection">
       <button className="pcb-control" type="button" ref={selectionButton} aria-pressed={selecting}
+        disabled={!selecting && loaded === 0}
         onClick={() => {
           setSelecting(!selecting)
           setSelected(new Map())
@@ -194,6 +195,8 @@ export default function Browser() {
   const [savingFilters, setSavingFilters] = useState(false)
   const [filterError, setFilterError] = useState(false)
   const filterButton = useRef<HTMLButtonElement>(null)
+  const heading = useRef<HTMLHeadingElement>(null)
+  const newAlbum = useRef<HTMLButtonElement>(null)
   const text = strings[location.lang]
   const filters = filterText[location.lang]
   const collection = collectionText[location.lang]
@@ -225,6 +228,9 @@ export default function Browser() {
     if (JSON.stringify(location) === JSON.stringify(next)) return
     writeLocation(next, replace)
     setLocation(next)
+    if (next.section !== location.section || next.album !== location.album) {
+      requestAnimationFrame(() => heading.current?.focus())
+    }
   }
 
   function goAlbum(item: Album) {
@@ -287,9 +293,10 @@ export default function Browser() {
           onClick={() => location.album ? navigate({ album: '', section: 'albums', photo: '', filters: {}, month: '', library: '' }) : goTimeline()}>
           ‹ {location.album ? collection.albums : collection.timeline}
         </button>}
-        <h1>{album?.name ?? (location.section === 'albums' ? collection.albums : text.timeline)}</h1>
+        <h1 ref={heading} tabIndex={-1}>{album?.name ?? (location.section === 'albums' ? collection.albums : text.timeline)}</h1>
       </div>
-      {albumIndex ? <button className="pcb-control pcb-album-link" type="button" onClick={() => setAlbumEditor('new')}>
+      {albumIndex ? <button className="pcb-control pcb-album-link" type="button" ref={newAlbum}
+        onClick={() => setAlbumEditor('new')}>
         <FolderPlus size={17} aria-hidden="true" />{collection.new}
       </button> : <div className="pcb-tools">
         {!location.album && <button className="pcb-control pcb-album-link" type="button"
@@ -362,6 +369,10 @@ export default function Browser() {
         if (albumEditor === 'new') goAlbum(item)
       }} />}
     {deleting && <DeleteAlbum album={deleting} text={collection} close={() => setDeleting(undefined)}
-      deleted={() => { setDeleting(undefined); setAlbumVersion((value) => value + 1) }} />}
+      deleted={() => {
+        setDeleting(undefined)
+        refreshAlbums()
+        requestAnimationFrame(() => newAlbum.current?.focus())
+      }} />}
   </div>
 }

@@ -119,7 +119,7 @@ The two nginx locations are internal. Public media requests still pass through t
 | Check | Budget and measurement |
 | --- | --- |
 | Initial JavaScript | At most 200 KiB gzipped for the main and browser entry chunks and their static dependencies. Check the build in CI. |
-| Grid API | Warm p95 below 100 ms for 72 results using 100,000 synthetic assets across nine libraries. Mix first pages, cursor seeks, month jumps and representative filters. Record local and CI baselines. |
+| Grid API | Warm p95 below 100 ms for 72 results using 100,000 synthetic assets across nine libraries. Mix first pages, cursor seeks, month jumps, representative filters, and manual and smart albums. Record local and CI baselines. |
 | First thumbnail | Under 3 s with a warm server cache, 375 px viewport, 400 kb/s down, 400 kb/s up and 150 ms latency. Use the Playwright Chromium network profile and record the environment. |
 | Grid scrolling | Bound mounted rows to viewport plus overscan. Sample animation frames during a sustained scroll and target a median frame interval of 16.7 ms on a 60 Hz display. |
 | API isolation | Keep the existing API dependency-import guard. Verify that catalog reads and media requests do not load decoders, FFmpeg or ML libraries. |
