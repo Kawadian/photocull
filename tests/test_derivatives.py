@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import sqlite3
 import subprocess
 import time
 from contextlib import ExitStack
@@ -15,7 +17,7 @@ from PIL.TiffImagePlugin import IFDRational
 
 from photocull.api import create_app
 from photocull.api.media import CacheAccess
-from photocull.config import DerivativeSettings, Library, Settings
+from photocull.config import DerivativeSettings, Library, ServerSettings, Settings, load_settings
 from photocull.db import connect, initialize, write
 from photocull.db.derivatives import DerivativeJob
 from photocull.media.cache import cache_path
@@ -23,6 +25,7 @@ from photocull.media.color import DISPLAY_P3, SRGB
 from photocull.media.derivatives import VARIANTS, derivative_path, recipe
 from photocull.media.images import register_heif
 from photocull.media.walk import source_key
+from photocull.worker import derivatives as encoder
 from photocull.worker.derivatives import Derivatives, _generate
 from tests.archive_fixtures import synthetic_dng
 from tests.worker_harness import start_worker, wait_for
@@ -157,14 +160,14 @@ def test_oriented_srgb_formats_placeholder_download_and_recovery(tmp_path):
         assert ready(client, path).content == response.content
 
         download = f"{BASE}/assets/{asset['id']}/original"
-        chunk = client.get(download, headers={"Range": "bytes=4-17"})
+        chunk = client.get(download + "?include_location=true", headers={"Range": "bytes=4-17"})
         assert chunk.status_code == 206
         assert chunk.content == original[4:18]
         assert "filename*=utf-8''" in chunk.headers["Content-Disposition"]
         assert chunk.headers["Cache-Control"] == "private, no-store"
         assert source.read_bytes() == original
         source.write_bytes(b"updated after the scan")
-        assert client.get(download).status_code == 404
+        assert client.get(download + "?include_location=true").status_code == 404
 
 
 def test_raw_heif_and_video_poster_and_both_faststart_proxies(tmp_path):
@@ -242,7 +245,9 @@ def test_raw_heif_and_video_poster_and_both_faststart_proxies(tmp_path):
 
         url = f"{BASE}/assets/{row['id']}/original"
         assert client.get(url).status_code == 404
-        original = client.get(url + "?mode=stream", headers={"Range": "bytes=0-31"})
+        original = client.get(
+            url + "?mode=stream&include_location=true", headers={"Range": "bytes=0-31"}
+        )
         assert original.status_code == 206
         assert original.content == clip.read_bytes()[:32]
 
@@ -398,3 +403,152 @@ def test_browser_configuration_defaults_and_external_state(tmp_path):
             state_dir=media / ".photocull",
             derivatives=DerivativeSettings(enabled=False),
         )
+
+
+def test_configured_cache_aliases_resolve_before_use(tmp_path):
+    locations = {}
+    for name in ("state", "hot", "large"):
+        actual = tmp_path / f"actual-{name}"
+        actual.mkdir()
+        alias = tmp_path / name
+        alias.symlink_to(actual, target_is_directory=True)
+        locations[name] = alias
+    photos = tmp_path / "photos"
+    photos.mkdir()
+    settings = Settings(
+        state_dir=locations["state"],
+        libraries={"photos": Library(root=photos)},
+        derivatives=DerivativeSettings(
+            hot_dir=locations["hot"], large_dir=locations["large"], prewarm=0
+        ),
+    )
+    assert settings.state_dir == locations["state"].resolve()
+    for tier in ("hot", "large"):
+        assert settings.derivative_root(tier) == locations[tier].resolve()
+    source_jpeg(photos / "fixture.jpg")
+    with TestClient(create_app(settings)) as client, start_worker(settings):
+        asset = scan(client)["fixture.jpg"]
+        for name in ("grid-256.jpg", "fit-1280.jpg"):
+            url = media_path(settings, asset, name)
+            output = ready(client, url)
+            assert client.get(url).content == output.content
+    assert list(photos.iterdir()) == [photos / "fixture.jpg"]
+
+
+def test_host_allowlist_covers_reads_with_tokens(tmp_path, monkeypatch):
+    path = tmp_path / "example.yaml"
+    path.write_text("{}")
+    monkeypatch.setenv("PHOTOCULL_CONFIG", str(path))
+    monkeypatch.setenv("PHOTOCULL_ALLOWED_HOSTS", "gallery.example, 127.0.0.1, ::1")
+    server = load_settings().server
+    assert server.allowed_hosts == ("gallery.example", "127.0.0.1", "::1")
+    with pytest.raises(ValueError, match="without ports"):
+        ServerSettings(allowed_hosts=("gallery.example:443",))
+    token = tmp_path / "token"
+    token.write_text("fixture-only")
+    settings = settings_for(tmp_path).model_copy(update={"server": server, "token_file": token})
+    headers = {"X-Photocull-Token": "fixture-only"}
+    with TestClient(create_app(settings)) as client:
+        for path in (
+            "/api/health",
+            "/api/browse/timeline",
+            BASE + "/assets/1/original",
+            BASE + "/assets/1/media/thumb",
+            BASE + "/assets/1/delivery/" + "a" * 81,
+            BASE + "/insights/transfers/" + "c" * 32 + "/download",
+        ):
+            assert (
+                client.get(path, headers=headers | {"Host": "foreign.example"}).status_code == 421
+            )
+            assert client.get(path, headers={"Host": "gallery.example"}).status_code == 401
+        for host in ("Gallery.EXAMPLE.:443", "127.0.0.1:8000", "[::1]:8000"):
+            assert client.get("/api/health", headers=headers | {"Host": host}).status_code == 200
+        for host in ("gallery.example@foreign.example", "gallery.example,foreign.example"):
+            assert client.get("/api/health", headers=headers | {"Host": host}).status_code == 421
+
+
+def test_api_reports_live_worker_recipe_mismatch(tmp_path, caplog):
+    worker = settings_for(tmp_path)
+    api = worker.model_copy(
+        update={"derivatives": worker.derivatives.model_copy(update={"jpeg_quality": 74})}
+    )
+    source_jpeg(worker.libraries["photos"].root / "fixture.jpg")
+    with TestClient(create_app(api)) as client, start_worker(worker):
+        asset = scan(client)["fixture.jpg"]
+        health = client.get("/api/health").json()
+        assert health["derivative_recipe"] == recipe(api.derivatives)
+        assert health["libraries"]["photos"]["derivatives"] == {
+            "worker_recipe": recipe(worker.derivatives),
+            "matches": False,
+        }
+        response = client.get(media_path(api, asset, "grid-256.jpg"))
+        assert response.status_code == 503
+        assert response.json()["status"] == "recipe_mismatch"
+        assert "Derivative recipe mismatch" in caplog.text
+        with connect(api.library_state("photos") / "index.db") as db:
+            assert db.execute("SELECT count(*) FROM derivative_files").fetchone()[0] == 0
+        with TestClient(create_app(worker)) as matching:
+            health = matching.get("/api/health").json()
+            assert health["libraries"]["photos"]["derivatives"]["matches"] is True
+            assert ready(matching, media_path(worker, asset, "grid-256.jpg")).status_code == 200
+
+
+def test_cache_access_loop_survives_a_failed_flush(monkeypatch, caplog):
+    async def run():
+        access = CacheAccess()
+        loop = asyncio.get_running_loop()
+        completed = asyncio.Event()
+        calls = 0
+
+        def flush():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise sqlite3.OperationalError("fixture write failure")
+            loop.call_soon_threadsafe(completed.set)
+
+        sleep = asyncio.sleep
+
+        async def tick(_):
+            await sleep(0)
+
+        monkeypatch.setattr(access, "flush", flush)
+        monkeypatch.setattr(asyncio, "sleep", tick)
+        task = asyncio.create_task(access.run())
+        await asyncio.wait_for(completed.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert "Could not flush derivative cache access timestamps" in caplog.text
+
+
+def test_derivative_batch_keeps_accountable_outputs_and_rejects_an_oversized_file(
+    tmp_path, monkeypatch
+):
+    settings = settings_for(tmp_path, hot_mib=16)
+    source = settings.libraries["photos"].root / "fixture.jpg"
+    source_jpeg(source)
+    variants = ("grid-256.jpg", "grid-256.avif", "grid-256.webp")
+    version = "a" * 64 + "-" + recipe(settings.derivatives)
+    jobs = [
+        DerivativeJob(1, source.name, "image", source_key(source.stat()), version, name, 1)
+        for name in variants
+    ]
+
+    def encode(pixels, variant, settings, file, *, coordinates):
+        if variant.extension == "avif":
+            raise TypeError("unexpected encoder failure")
+        if variant.extension == "webp":
+            file.truncate(2 * 1024**2 + 1)
+        else:
+            file.write(b"fixture")
+
+    monkeypatch.setattr(encoder, "encode_image", encode)
+    sizes, _ = _generate(settings, "photos", jobs, lambda: None)
+    assert sizes == {"grid-256.jpg": len(b"fixture")}
+    for name in variants:
+        target = derivative_path(settings, "photos", 1, VARIANTS[name], version)
+        assert target.exists() is (name in sizes)
+    assert not list(settings.derivative_root("hot").rglob(".derivative-*"))

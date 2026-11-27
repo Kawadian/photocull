@@ -19,7 +19,7 @@ export function VideoPlayer({ library, asset, media, text, children }: {
   const [start, setStart] = useState(0)
   const [response, setResponse] = useState<{ key: string; status: 'ready' | 'error' }>()
   const base = libraryUrl(library)
-  const url = quality === 'original' ? base + '/assets/' + asset.id + '/original?mode=stream'
+  const url = quality === 'original' ? base + '/assets/' + asset.id + '/original?mode=stream&include_location=true'
     : media.recipe ? derivativeUrl(base, asset, 'video-' + quality + '.mp4', media.recipe) : ''
   const key = url + ':' + start
   const status = response?.key === key ? response.status : 'pending'

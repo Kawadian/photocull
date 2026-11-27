@@ -110,6 +110,7 @@ def test_nginx_authenticated_offload_ranges_304_and_gzip(tmp_path):
                         return None
 
                 response = wait_for(get_media)
+                assert proxy.get(media_url, headers={"Host": "foreign.example"}).status_code == 421
                 assert response.status_code == 200
                 assert response.content == media
                 assert response.headers["content-type"] == "image/avif"

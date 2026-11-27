@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 
@@ -30,6 +31,18 @@ def main():
             raise ValueError("Image has multiple frames or pages")
         if not args:
             print(json.dumps(description(image)))
+            return
+        if args == ["fingerprint"]:
+            info = description(image)
+            if image.info.get("bit_depth", 8) > 8:
+                raise ValueError("Cannot verify high-bit-depth pixels with this decoder")
+            info.update(
+                mode=image.mode,
+                pixels=hashlib.sha256(image.tobytes()).hexdigest(),
+                icc=hashlib.sha256(image.info.get("icc_profile") or b"").hexdigest(),
+                color=image.info.get("nclx_profile"),
+            )
+            print(json.dumps(info, sort_keys=True))
             return
         output, codec, quality, threads, preset, location_policy = args
         info = description(image)

@@ -45,6 +45,8 @@ class ExportRequest(BaseModel):
 class ReportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    include_location: bool | None = None
+
     start: date | None = None
     end: date | None = None
 
@@ -80,8 +82,9 @@ def public(row):
     }
     del result["output_device"]
     result["destination"] = options.get("destination")
-    if result["kind"] != "report":
-        result["include_location"] = options.get("include_location") is not False
+    include_location = options.get("include_location")
+    if result["kind"] != "report" or include_location is not None:
+        result["include_location"] = include_location is not False
     return result
 
 

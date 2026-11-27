@@ -9,7 +9,9 @@ from typing import Literal
 from photocull.config import DerivativeSettings, Settings
 
 Tier = Literal["hot", "large"]
-ENCODING_REVISION = "1"
+ENCODING_REVISION = "2"
+WORKER_RECIPE_FILE = "derivative-worker-recipe"
+WORKER_DISABLED = "disabled"
 VERSION_PATTERN = r"^[0-9a-f]{64}-[0-9a-f]{16}$"
 VIDEO_LIMITS = {
     "video-480.mp4": (854, 480, "850k", "64k"),
