@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from photocull.api import create_app
-from photocull.db import connect, initialize, write
+from photocull.db import MIGRATIONS, connect, initialize, write
 from photocull.db.insights import finish, register
 from photocull.db.jobs import claim_scan, finish_scan, request_scan
 from photocull.db.transfers import ExportRequest, ReportRequest, Selection, cancel, enqueue
@@ -157,6 +157,9 @@ def test_many_faces_keep_ids_and_split_assignment_during_recalculation(tmp_path)
         first, second = original[:2]
         result = payload(client.post(f"{URL}/people/{first[1]}/merge", json={"source": second[1]}))
         assert result["moved"] == 1
+        # Two face rows from the same photo still count as one photo.
+        assert not get(client, f"{URL}/people")["items"]
+        assert get(client, f"{URL}/people?include_small=true")["items"][0]["count"] == 1
         assert (
             client.patch(
                 f"{URL}/people/{first[1]}",
@@ -356,20 +359,18 @@ def test_labeled_aesthetic_result_queues_a_new_taste_fit(tmp_path):
         assert requested == completed + 1
 
 
-def test_face_upgrade_and_manual_assignment_preserve_identity(tmp_path, monkeypatch):
-    from photocull import db as db_module
-
+def test_face_upgrade_and_manual_assignment_preserve_identity(tmp_path):
     settings = make_settings(tmp_path, faces=True)
     path = settings.library_state("test") / "index.db"
-    with monkeypatch.context() as old_schema:
-        old_schema.setattr(db_module, "MIGRATIONS", db_module.MIGRATIONS[:-2])
-        initialize(path)
+    initialize(path, MIGRATIONS[:26])
     box = (0.1, 0.2, 0.4, 0.5)
     vector = b"\x00\x3c" + bytes(254)
     with connect(path) as db:
         key = register(db, models(settings)["faces"])
         scan_id = request_scan(db)["id"]
         assets = [insert_asset(db, scan_id, f"{i}.jpg") for i in range(6)]
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 26
+        db.execute("UPDATE assets SET favorite=1 WHERE id=?", (assets[0]["id"],))
         db.executemany(
             "INSERT INTO people(id, name) VALUES (?, ?)",
             [(1, None), (2, "Mika"), (3, None), (4, None)],
@@ -389,9 +390,13 @@ def test_face_upgrade_and_manual_assignment_preserve_identity(tmp_path, monkeypa
     initialize(path)
 
     with TestClient(create_app(settings)) as client, connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 28
+        assert db.execute("SELECT favorite FROM assets WHERE id=?", (assets[0]["id"],)).fetchone()[
+            0
+        ]
         assert not db.execute("PRAGMA foreign_key_check").fetchall()
         assert dict(db.execute("SELECT id, person_id FROM faces")) == {1: None, 2: 2, 3: 3, 4: 4}
-        assert not get(client, f"{URL}/people")["items"]
+        assert [(p["id"], p["count"]) for p in get(client, f"{URL}/people")["items"]] == [(2, 1)]
         assert [p["id"] for p in get(client, f"{URL}/people?include_small=true")["items"]] == [
             2,
             3,
@@ -409,7 +414,10 @@ def test_face_upgrade_and_manual_assignment_preserve_identity(tmp_path, monkeypa
         assert [f["id"] for f in get(client, f"{URL}/faces/unassigned")["items"]] == [5]
         created = payload(client.post(url, json={"faces": [5], "name": "New"}))["id"]
         assert get(client, f"{URL}/people/{created}/faces")["person"]["name"] == "New"
-        assert [p["id"] for p in get(client, f"{URL}/people")["items"]] == [2]
+        assert [(p["id"], p["count"]) for p in get(client, f"{URL}/people")["items"]] == [
+            (2, 2),
+            (created, 1),
+        ]
         groups.save(db, key, settings.insights, assets[0], low_quality, noop)
         groups.save(db, key, settings.insights, assets[5], [(box, 0.9, 0.2, vector)], noop)
         assert dict(db.execute("SELECT id, person_id FROM faces")) == {
@@ -420,3 +428,8 @@ def test_face_upgrade_and_manual_assignment_preserve_identity(tmp_path, monkeypa
             5: created,
             6: 4,
         }
+        assert [(p["id"], p["count"]) for p in get(client, f"{URL}/people")["items"]] == [
+            (2, 2),
+            (4, 2),
+            (created, 1),
+        ]

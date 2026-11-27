@@ -170,6 +170,7 @@ def test_clip_flags_and_review_hints_on_synthetic_frames(
     import numpy as np
 
     from photocull.config import InsightSettings
+    from photocull.insights import classify_video
     from photocull.worker.insights import video
 
     def frames(*_):
@@ -197,5 +198,82 @@ def test_clip_flags_and_review_hints_on_synthetic_frames(
     monkeypatch.setattr(video, "audio_levels", levels)
     settings = InsightSettings()
     data = video.metrics("", -1, settings, duration, volume is not None, lambda: None)
-    assert data["reasons"] == expected
-    assert data["dead"] is dead
+    assert "reasons" not in data and "dead" not in data
+    assert classify_video(data, settings) == (expected, dead)
+
+
+def test_threshold_changes_reuse_metrics_and_proxy_across_restarts(tmp_path):
+    import json
+
+    from photocull.db import connect, write
+    from photocull.db.insights import register
+    from photocull.db.transfers import Selection, select_assets
+    from photocull.insights import ModelIdentity, models
+    from photocull.media.cache import video_path
+
+    settings = make_settings(tmp_path, video=True)
+    root = settings.libraries["test"].root
+    video_fixture(root / "motion.mov", dark=False)
+    state = settings.library_state("test")
+    with TestClient(create_app(settings)) as client, start_worker(settings):
+        scan(client)
+        (asset,) = get(client, f"{BASE}/assets?kind=video")["items"]
+        url = f"{URL}/assets/{asset['id']}/video"
+
+        def done(client):
+            result = get(client, url)["video"]
+            assert result["status"] != "error", result
+            return result["data"] if result["status"] == "done" else None
+
+        assert not wait_for(lambda: done(client))["dead"]
+
+    proxy = video_path(state, asset["id"], asset["content_hash"])
+    inode = proxy.stat().st_ino
+    keys = {"video": models(settings)["video"].key}
+    with connect(state / "index.db") as db:
+        original = db.execute("SELECT payload FROM insight_results WHERE stage='video'").fetchone()
+        metrics = json.loads(original[0])
+        assert "pocket_fraction" in metrics and "reasons" not in metrics and "dead" not in metrics
+
+    changed = settings.model_copy(
+        update={"insights": settings.insights.model_copy(update={"video_very_short_s": 8})}
+    )
+    with (
+        TestClient(create_app(changed)) as client,
+        start_worker(changed),
+        connect(state / "index.db") as db,
+    ):
+        wait_for(lambda: db.execute("SELECT 1 FROM worker_status").fetchone())
+        result = done(client)
+        assert result["dead"] and result["reasons"] == ["very_short"]
+        assert tuple(
+            db.execute("SELECT payload FROM insight_results WHERE stage='video'").fetchone()
+        ) == tuple(original)
+        assert not db.execute("SELECT 1 FROM insight_work WHERE stage='video'").fetchone()
+
+        def flagged(settings):
+            query, args = select_assets(
+                db, Selection(dead=True, minimum_rating=0), keys, settings.insights
+            )
+            return [row["id"] for row in db.execute(query, args)]
+
+        assert flagged(settings) == []
+        assert flagged(changed) == [asset["id"]]
+        payload(client.patch(url, json={"dead": False}))
+        assert flagged(changed) == []
+
+    assert proxy.stat().st_ino == inode
+    with connect(state / "index.db") as db, write(db):
+        legacy = register(db, ModelIdentity("photocull/ffmpeg-video", "1"))
+        db.execute("UPDATE insight_stages SET key=? WHERE stage='video'", (legacy,))
+        db.execute("UPDATE insight_results SET key=? WHERE stage='video'", (legacy,))
+    legacy_proxy = proxy.with_name(f"{asset['id']}-{asset['content_hash']}-{legacy}.mp4")
+    stale_proxy = proxy.with_name(f"{asset['id']}-{'f' * 64}-{legacy}.mp4")
+    proxy.rename(legacy_proxy)
+    stale_proxy.write_bytes(b"obsolete proxy")
+    with TestClient(create_app(changed)) as client, start_worker(changed):
+        assert wait_for(lambda: done(client))["preview"]
+        assert client.get(f"{url}/preview", headers={"Range": "bytes=0-15"}).status_code == 206
+        assert proxy.stat().st_ino == inode
+        assert not legacy_proxy.exists()
+        assert not stale_proxy.exists()

@@ -60,8 +60,9 @@ Hugging Face Hub client.
   classification. SFace uses a 128-value float16 vector. An incremental HNSW
   lookup assigns sufficiently similar, high-quality faces to existing groups.
   Low-quality detections are saved as unassigned. Open **Unassigned faces** to
-  assign them to an existing or new person. The People list defaults to groups
-  with at least two faces. Use **Show small groups** to see all assigned groups.
+  assign them to an existing or new person. By default, People shows named
+  people with indexed faces and unnamed groups with faces in at least two
+  different photos. Use **Show small groups** to see all assigned groups.
   The migration retains manual and named assignments. Those assignments also
   carry forward when a reprocessed box overlaps the original detection.
   Matched boxes retain their face IDs so in-progress selections remain valid.
@@ -86,10 +87,14 @@ Hugging Face Hub client.
   Review hints show reasons without setting a dead-clip flag. The video list
   groups stabilized copies and copies with a YYYYMMDD or YYYY-MM-DD suffix
   when their unique original is in the same folder and on the current page.
-  The override can
-  set or clear the flag explicitly or restore the automatic value.
+  The override can set or clear the flag explicitly or restore the automatic
+  value. The API and export filters apply the current thresholds to stored
+  measurements. Changing a threshold leaves the measurements and proxy
+  reusable.
   Clicking a highlight plays its interval in a state-directory 720p H.264/AAC
-  proxy. Local speech recognition defaults to off. The optional base model
+  proxy. The worker reuses the proxy for the same source hash when analysis
+  changes. On upgrade, it moves matching legacy proxies to the current cache
+  name and removes stale copies. Local speech recognition defaults to off. The optional base model
   runs in INT8 with 30-second audio blocks and supplies seekable text and
   WebVTT captions. Codec, motion and speech results
   vary with source conditions. No original file changes are needed.

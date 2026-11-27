@@ -5,7 +5,9 @@ import json
 import logging
 import math
 import os
+import re
 import selectors
+import stat
 import subprocess
 import time
 from contextlib import closing, contextmanager
@@ -15,7 +17,7 @@ from photocull.config import InsightSettings
 from photocull.media.artifacts import prune_artifacts, stage_artifact
 from photocull.media.cache import video_path
 from photocull.media.decode import VIDEO_FORMATS
-from photocull.media.walk import MediaJail, SourceChanged, source_key
+from photocull.media.walk import MediaJail, SourceChanged, open_directory, source_key
 
 LOG = logging.getLogger(__name__)
 FRAME = (90, 160)
@@ -244,30 +246,6 @@ def metrics(source, fd, config: InsightSettings, duration, has_audio, pulse):
     samples = max(1, count)
     motion, volume = motion_sum / samples, volume_sum / samples
     dark_fraction, blur_fraction = black / samples, blurry / samples
-    quiet = not has_audio or volume < config.video_static_volume
-    very_short = duration < config.video_very_short_s
-    mostly_dark = dark_fraction >= config.video_dark_fraction
-    possible_pocket = pocket / samples >= config.video_pocket_fraction
-    low_detail = blur_fraction >= config.video_blur_fraction
-    static_and_quiet = duration >= WINDOW and motion < config.video_static_motion and quiet
-    reasons = [
-        reason
-        for reason, present in (
-            ("very_short", very_short),
-            ("mostly_dark", mostly_dark),
-            ("possible_pocket_recording", possible_pocket),
-            ("low_detail_or_blur", low_detail),
-            ("static_and_quiet", static_and_quiet),
-        )
-        if present
-    ]
-    # Quiet corroborates darkness, but the strong flag still needs two reasons
-    # unless the clip is very short or resembles a pocket recording.
-    dead = (
-        very_short
-        or possible_pocket
-        or (sum((mostly_dark and quiet, low_detail, static_and_quiet)) >= 2)
-    )
     ranked = sorted(candidates, reverse=True)[:12]
     highlights = []
     for score, start, end in sorted(ranked, key=lambda item: -item[1]):
@@ -283,11 +261,10 @@ def metrics(source, fd, config: InsightSettings, duration, has_audio, pulse):
     return {
         "duration": duration,
         "highlights": highlights,
-        "reasons": reasons,
-        "dead": dead,
         "motion": motion,
         "volume": volume,
         "dark_fraction": dark_fraction,
+        "pocket_fraction": pocket / samples,
         "blur_fraction": blur_fraction,
         "scene_changes": cuts,
         "has_audio": has_audio,
@@ -405,7 +382,45 @@ def transcribe(worker, source, fd, audio, pulse):
     return {"segments": result, "has_audio": True}
 
 
-def run_stage(worker, stage, asset, key, pulse):
+def migrate_video_proxies(db, state: Path, pulse) -> None:
+    directory = state / "video"
+    legacy_name = re.compile(r"([1-9][0-9]{0,18})-([0-9a-f]{64})-[0-9a-f]{64}\.mp4")
+    try:
+        with open_directory(directory.absolute()) as parent, os.scandir(parent) as entries:
+            for entry in entries:
+                pulse()
+                match = legacy_name.fullmatch(entry.name)
+                if not match or entry.is_dir(follow_symlinks=False):
+                    continue
+                asset_id, digest = match.groups()
+                current = db.execute(
+                    """SELECT 1 FROM assets WHERE id = ? AND active = 1
+                       AND kind = 'video' AND content_hash = ?""",
+                    (asset_id, digest),
+                ).fetchone()
+                target = video_path(state, int(asset_id), digest)
+                try:
+                    if current and entry.is_file(follow_symlinks=False):
+                        try:
+                            info = os.stat(target.name, dir_fd=parent, follow_symlinks=False)
+                            has_proxy = stat.S_ISREG(info.st_mode)
+                        except FileNotFoundError:
+                            has_proxy = False
+                        if not has_proxy:
+                            os.replace(
+                                entry.name, target.name, src_dir_fd=parent, dst_dir_fd=parent
+                            )
+                            continue
+                    os.unlink(entry.name, dir_fd=parent)
+                except FileNotFoundError:
+                    continue
+                except OSError as error:
+                    LOG.warning("Could not migrate video proxy %s: %s", entry.name, error)
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+
+
+def run_stage(worker, stage, asset, pulse):
     jail = MediaJail(worker.library, worker.settings.state_dir)
     config = worker.settings.insights
 
@@ -424,16 +439,19 @@ def run_stage(worker, stage, asset, key, pulse):
             verify_source()
             return results
         results = metrics(source, fd, config, duration, audio, pulse)
-        target = video_path(worker.state, asset["id"], asset["content_hash"], key)
+        target = video_path(worker.state, asset["id"], asset["content_hash"])
         try:
-            with proxy(source, fd, config.threads, target, pulse) as staged:
+            if not target.is_symlink() and target.is_file():
                 verify_source()
-                staged.replace(staged.with_name(target.name))
+            else:
+                with proxy(source, fd, config.threads, target, pulse) as staged:
+                    verify_source()
+                    staged.replace(staged.with_name(target.name))
         except SourceChanged:
             raise
         except (OSError, ValueError) as error:
             verify_source()
             results["preview_error"] = str(error)
-        results["preview"] = target.is_file()
+        results["preview"] = not target.is_symlink() and target.is_file()
     prune_artifacts(target.parent, f"{asset['id']}-*.mp4", keep=target.name)
     return results

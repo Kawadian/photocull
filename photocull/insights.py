@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from photocull.config import InsightSettings, Settings, _fingerprint
@@ -48,18 +49,7 @@ def models(settings: Settings) -> dict[str, ModelIdentity]:
             parameters,
         )
     if config.video:
-        result["video"] = ModelIdentity(
-            "photocull/ffmpeg-video",
-            "2",
-            (
-                config.video_very_short_s,
-                config.video_dark_fraction,
-                config.video_pocket_fraction,
-                config.video_blur_fraction,
-                config.video_static_motion,
-                config.video_static_volume,
-            ),
-        )
+        result["video"] = ModelIdentity("photocull/ffmpeg-video", "2")
         if config.transcript:
             result["transcript"] = ModelIdentity(
                 config.transcript_model, config.transcript_revision, (1,)
@@ -77,3 +67,26 @@ def taste_input(settings: Settings) -> str:
             settings.insights.taste_min_per_class,
         )
     )
+
+
+def classify_video(metrics: Mapping[str, float], config: InsightSettings) -> tuple[list[str], bool]:
+    quiet = not metrics["has_audio"] or metrics["volume"] < config.video_static_volume
+    very_short = metrics["duration"] < config.video_very_short_s
+    mostly_dark = metrics["dark_fraction"] >= config.video_dark_fraction
+    possible_pocket = metrics["pocket_fraction"] >= config.video_pocket_fraction
+    low_detail = metrics["blur_fraction"] >= config.video_blur_fraction
+    static = metrics["duration"] >= 4 and metrics["motion"] < config.video_static_motion and quiet
+    reasons = [
+        reason
+        for reason, present in (
+            ("very_short", very_short),
+            ("mostly_dark", mostly_dark),
+            ("possible_pocket_recording", possible_pocket),
+            ("low_detail_or_blur", low_detail),
+            ("static_and_quiet", static),
+        )
+        if present
+    ]
+    # Quiet corroborates darkness. A dead-clip flag usually needs two reasons.
+    dead = very_short or possible_pocket or sum((mostly_dark and quiet, low_detail, static)) >= 2
+    return reasons, dead

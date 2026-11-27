@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import time
 from datetime import date
+from sqlite3 import Connection
 from typing import Annotated, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from photocull.config import InsightSettings
 from photocull.db import write
 from photocull.db.catalog import AUTO_REJECT_REASON, mark_catalog_updated
+from photocull.insights import classify_video
 
 MAX_QUEUED = 16
 
@@ -104,7 +107,7 @@ def cancel(db, job_id):
         return row
 
 
-def select_assets(config: Selection, keys: dict):
+def select_assets(db: Connection, config: Selection, keys: dict, insights: InsightSettings):
     clauses = ["a.active=1", "a.rating>=?"]
     values = [config.minimum_rating]
     for value, clause in (
@@ -122,10 +125,15 @@ def select_assets(config: Selection, keys: dict):
                         WHERE f.person_id = ? AND f.key = ? AND f.content_hash=a.content_hash)""")
         values.extend((config.person_id, keys.get("faces", "")))
     if config.dead is not None:
+
+        def automatic_dead(payload: str | None) -> bool:
+            return payload is not None and classify_video(json.loads(payload), insights)[1]
+
+        db.create_function("video_is_dead", 1, automatic_dead, deterministic=True)
         joins += """ LEFT JOIN video_flags AS f ON f.asset_id=a.id AND f.content_hash=a.content_hash
                      LEFT JOIN insight_results AS i ON i.asset_id=a.id
                        AND i.content_hash=a.content_hash AND i.stage='video' AND i.key=?"""
-        clauses.append("COALESCE(f.dead, json_extract(i.payload, '$.dead'), 0) = ?")
+        clauses.append("COALESCE(f.dead, video_is_dead(i.payload), 0) = ?")
         values = [keys.get("video", ""), *values]
         values.append(config.dead)
     return (

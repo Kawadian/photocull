@@ -7,7 +7,8 @@ from photocull.db import write
 from photocull.db.catalog import mark_catalog_updated
 from photocull.db.insights import configure_stage, discard, finish, register, stage_key
 from photocull.insights import AESTHETIC_PROMPTS, models, taste_input
-from photocull.media.cache import cache_path
+from photocull.media.artifacts import prune_artifacts
+from photocull.media.cache import cache_path, video_path
 from photocull.worker.insights.model_cache import cache_bytes
 from photocull.worker.insights.people import FaceGroups
 from photocull.worker.ml.model import ModelUnavailable
@@ -38,6 +39,9 @@ class Insights:
         return self.config.taste and self.settings.ml.enabled
 
     def configure(self):
+        from photocull.worker.insights.video import migrate_video_proxies
+
+        migrate_video_proxies(self.db, self.worker.state, self.worker.pulse)
         with write(self.db):
             for stage in ("aesthetic", "faces", "video", "transcript"):
                 model = self.identities.get(stage)
@@ -143,12 +147,11 @@ class Insights:
             return False
         directory = self.worker.state / "video"
         for asset_id, digest, active in rows:
-            for target in directory.glob(f"{asset_id}-*.mp4"):
-                if not active or not target.name.startswith(f"{asset_id}-{digest}-"):
-                    try:
-                        target.unlink(missing_ok=True)
-                    except OSError as error:
-                        LOG.warning("Could not remove obsolete video preview %s: %s", target, error)
+            keep = video_path(self.worker.state, asset_id, digest).name if active else None
+            try:
+                prune_artifacts(directory, f"{asset_id}-*.mp4", keep=keep)
+            except OSError as error:
+                LOG.warning("Could not remove obsolete video previews for %s: %s", asset_id, error)
         with write(self.db):
             self.db.executemany(
                 "DELETE FROM video_cleanup WHERE asset_id=?", ((row[0],) for row in rows)
@@ -203,7 +206,7 @@ class Insights:
             else:
                 from photocull.worker.insights.video import run_stage
 
-                payload = run_stage(self.worker, stage, row, key, pulse)
+                payload = run_stage(self.worker, stage, row, pulse)
         except (OSError, RuntimeError, ValueError, ImportError, MemoryError) as exc:
             if isinstance(exc, (ModelUnavailable, ImportError)):
                 self.model_retry[stage] = time.monotonic() + 60

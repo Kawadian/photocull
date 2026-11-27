@@ -89,4 +89,4 @@ def test_tuning_defaults_and_configurable_insight_identity(tmp_path, monkeypatch
     assert config.video_static_volume == 0.02
     updated = models(settings)
     assert updated["faces"].key != baseline["faces"].key
-    assert updated["video"].key != baseline["video"].key
+    assert updated["video"].key == baseline["video"].key
