@@ -29,6 +29,7 @@ MIGRATIONS = (
     "0019_archive_safety.sql",
     "0020_archive_reindex.sql",
     "0021_archive_rules.sql",
+    "0022_scan_progress.sql",
 )
 BUSY_TIMEOUT_MS = 10_000
 

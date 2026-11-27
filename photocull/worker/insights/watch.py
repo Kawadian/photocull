@@ -3,11 +3,18 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import Lock
 
 from photocull.db.jobs import request_scan
-from photocull.media.walk import EXTENSIONS, MediaJail, excluded, source_key
+from photocull.media.walk import (
+    EXTENSIONS,
+    MediaJail,
+    OutsideLibrary,
+    ScanIssue,
+    excluded,
+    source_key,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -84,13 +91,55 @@ class Watch:
             self.changed_at = time.monotonic()
 
     def differs(self, pulse) -> bool:
-        jail = MediaJail(self.worker.library, self.worker.settings.state_dir)
+        jail = MediaJail(self.worker.library, self.worker.settings.state_dir, validate=False)
         indexed = dict(self.worker.db.execute("SELECT path, source_key FROM assets WHERE active=1"))
-        with closing(jail.walk(pulse)) as entries:
+        previous = {
+            row["path"]: row
+            for row in self.worker.db.execute("""
+                SELECT path, kind, code, source_key FROM scan_errors
+                WHERE scan_id = (SELECT max(id) FROM scan_requests WHERE status IN ('done','error'))
+            """)
+        }
+        inaccessible: set[str] = set()
+        changed = False
+
+        def on_error(issue: ScanIssue) -> None:
+            nonlocal changed
+            indexed.pop(issue.path, None)
+            if issue.kind == "directory":
+                inaccessible.add(issue.path)
+            old = previous.pop(issue.path, None)
+            if old is None or (old["kind"], old["code"]) != (issue.kind, issue.code):
+                changed = True
+
+        with closing(jail.walk(pulse, on_error)) as entries:
             for entry in entries:
-                if indexed.pop(entry.path, None) != source_key(entry.stat):
+                key = source_key(entry.stat)
+                indexed_key = indexed.pop(entry.path, None)
+                old = previous.pop(entry.path, None)
+                if old is not None:
+                    if old["source_key"] == key and old["code"] == "io_error":
+                        # Polling would have to rehash the whole file to check a read error.
+                        continue
+                    if old["source_key"] == key and old["code"] == "permission_denied":
+                        try:
+                            with jail.open_media(entry.path):
+                                pass
+                        except PermissionError:
+                            continue
+                        except (OSError, OutsideLibrary):
+                            return True
                     return True
-        return bool(indexed)
+                if indexed_key != key or changed:
+                    return True
+        if previous or changed:
+            return True
+        if not inaccessible:
+            return bool(indexed)
+        return any(
+            not any(str(parent) in inaccessible for parent in PurePosixPath(path).parents)
+            for path in indexed
+        )
 
     def step(self, pulse):
         if not self.config.watch or self.worker.scan is not None:
@@ -127,3 +176,4 @@ class Watch:
             self.changed_at = None
         # The unique scan index coalesces any manual request made during the walk.
         request_scan(self.worker.db)
+        return True

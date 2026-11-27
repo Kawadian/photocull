@@ -43,8 +43,12 @@ def claim_scan(db: sqlite3.Connection) -> int | None:
         return None
     with write(db):
         row = db.execute(
-            "UPDATE scan_requests SET status = 'running' WHERE status = 'pending' RETURNING id"
+            """UPDATE scan_requests SET status = 'running', files_indexed = 0, bytes_hashed = 0,
+               file_errors = 0, directory_errors = 0, attempt = attempt + 1
+               WHERE status = 'pending' RETURNING id"""
         ).fetchone()
+        if row:
+            db.execute("DELETE FROM scan_errors WHERE scan_id = ?", (row["id"],))
     return row["id"] if row else None
 
 
@@ -68,6 +72,20 @@ def finish_scan(db: sqlite3.Connection, scan_id: int, error: str | None = None) 
             "UPDATE scan_requests SET status = ?, finished_at = ?, error = ? WHERE id = ?",
             ("error" if error else "done", time.time(), error, scan_id),
         )
+
+
+def scan_error_page(db: sqlite3.Connection, scan_id: int, cursor: int, limit: int) -> dict | None:
+    if db.execute("SELECT 1 FROM scan_requests WHERE id = ?", (scan_id,)).fetchone() is None:
+        return None
+    rows = db.execute(
+        """SELECT id, path, kind, operation, code, errno FROM scan_errors
+           WHERE scan_id = ? AND id > ? ORDER BY id LIMIT ?""",
+        (scan_id, cursor, limit + 1),
+    ).fetchall()
+    return {
+        "items": [dict(row) for row in rows[:limit]],
+        "next_cursor": rows[limit - 1]["id"] if len(rows) > limit else None,
+    }
 
 
 def claim_jobs(db: sqlite3.Connection, limit: int, *, embedding: bool = False) -> list[Job]:

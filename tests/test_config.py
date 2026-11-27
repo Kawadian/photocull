@@ -13,6 +13,7 @@ libraries:
 state_dir: state
 worker:
   batch_size: 4
+  scan_batch_size: 128
 scoring:
   min_sharpness: 0.04
 burst:
@@ -23,6 +24,9 @@ burst:
     )
     monkeypatch.setenv("PHOTOCULL_BIND_PORT", "8001")
     monkeypatch.setenv("PHOTOCULL_WORKER_STAGES", "exif")
+    monkeypatch.setenv("PHOTOCULL_WORKER_SCAN_PARALLELISM", "2")
+    monkeypatch.setenv("PHOTOCULL_WORKER_HASH_READ_MIB", "8")
+    monkeypatch.setenv("PHOTOCULL_WORKER_SCAN_OVERLAP", "true")
     monkeypatch.setenv("PHOTOCULL_BURST_WINDOW_SECONDS", "2.5")
     monkeypatch.setenv("PHOTOCULL_SCORING_MAX_EXPOSURE", "0.85")
     settings = load_settings()
@@ -30,6 +34,10 @@ burst:
     assert settings.library_state("sony") == config_dir / "state/libraries/sony"
     assert settings.bind_port == 8001
     assert settings.worker.batch_size == 4
+    assert settings.worker.scan_batch_size == 128
+    assert settings.worker.scan_parallelism == 2
+    assert settings.worker.hash_read_mib == 8
+    assert settings.worker.scan_overlap
     assert settings.worker.stages == ("exif",)
     assert settings.scoring.min_sharpness == 0.04
     assert settings.scoring.max_exposure == 0.85

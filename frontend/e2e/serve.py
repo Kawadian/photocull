@@ -18,6 +18,7 @@ from photocull.config import (
     Settings,
     WorkerSettings,
 )
+from photocull.db import connect, initialize, write
 from photocull.worker import run
 from tests.fake_embedding import FakeEmbedding
 from tests.fake_faces import FakeFaces
@@ -70,7 +71,7 @@ def main() -> None:
         settings = Settings(
             libraries={
                 name: write_fixtures(root / name)
-                for name in ("desktop", "mobile", "semantic", "insights", "archive")
+                for name in ("desktop", "mobile", "semantic", "insights", "archive", "scan-errors")
             },
             state_dir=root / "state",
             static_dir=Path(__file__).resolve().parents[1] / "dist",
@@ -92,6 +93,22 @@ def main() -> None:
                 offline=True,
             ),
         )
+        index = settings.library_state("scan-errors") / "index.db"
+        initialize(index)
+        with connect(index) as db, write(db):
+            db.execute("""
+                INSERT INTO scan_requests(id,status,created_at,file_errors,directory_errors)
+                VALUES(1,'done',0,50,1)
+            """)
+            db.executemany(
+                """INSERT INTO scan_errors(scan_id,path,kind,operation,code,errno)
+                   VALUES(1,?,'file','read','permission_denied',13)""",
+                ((f"2025/写真-{index:02d}.NEF",) for index in range(50)),
+            )
+            db.execute("""
+                INSERT INTO scan_errors(scan_id,path,kind,operation,code,errno)
+                VALUES(1,'closed-folder','directory','list','io_error',5)
+            """)
         context = get_context("fork")
         stop = context.Event()
         worker = context.Process(

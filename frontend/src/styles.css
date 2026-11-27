@@ -405,6 +405,9 @@ progress::-moz-progress-bar { background: #99cdaa; }
   padding: 9px;
 }
 .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 19px; }
+.scan-errors { list-style: none; margin: 0; padding: 0; }
+.scan-errors li { border-bottom: 1px solid var(--line); display: grid; gap: 4px; overflow-wrap: anywhere; padding: 8px 0; }
+.scan-errors li span { font-size: 12px; }
 
 .status-banner {
   align-items: center;

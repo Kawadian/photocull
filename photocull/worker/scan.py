@@ -4,12 +4,21 @@ import sqlite3
 import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+from itertools import chain
 
 from photocull.config import STAGES, WorkerSettings
 from photocull.db import write
 from photocull.db.catalog import mark_catalog_updated
 from photocull.db.jobs import DISABLED, NO_VIDEO_EXIF, NO_VIDEO_SCORE
-from photocull.media.walk import MediaEntry, MediaJail, SourceChanged, hash_file, source_key
+from photocull.media.walk import (
+    MediaEntry,
+    MediaJail,
+    OutsideLibrary,
+    ScanIssue,
+    SourceChanged,
+    hash_file,
+    source_key,
+)
 
 
 def fallback_day(mtime_ns: int) -> str:
@@ -48,11 +57,30 @@ def relink_asset(db, entry, digest, prior):
 def _record(
     db: sqlite3.Connection,
     scan_id: int,
+    attempt: int,
     batch: list[tuple[MediaEntry, str, str]],
     settings: WorkerSettings,
     model_key: str | None = None,
+    *,
+    issues: list[ScanIssue],
+    deferred: list[str],
+    bytes_hashed: int,
 ) -> None:
     with write(db):
+        _record_issues(db, scan_id, issues)
+        for issue in issues:
+            if issue.kind == "directory":
+                # With BINARY path ordering, '/' immediately precedes '0'.
+                db.execute(
+                    """UPDATE assets SET scan_id=?,scan_attempt=?
+                       WHERE active=1 AND path>=? AND path<?""",
+                    (scan_id, attempt, issue.path + "/", issue.path + "0"),
+                )
+        unreadable_paths = (issue.path for issue in issues)
+        db.executemany(
+            "UPDATE assets SET scan_id=?,scan_attempt=? WHERE active=1 AND path=?",
+            ((scan_id, attempt, path) for path in chain(deferred, unreadable_paths)),
+        )
         for entry, key, digest in batch:
             prior = db.execute(
                 "SELECT id,content_hash FROM assets WHERE path = ?", (entry.path,)
@@ -63,8 +91,8 @@ def _record(
             if prior is None:
                 asset_id = db.execute(
                     """INSERT INTO assets(path,folder,kind,size,mtime_ns,content_hash,
-                                          scan_id,day,source_key)
-                       VALUES (?,?,?,?,?,?,?,?,?) RETURNING id""",
+                                          scan_id,scan_attempt,day,source_key)
+                       VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id""",
                     (
                         entry.path,
                         entry.path.rpartition("/")[0],
@@ -73,6 +101,7 @@ def _record(
                         mtime,
                         digest,
                         scan_id,
+                        attempt,
                         day,
                         key,
                     ),
@@ -81,11 +110,12 @@ def _record(
                 asset_id = prior["id"]
                 # A plain UPDATE lets nested catalog triggers keep their own conflict policies.
                 db.execute(
-                    """UPDATE assets SET active=1,scan_id=?,size=?,mtime_ns=?,source_key=?,
+                    """UPDATE assets SET active=1,scan_id=?,scan_attempt=?,size=?,mtime_ns=?,
+                         source_key=?,
                          day=CASE WHEN content_hash=? THEN coalesce(substr(captured_at,1,10),?)
                                   ELSE ? END, content_hash=?
                        WHERE id=?""",
-                    (scan_id, size, mtime, key, digest, day, day, digest, asset_id),
+                    (scan_id, attempt, size, mtime, key, digest, day, day, digest, asset_id),
                 )
             rating = db.execute(
                 "DELETE FROM archive_rating_transfer WHERE path=? RETURNING *", (entry.path,)
@@ -149,7 +179,34 @@ def _record(
                         (asset_id,),
                     )
             db.execute("DELETE FROM archive_reindex WHERE path=? AND ready=1", (entry.path,))
-        mark_catalog_updated(db)
+        db.execute(
+            """UPDATE scan_requests SET files_indexed=files_indexed+?,
+               bytes_hashed=bytes_hashed+? WHERE id=?""",
+            (len(batch), bytes_hashed, scan_id),
+        )
+        if batch:
+            mark_catalog_updated(db)
+
+
+def _record_issues(db: sqlite3.Connection, scan_id: int, issues: list[ScanIssue]) -> None:
+    if issues:
+        db.executemany(
+            """INSERT INTO scan_errors(scan_id,path,kind,operation,code,errno,source_key)
+               VALUES(?,?,?,?,?,?,?)""",
+            ((scan_id, i.path, i.kind, i.operation, i.code, i.errno, i.source_key) for i in issues),
+        )
+        files = sum(i.kind == "file" for i in issues)
+        db.execute(
+            """UPDATE scan_requests SET file_errors=file_errors+?,
+               directory_errors=directory_errors+? WHERE id=?""",
+            (files, len(issues) - files, scan_id),
+        )
+
+
+def record_root_issue(db: sqlite3.Connection, scan_id: int, error: OSError) -> None:
+    issue = ScanIssue.from_error(".", "directory", "list", error)
+    with write(db):
+        _record_issues(db, scan_id, [issue])
 
 
 def scan_batches(
@@ -163,7 +220,44 @@ def scan_batches(
     settle_seconds: float = 0,
     defer: Callable[[], None] | None = None,
 ) -> Iterator[None]:
+    batch_size = settings.scan_batch_size
     batch: list[tuple[MediaEntry, str, str]] = []
+    issues: list[ScanIssue] = []
+    deferred: list[str] = []
+    bytes_hashed = 0
+    flush_at = time.monotonic() + 2
+    buffer = memoryview(bytearray(settings.hash_read_mib * 1024 * 1024))
+    attempt = db.execute("SELECT attempt FROM scan_requests WHERE id=?", (scan_id,)).fetchone()[0]
+
+    def flush():
+        nonlocal bytes_hashed, flush_at
+        _record(
+            db,
+            scan_id,
+            attempt,
+            batch,
+            settings,
+            model_key,
+            issues=issues,
+            deferred=deferred,
+            bytes_hashed=bytes_hashed,
+        )
+        batch.clear()
+        issues.clear()
+        deferred.clear()
+        bytes_hashed = 0
+        flush_at = time.monotonic() + 2
+
+    def batch_ready() -> bool:
+        return (
+            len(batch) + len(issues) + len(deferred) >= batch_size or time.monotonic() >= flush_at
+        )
+
+    def report(issue: ScanIssue):
+        issues.append(issue)
+        if issue.path == "." or batch_ready():
+            flush()
+
     # A crash may leave a journal with one path already published. Hold its catalog
     # identity until recovery reports a durable result, including when work is blocked.
     held_paths = {
@@ -171,7 +265,7 @@ def scan_batches(
         for row in db.execute("SELECT path,source_path FROM archive_reindex WHERE ready=0")
         for path in row
     }
-    for entry in jail.walk(pulse):
+    for entry in jail.walk(pulse, report):
         if entry.path in held_paths:
             continue
         key = source_key(entry.stat)
@@ -179,37 +273,44 @@ def scan_batches(
             "SELECT source_key, content_hash FROM assets WHERE path = ?", (entry.path,)
         ).fetchone()
         unchanged = prior and prior["source_key"] == key
-        try:
-            if (
-                settle_seconds
-                and not unchanged
-                and (time.time_ns() - entry.stat.st_ctime_ns < settle_seconds * 1e9)
-            ):
-                raise SourceChanged(entry.path)
-            digest = prior["content_hash"] if unchanged else hash_file(jail, entry, pulse)
-        except (SourceChanged, FileNotFoundError):
-            if defer is None:
-                raise
-            # An in-flight write must neither replace existing metadata nor retire it.
-            db.execute("UPDATE assets SET scan_id = ? WHERE path = ?", (scan_id, entry.path))
+        if (
+            defer
+            and settle_seconds
+            and not unchanged
+            and (time.time_ns() - entry.stat.st_ctime_ns < settle_seconds * 1e9)
+        ):
+            deferred.append(entry.path)
             defer()
-            continue
-        batch.append((entry, key, digest))
-        if len(batch) >= settings.batch_size:
-            _record(db, scan_id, batch, settings, model_key)
-            batch.clear()
+        else:
+            try:
+                digest = (
+                    prior["content_hash"]
+                    if unchanged
+                    else hash_file(jail, entry, pulse, buffer=buffer)
+                )
+            except (OSError, OutsideLibrary) as error:
+                failure = error if isinstance(error, OSError) else SourceChanged(entry.path)
+                report(ScanIssue.from_error(entry.path, "file", "read", failure, key=key))
+                if defer and isinstance(failure, (SourceChanged, FileNotFoundError)):
+                    defer()
+            else:
+                batch.append((entry, key, digest))
+                if not unchanged:
+                    bytes_hashed += entry.stat.st_size
+        if batch_ready():
+            flush()
             yield
-    if batch:
-        _record(db, scan_id, batch, settings, model_key)
+    if batch or issues or deferred:
+        flush()
         yield
 
     # Only retire absent assets after a complete walk. Keep their ratings if they return.
     after = 0
     while rows := db.execute(
-        "SELECT id FROM assets WHERE active=1 AND id>? AND scan_id<>? "
+        "SELECT id FROM assets WHERE active=1 AND id>? AND (scan_id<>? OR scan_attempt<>?) "
         "AND NOT EXISTS(SELECT 1 FROM archive_reindex WHERE ready=0 AND asset_id=assets.id) "
         "ORDER BY id LIMIT ?",
-        (after, scan_id, settings.batch_size),
+        (after, scan_id, attempt, batch_size),
     ).fetchall():
         pulse()
         after = rows[-1]["id"]

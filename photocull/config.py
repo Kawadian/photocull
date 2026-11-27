@@ -59,6 +59,10 @@ class WorkerSettings(BaseModel):
     memory_mb: int = Field(default=1536, ge=128)
     batch_size: int = Field(default=8, ge=1, le=256)
     parallelism: int = Field(default=1, ge=1, le=16)
+    scan_parallelism: int = Field(default=1, ge=1, le=8)
+    scan_batch_size: int = Field(default=64, ge=1, le=512)
+    hash_read_mib: int = Field(default=4, ge=1, le=16)
+    scan_overlap: bool = False
     stages: tuple[MediaStage, ...] = STAGES
     device: Literal["cpu", "cuda"] = "cpu"
 
@@ -336,7 +340,16 @@ def load_settings() -> Settings:
         }
 
     worker = values.setdefault("worker", {})
-    for field in ("memory_mb", "batch_size", "parallelism", "device"):
+    for field in (
+        "memory_mb",
+        "batch_size",
+        "parallelism",
+        "scan_parallelism",
+        "scan_batch_size",
+        "hash_read_mib",
+        "scan_overlap",
+        "device",
+    ):
         if (setting := env.get(f"PHOTOCULL_WORKER_{field.upper()}")) is not None:
             worker[field] = setting
     if (stages := env.get("PHOTOCULL_WORKER_STAGES")) is not None:

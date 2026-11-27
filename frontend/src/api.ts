@@ -55,7 +55,16 @@ export type Asset = Rating & {
 }
 export type Progress = {
   catalog_revision: number
-  scan: { id: number; status: StageStatus; error: string | null } | null
+  scan: {
+    id: number
+    attempt: number
+    status: StageStatus
+    error: string | null
+    files_indexed: number
+    bytes_hashed: number
+    file_errors: number
+    directory_errors: number
+  } | null
   stages: Record<'exif' | 'preview' | 'score', Partial<Record<StageStatus, number>>> & {
     embedding?: Partial<Record<StageStatus, number>>
   }
@@ -72,6 +81,14 @@ export type Progress = {
     tag_error: string | null
     group_error: string | null
   }
+}
+export type ScanError = {
+  id: number
+  path: string
+  kind: 'file' | 'directory'
+  operation: 'list' | 'stat' | 'read'
+  code: 'permission_denied' | 'missing' | 'changed' | 'io_error'
+  errno: number | null
 }
 export type XmpPlan = {
   sidecar: string

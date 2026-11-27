@@ -35,7 +35,7 @@ def test_scan_and_stage_resume_preserve_completed_work(tmp_path, monkeypatch):
     settings = Settings(
         libraries={"photos": library},
         state_dir=tmp_path / "state",
-        worker=WorkerSettings(batch_size=1),
+        worker=WorkerSettings(batch_size=1, scan_batch_size=1),
     )
     state = settings.library_state("photos")
     path = state / "index.db"
@@ -55,9 +55,9 @@ def test_scan_and_stage_resume_preserve_completed_work(tmp_path, monkeypatch):
     original_hash = scanner.hash_file
     hashed = []
 
-    def hash_file(jail, entry, pulse):
+    def hash_file(jail, entry, pulse, **options):
         hashed.append(entry.path)
-        return original_hash(jail, entry, pulse)
+        return original_hash(jail, entry, pulse, **options)
 
     monkeypatch.setattr(scanner, "hash_file", hash_file)
     with connect(path) as db, ThreadPoolExecutor(1) as pool:

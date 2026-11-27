@@ -3,7 +3,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { Ref } from 'react'
 import { AnalysisFilters, ConfirmAction } from './Analysis'
 import { assetName, message, request, useRemote } from './api'
-import type { Burst, Group, GroupBy, Library, Page, Progress, SimilarGroup } from './api'
+import type { Burst, Group, GroupBy, Library, Page, Progress, ScanError, SimilarGroup } from './api'
+import { Dialog } from './Dialog'
 import { PhotoTools } from './ML'
 import { useShortcuts } from './shortcuts'
 
@@ -142,14 +143,74 @@ function GroupList({ base, by, group, selectGroup, version, filters, browsing, p
   )
 }
 
-export function WorkerProgress({ progress }: { progress?: Progress }) {
+const readFailures: Record<ScanError['code'], string> = {
+  permission_denied: 'Permission denied',
+  missing: 'Disappeared during the scan',
+  changed: 'Changed during the scan',
+  io_error: 'File system error',
+}
+
+const scanOperations: Record<ScanError['operation'], string> = {
+  list: 'Listing folder',
+  stat: 'Checking path',
+  read: 'Reading file',
+}
+
+function ScanErrors({ url, scan, onClose }: {
+  url: string; scan: NonNullable<Progress['scan']>; onClose: () => void
+}) {
+  const [pages, setPages] = useState([0])
+  const [retry, setRetry] = useState(0)
+  const result = useRemote<Page<ScanError>>(
+    `${url}?cursor=${pages.at(-1)}`, scan.file_errors + scan.directory_errors + retry,
+  )
+  const next = result?.data?.next_cursor
+  return (
+    <Dialog title="Scan errors" onClose={onClose}>
+      <p>Previously indexed items are kept when their contents or parent folder cannot be read.</p>
+      {!result && <p role="status">Loading scan errors…</p>}
+      {result?.error && <div>
+        <p className="inline-error" role="alert">{result.error}</p>
+        <button className="button secondary" onClick={() => setRetry((value) => value + 1)}>Retry</button>
+      </div>}
+      {result?.data && (result.data.items.length
+        ? <ul className="scan-errors">
+            {result.data.items.map((issue) => <li key={issue.id}>
+              <strong>{issue.path === '.' && issue.kind === 'directory' ? 'Library root' : issue.path}</strong>
+              <span>{scanOperations[issue.operation]} · {readFailures[issue.code]}
+                {issue.code === 'io_error' && issue.errno != null ? ` (errno ${issue.errno})` : ''}</span>
+            </li>)}
+          </ul>
+        : <p>No scan errors on this page.</p>)}
+      <div className="dialog-actions">
+        <button className="button secondary" disabled={pages.length === 1}
+          aria-label="Previous page of scan errors"
+          onClick={() => setPages((values) => values.slice(0, -1))}>Previous</button>
+        <button className="button secondary" disabled={next == null || !!result?.error}
+          aria-label="Next page of scan errors"
+          onClick={() => next != null && setPages((values) => [...values, next])}>Next</button>
+        <button autoFocus className="button secondary" onClick={onClose}>Close</button>
+      </div>
+    </Dialog>
+  )
+}
+
+function WorkerProgress({ base, progress }: { base: string; progress?: Progress }) {
+  const [shownReport, setShownReport] = useState<string>()
+  const reportButton = useRef<HTMLButtonElement>(null)
   const rows = progress?.stages
   const counts = rows ? Object.values(rows) : []
   const total = counts.reduce((sum, stage) =>
     sum + Object.values(stage).reduce((count, value) => count + value, 0), 0)
   const remaining = counts.reduce((sum, stage) => sum + (stage.pending ?? 0) + (stage.running ?? 0), 0)
   const errors = counts.reduce((sum, stage) => sum + (stage.error ?? 0), 0)
-  const scanning = progress?.scan?.status === 'running' || progress?.scan?.status === 'pending'
+  const scan = progress?.scan
+  const reportKey = scan && `${scan.id}:${scan.attempt}`
+  const scanning = scan?.status === 'running' || scan?.status === 'pending'
+  const failures = scan ? [
+    scan.file_errors ? `${scan.file_errors.toLocaleString()} unreadable ${scan.file_errors === 1 ? 'file' : 'files'}` : '',
+    scan.directory_errors ? `${scan.directory_errors.toLocaleString()} unreadable ${scan.directory_errors === 1 ? 'folder' : 'folders'}` : '',
+  ].filter(Boolean).join(', ') : ''
   const ml = progress?.ml
   const embedding = rows?.embedding
   const embedded = embedding?.done ?? 0
@@ -159,10 +220,11 @@ export function WorkerProgress({ progress }: { progress?: Progress }) {
     <div className="worker-progress">
       <div className="section-heading">Indexing</div>
       <div className="progress-line">
-        <span>{scanning ? 'Scanning library' : remaining ? 'Processing media' : 'Queue idle'}</span>
-        {!!total && <span>{total - remaining} / {total}</span>}
+        <span>{scan?.status === 'pending' ? 'Scan queued' : scanning ? 'Scanning library' : remaining ? 'Processing media' : 'Queue idle'}</span>
+        {scanning && scan ? <span>{scan.files_indexed.toLocaleString()} indexed</span>
+          : !!total && <span>{total - remaining} / {total}</span>}
       </div>
-      <progress aria-label="Indexing progress" max={total || 1} value={total - remaining} />
+      <progress aria-label="Indexing progress" max={total || 1} value={scanning ? undefined : total - remaining} />
       {!!rows && <div className="progress-line stage-counts">
         <span>EXIF {rows.exif.done ?? 0}</span>
         <span>Previews {rows.preview.done ?? 0}</span>
@@ -181,7 +243,16 @@ export function WorkerProgress({ progress }: { progress?: Progress }) {
         {ml.group_error && <p className="inline-error" role="status">{ml.group_error}</p>}
       </div>}
       {!!errors && <p className="inline-error">{errors} {errors === 1 ? 'stage' : 'stages'} failed</p>}
-      {progress?.scan?.error && <p className="inline-error" title={progress.scan.error}>{progress.scan.error}</p>}
+      {scan?.error && <p className="inline-error" title={scan.error}>{scan.error}</p>}
+      {scan && failures && <>
+        <button ref={reportButton} className="button secondary"
+          onClick={() => setShownReport(reportKey ?? undefined)}>{failures}</button>
+        {shownReport === reportKey && <ScanErrors url={`${base}/scans/${scan.id}/errors`}
+          scan={scan} onClose={() => {
+            setShownReport(undefined)
+            requestAnimationFrame(() => reportButton.current?.focus())
+          }} />}
+      </>}
     </div>
   )
 }
@@ -252,7 +323,7 @@ export function LibraryNav(props: NavProps) {
         onConfirm={onClearAll}
         onClose={() => setConfirmClear(false)}
       />}
-      <WorkerProgress progress={progress} />
+      <WorkerProgress key={base} base={base} progress={progress} />
     </aside>
   )
 }
