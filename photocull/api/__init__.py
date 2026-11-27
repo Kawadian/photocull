@@ -42,7 +42,7 @@ from photocull.db.catalog import (
 )
 from photocull.db.catalog import set_rating as save_rating
 from photocull.db.insights import asset_insights, public_keys
-from photocull.db.jobs import progress, request_scan, retry_job
+from photocull.db.jobs import progress, request_scan, retry_job, scan_error_page
 from photocull.db.search import (
     QueueFull,
     QueueUnavailable,
@@ -534,6 +534,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def enqueue_scan(library: str):
         with connect(library_path(library)) as db:
             return dict(request_scan(db))
+
+    @app.get("/api/libraries/{library}/scans/{scan_id}/errors")
+    def scan_errors(library: str, scan_id: CatalogId, cursor: Cursor = 0, limit: Limit = 50):
+        with connect(library_path(library)) as db:
+            page = scan_error_page(db, scan_id, cursor, limit)
+        if page is None:
+            raise HTTPException(404, "Scan not found")
+        return page
 
     @app.get("/api/libraries/{library}/jobs")
     def job_progress(library: str):

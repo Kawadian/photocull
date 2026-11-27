@@ -43,7 +43,7 @@ from photocull.worker.rejections import (
     configure_scoring,
     save_scores,
 )
-from photocull.worker.scan import fallback_day, scan_batches
+from photocull.worker.scan import fallback_day, record_root_issue, scan_batches
 
 LOG = logging.getLogger(__name__)
 CACHE_DIRS = ("thumbs", "previews", "details")
@@ -63,7 +63,7 @@ class LibraryWorker:
     settings: Settings
     pulse: Callable[[], None]
     heartbeat: float = 0
-    scan: tuple[int, Iterator[None]] | None = None
+    scan: Iterator[None] | None = None
     ml: LibraryML | None = None
     insights: Insights | None = None
     stories: Stories | None = None
@@ -131,46 +131,67 @@ class LibraryWorker:
         if self.stories is not None:
             self.stories.configure(self.pulse)
 
-    def step_scan(self, pulse: Callable[[], None] | None = None) -> bool:
-        if self.scan is None:
-            if not self.archive_gate.acquire(blocking=False):
-                return False
+    def claim_scan(self) -> int | None:
+        if not self.archive_gate.acquire(blocking=False):
+            return None
+        try:
             scan_id = claim_scan(self.db)
-            if scan_id is None:
-                self.archive_gate.release()
-                return False
+        except BaseException:
+            self.archive_gate.release()
+            raise
+        if scan_id is None:
+            self.archive_gate.release()
+        return scan_id
+
+    def scan_work(self, db: Connection, scan_id: int, pulse: Callable[[], None]) -> Iterator[None]:
+        try:
             try:
-                jail = MediaJail(self.library, self.settings.state_dir)
-            except (OSError, RuntimeError, ValueError) as error:
-                self.archive_gate.release()
-                finish_scan(self.db, scan_id, str(error))
-                return True
+                jail = MediaJail(self.library, self.settings.state_dir, validate=False)
+            except OSError as error:
+                record_root_issue(db, scan_id, error)
+                raise
             key = self.ml.key if self.ml is not None and self.settings.ml.enabled else None
-            batches = scan_batches(
-                self.db,
+            yield from scan_batches(
+                db,
                 scan_id,
                 jail,
                 self.settings.worker,
-                pulse or self.pulse,
+                pulse,
                 key,
                 settle_seconds=self.settings.insights.watch_debounce
                 if self.settings.insights.watch
                 else 0,
                 defer=self.watch.notify if self.watch and self.settings.insights.watch else None,
             )
-            self.scan = (scan_id, batches)
-        scan_id, batches = self.scan
+        except (OSError, RuntimeError, ValueError) as error:
+            LOG.warning("Scan %s for %s failed: %s", scan_id, self.state.name, error)
+            finish_scan(db, scan_id, str(error))
+        else:
+            finish_scan(db, scan_id)
+
+    def run_scan(self, scan_id: int, pulse: Callable[[], None]) -> None:
         try:
-            next(batches)
+            with connect(self.state / "index.db") as db:
+                for _ in self.scan_work(db, scan_id, pulse):
+                    pass
+        finally:
+            self.archive_gate.release()
+
+    def step_scan(self, pulse: Callable[[], None] | None = None) -> bool:
+        if self.scan is None:
+            scan_id = self.claim_scan()
+            if scan_id is None:
+                return False
+            self.scan = self.scan_work(self.db, scan_id, pulse or self.pulse)
+        try:
+            next(self.scan)
         except StopIteration:
             self.scan = None
             self.archive_gate.release()
-            finish_scan(self.db, scan_id)
-        except (OSError, RuntimeError, ValueError) as error:
+        except BaseException:
             self.scan = None
             self.archive_gate.release()
-            LOG.warning("Scan %s failed: %s", scan_id, error)
-            finish_scan(self.db, scan_id, str(error))
+            raise
         return True
 
     def work(self, job: Job) -> tuple[dict, str | None]:
@@ -185,7 +206,7 @@ class LibraryWorker:
                     "Cached preview is missing. Rerun preview and scoring."
                 ) from error
 
-        jail = MediaJail(self.library, self.settings.state_dir)
+        jail = MediaJail(self.library, self.settings.state_dir, validate=False)
         with jail.open_media(job.path) as (fd, _):
             if source_key(os.fstat(fd)) != job.source_key:
                 raise SourceChanged("Media changed since the scan. Scan the library again.")
@@ -255,18 +276,62 @@ class LibraryWorker:
                     (job.asset_id, NO_EMBEDDING_PREVIEW),
                 )
             mark_catalog_updated(self.db)
-        if not error and job.stage == "preview":
-            for variant in CACHE_DIRS:
-                current = cache_path(self.state, variant, job.asset_id, job.content_hash)
-                for old in current.parent.glob(f"{job.asset_id}-*.jpg"):
-                    if old != current:
-                        old.unlink(missing_ok=True)
+
+    def clean_stale_previews(self) -> bool:
+        rows = self.db.execute(
+            """SELECT c.asset_id, c.content_hash, a.content_hash AS current_hash
+               FROM preview_cleanup AS c JOIN assets AS a ON a.id=c.asset_id
+               ORDER BY c.asset_id LIMIT 64"""
+        ).fetchall()
+        if not rows:
+            return False
+        for asset_id, digest, current in rows:
+            if digest != current:
+                for variant in CACHE_DIRS:
+                    cache_path(self.state, variant, asset_id, digest).unlink(missing_ok=True)
+        with write(self.db):
+            self.db.executemany(
+                "DELETE FROM preview_cleanup WHERE asset_id=? AND content_hash=?",
+                ((row["asset_id"], row["content_hash"]) for row in rows),
+            )
+        return True
+
+    def media_wave(
+        self,
+        pool: ThreadPoolExecutor,
+        heartbeat: Callable[[], None],
+        between_work: Callable[[], None],
+        timeout: float,
+    ) -> bool:
+        config = self.settings.worker
+        remaining = max(config.batch_size, config.parallelism)
+        pending: dict[Future, Job] = {}
+        worked = False
+        while True:
+            capacity = min(remaining, config.parallelism - len(pending))
+            if capacity:
+                jobs = claim_jobs(self.db, capacity)
+                pending.update((pool.submit(self.work, job), job) for job in jobs)
+                remaining -= len(jobs)
+                worked = worked or bool(jobs)
+            if not pending:
+                return worked
+            while True:
+                heartbeat()
+                done, _ = wait(pending, timeout=timeout, return_when=FIRST_COMPLETED)
+                for future in done:
+                    self.finish(pending.pop(future), future)
+                between_work()
+                if done:
+                    break
 
     def step(
         self,
         pool: ThreadPoolExecutor,
         heartbeat: Callable[[], None],
         service_search: Callable[[], bool] | None = None,
+        *,
+        advance_scan: bool = True,
     ) -> bool:
         self.pulse()
         ml = self.ml if self.settings.ml.enabled else None
@@ -284,27 +349,22 @@ class LibraryWorker:
             if not poll_search or not poll_search():
                 break
             searched = True
-        if self.watch:
-            self.watch.step(between_work)
-        scanned = self.step_scan(between_work)
+        scanned = False
+        if advance_scan:
+            if self.watch:
+                self.watch.step(between_work)
+            scanned = self.step_scan(between_work)
         between_work()
-        config = self.settings.worker
-        jobs = claim_jobs(self.db, min(config.batch_size, config.parallelism))
-        pending = {pool.submit(self.work, job): job for job in jobs}
-        while pending:
-            heartbeat()
-            done, _ = wait(
-                pending,
-                timeout=SEARCH_POLL_SECONDS if poll_search else 1,
-                return_when=FIRST_COMPLETED,
-            )
-            for future in done:
-                self.finish(pending.pop(future), future)
-            between_work()
+        timeout = SEARCH_POLL_SECONDS if poll_search else 1
+        if self.media_wave(pool, heartbeat, between_work, timeout):
+            # Drain source reads in a library before running its cached-image analyses.
+            return True
+        if self.clean_stale_previews():
+            return True
         embedded = ml.process_images() if ml else False
         between_work()
         tagged = ml.process_tags() if ml else False
-        busy = bool(scanned or jobs or embedded or tagged)
+        busy = bool(scanned or embedded or tagged)
         if self.insights and self.insights.clean_video():
             return True
         if not busy and self.transfers and self.transfers.step(between_work):
@@ -402,6 +462,7 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=N
                 worker.configure()
             config = settings.worker
             pool = stack.enter_context(ThreadPoolExecutor(max_workers=config.parallelism))
+            scan_pool = stack.enter_context(ThreadPoolExecutor(max_workers=config.scan_parallelism))
             stack.callback(inference.close)
             gates = {worker.state.name: worker.archive_gate for worker in workers}
             archives = Archives(settings, stop, stack, gates)
@@ -411,17 +472,66 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=N
             ready = True
             heartbeat()
             poll_search = service_search if settings.ml.enabled else None
+            scans: dict[str, Future[None]] = {}
+            scan_cursor = 0
+            stage_cursor = 0
+
+            def watch_pulse() -> None:
+                pulse()
+                if poll_search:
+                    poll_search()
+
+            def scan_pulse() -> None:
+                if stop.is_set():
+                    raise StopWorker
+
             while not stop.is_set():
+                pulse()
+                for name, future in tuple(scans.items()):
+                    if future.done():
+                        future.result()
+                        del scans[name]
+                start = scan_cursor
+                for offset in range(len(workers)):
+                    if len(scans) >= config.scan_parallelism:
+                        break
+                    index = (start + offset) % len(workers)
+                    worker = workers[index]
+                    name = worker.state.name
+                    if name not in scans and (scan_id := worker.claim_scan()) is not None:
+                        scans[name] = scan_pool.submit(worker.run_scan, scan_id, scan_pulse)
+                        scan_cursor = (index + 1) % len(workers)
+                if poll_search:
+                    poll_search()
+
+                rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                if rss_mb >= config.memory_mb:
+                    LOG.warning("Worker reached %.0f MiB RSS and will restart", rss_mb)
+                    return 75
+                if scans and not config.scan_overlap:
+                    archives.step(idle=False)
+                    stop.wait(SEARCH_POLL_SECONDS)
+                    continue
+
                 busy = False
-                for worker in workers:
-                    busy = worker.step(pool, heartbeat, poll_search) or busy
-                    rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-                    if rss_mb >= config.memory_mb:
-                        LOG.warning("Worker reached %.0f MiB RSS and will restart", rss_mb)
-                        return 75
-                archives.step(idle=not busy)
+                start = stage_cursor
+                for offset in range(len(workers)):
+                    index = (start + offset) % len(workers)
+                    worker = workers[index]
+                    if worker.state.name in scans:
+                        continue
+                    if worker.watch and not scans and worker.watch.step(watch_pulse):
+                        busy = True
+                        if not config.scan_overlap:
+                            break
+                        continue
+                    if worker.step(pool, heartbeat, poll_search, advance_scan=False):
+                        stage_cursor = (index + 1) % len(workers)
+                        busy = True
+                        break
+                archives.step(idle=not busy and not scans)
                 if not busy:
-                    stop.wait(SEARCH_POLL_SECONDS if poll_search else 1)
+                    stop.wait(SEARCH_POLL_SECONDS if poll_search or scans else 0.25)
     except StopWorker:
         pass
     return 0

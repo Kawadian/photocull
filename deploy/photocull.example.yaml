@@ -13,6 +13,10 @@ worker:
   memory_mb: 1536
   batch_size: 8
   parallelism: 1
+  scan_parallelism: 1
+  scan_batch_size: 64
+  hash_read_mib: 4
+  scan_overlap: false # Keep false for libraries on one spinning disk.
   stages: [exif, preview, score]
   device: cpu
 # scoring:
