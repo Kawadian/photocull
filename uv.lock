@@ -60,6 +60,15 @@ wheels = [
 ]
 
 [[package]]
+name = "blurhash"
+version = "1.1.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/24/f3/9e636182d0e6b3f6b7879242f7f8add78238a159e8087ec39941f5d65af7/blurhash-1.1.5.tar.gz", hash = "sha256:181e1484b6a8ab5cff0ef37739150c566f4a72f2ab0dcb79660b6cee69c137a9", size = 50859, upload-time = "2025-08-17T10:36:12.519Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bd/dc/cadbf64b335a2ee0f31a84d05f34551c2199caa6f639a90c9157b564d0d6/blurhash-1.1.5-py2.py3-none-any.whl", hash = "sha256:96a8686e8b9fced1676550b814e59256214e2d4033202b16c91271ed4d317fec", size = 6632, upload-time = "2025-08-17T10:36:11.404Z" },
+]
+
+[[package]]
 name = "click"
 version = "8.5.1"
 source = { registry = "https://pypi.org/simple" }
@@ -519,6 +528,7 @@ dependencies = [
 
 [package.optional-dependencies]
 faces = [
+    { name = "blurhash" },
     { name = "numkong" },
     { name = "numpy" },
     { name = "onnxruntime" },
@@ -531,6 +541,7 @@ faces = [
     { name = "usearch" },
 ]
 insights = [
+    { name = "blurhash" },
     { name = "faster-whisper" },
     { name = "numkong" },
     { name = "numpy" },
@@ -545,6 +556,7 @@ insights = [
     { name = "watchdog" },
 ]
 ml = [
+    { name = "blurhash" },
     { name = "numkong" },
     { name = "numpy" },
     { name = "onnxruntime" },
@@ -556,6 +568,7 @@ ml = [
     { name = "usearch" },
 ]
 transcript = [
+    { name = "blurhash" },
     { name = "faster-whisper" },
     { name = "numkong" },
     { name = "numpy" },
@@ -571,6 +584,7 @@ watch = [
     { name = "watchdog" },
 ]
 worker = [
+    { name = "blurhash" },
     { name = "numpy" },
     { name = "pillow" },
     { name = "pillow-heif" },
@@ -587,6 +601,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "blurhash", marker = "extra == 'worker'", specifier = ">=1.1.4,<2" },
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "fastapi", specifier = ">=0.120" },
     { name = "faster-whisper", marker = "extra == 'transcript'", specifier = ">=1.2,<2" },

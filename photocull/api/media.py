@@ -1,0 +1,241 @@
+from __future__ import annotations
+
+import asyncio
+import os
+import sqlite3
+import stat
+import time
+from collections.abc import Callable
+from contextlib import ExitStack, contextmanager
+from email.utils import formatdate, parsedate_to_datetime
+from pathlib import Path, PurePosixPath
+from threading import Lock
+from typing import Annotated, Literal
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi import Path as RoutePath
+from fastapi.responses import FileResponse, JSONResponse, Response
+
+from photocull.config import Settings
+from photocull.db import connect
+from photocull.db.derivatives import cache_status, request_file, touch_files
+from photocull.media.artifacts import open_regular
+from photocull.media.derivatives import (
+    VARIANTS,
+    VERSION_PATTERN,
+    derivative_path,
+    recipe,
+    relative_path,
+)
+from photocull.media.walk import MediaJail, OutsideLibrary, open_directory, source_key
+
+Id = Annotated[int, RoutePath(gt=0, le=2**63 - 1)]
+Version = Annotated[str, RoutePath(pattern=VERSION_PATTERN)]
+MAX_PENDING_TOUCHES = 8192
+IMMUTABLE = "private, max-age=31536000, immutable"
+NO_STORE = "private, no-store"
+
+
+class CacheAccess:
+    def __init__(self) -> None:
+        self.pending: dict[tuple[Path, int, str, str], float] = {}
+        self.lock = Lock()
+
+    def touch(self, path: Path, asset_id: int, variant: str, version: str) -> None:
+        with self.lock:
+            key = (path, asset_id, variant, version)
+            if key in self.pending or len(self.pending) < MAX_PENDING_TOUCHES:
+                self.pending[key] = time.time()
+
+    def flush(self) -> None:
+        with self.lock:
+            pending, self.pending = self.pending, {}
+        batches: dict[Path, list[tuple[float, int, str, str]]] = {}
+        for (path, asset_id, variant, version), stamp in pending.items():
+            batches.setdefault(path, []).append((stamp, asset_id, variant, version))
+        for path, batch in batches.items():
+            with connect(path, timeout_ms=500) as db:
+                try:
+                    touch_files(db, batch)
+                except sqlite3.OperationalError as error:
+                    if error.sqlite_errorcode != sqlite3.SQLITE_BUSY:
+                        raise
+                    with self.lock:
+                        for stamp, asset_id, variant, version in batch:
+                            if len(self.pending) < MAX_PENDING_TOUCHES:
+                                self.pending.setdefault((path, asset_id, variant, version), stamp)
+
+    async def run(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(10)
+                await asyncio.to_thread(self.flush)
+        finally:
+            await asyncio.to_thread(self.flush)
+
+
+def not_modified(request: Request, etag: str, modified: float) -> bool:
+    if (match := request.headers.get("if-none-match")) is not None:
+        return any(tag.strip().removeprefix("W/") in ("*", etag) for tag in match.split(","))
+    if since := request.headers.get("if-modified-since"):
+        try:
+            return int(modified) <= parsedate_to_datetime(since).timestamp()
+        except (ValueError, OverflowError):
+            pass
+    return False
+
+
+def derivative_response(
+    request: Request, target: Path, mime: str, etag: str, redirect: str | None = None
+):
+    try:
+        info = target.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    if redirect is not None:
+        return Response(headers={"X-Accel-Redirect": redirect, "Content-Type": mime})
+    headers = {
+        "Cache-Control": IMMUTABLE,
+        "ETag": etag,
+        "Last-Modified": formatdate(info.st_mtime, usegmt=True),
+        "X-Content-Type-Options": "nosniff",
+    }
+    if not_modified(request, etag, info.st_mtime):
+        return Response(status_code=304, headers=headers)
+    return OpenMedia(lambda stack: stack.enter_context(_open_cache(target)), mime, headers)
+
+
+@contextmanager
+def _open_cache(target: Path):
+    with (
+        open_directory(target.parent.absolute()) as parent,
+        open_regular(parent, target.name) as opened,
+    ):
+        yield opened
+
+
+class OpenMedia(Response):
+    def __init__(
+        self,
+        opener: Callable,
+        mime: str,
+        file_headers: dict[str, str],
+        filename: str | None = None,
+    ):
+        super().__init__()
+        self.opener = opener
+        self.mime = mime
+        self.file_headers = file_headers
+        self.filename = filename
+
+    async def __call__(self, scope, receive, send):
+        with ExitStack() as stack:
+            try:
+                fd, info = self.opener(stack)
+            except (OSError, OutsideLibrary):
+                response = Response(status_code=404, headers={"Cache-Control": NO_STORE})
+            else:
+                response = FileResponse(
+                    f"/proc/self/fd/{fd}",
+                    stat_result=info,
+                    media_type=self.mime,
+                    headers=self.file_headers,
+                    filename=self.filename,
+                )
+            await response(scope, receive, send)
+
+
+def mount_media(settings: Settings, library_path, hits: CacheAccess) -> APIRouter:
+    config = settings.derivatives
+    version_suffix = "-" + recipe(config)
+    router = APIRouter()
+    base = "/api/libraries/{library}/assets/{asset_id}"
+
+    @router.api_route(base + "/media/{name}/{version}", methods=["GET", "HEAD"])
+    def derivative(request: Request, library: str, asset_id: Id, name: str, version: Version):
+        path = library_path(library)
+        variant = VARIANTS.get(name)
+        if not config.enabled or variant is None or not version.endswith(version_suffix):
+            raise HTTPException(404, "Derivative unavailable")
+        with connect(path, timeout_ms=500) as db:
+            row = db.execute(
+                "SELECT kind, content_hash FROM assets WHERE id = ? AND active = 1",
+                (asset_id,),
+            ).fetchone()
+            if (
+                row is None
+                or version != row["content_hash"] + version_suffix
+                or (variant.mime == "video/mp4" and row["kind"] != "video")
+            ):
+                raise HTTPException(404, "Derivative unavailable")
+            entry = cache_status(db, asset_id, name, version)
+            target = derivative_path(settings, library, asset_id, variant, version)
+            if entry and entry["status"] == "ready":
+                redirect = None
+                if config.accel_redirect:
+                    relative = relative_path(library, asset_id, variant, version).as_posix()
+                    redirect = f"/_photocull/{variant.tier}/{relative}"
+                if response := derivative_response(
+                    request, target, variant.mime, f'"{version}-{name}"', redirect
+                ):
+                    hits.touch(path, asset_id, name, version)
+                    return response
+            if entry and (
+                entry["status"] == "running"
+                or (entry["status"] == "pending" and entry["priority"] == 1)
+            ):
+                status = "pending"
+            else:
+                try:
+                    status = request_file(db, asset_id, variant, version, time.time())
+                except sqlite3.OperationalError as error:
+                    if error.sqlite_errorcode != sqlite3.SQLITE_BUSY:
+                        raise
+                    status = "busy"
+        code, delay = {"pending": (202, "2"), "busy": (503, "5"), "error": (409, "300")}[status]
+        return JSONResponse(
+            {"status": status},
+            status_code=code,
+            headers={"Cache-Control": NO_STORE, "Retry-After": delay},
+        )
+
+    @router.api_route(base + "/original", methods=["GET", "HEAD"])
+    def original(library: str, asset_id: Id, mode: Literal["download", "stream"] = "download"):
+        path = library_path(library)
+        if not (config.original_download if mode == "download" else config.original_streaming):
+            raise HTTPException(404, "Original media unavailable")
+        with connect(path) as db:
+            row = db.execute(
+                "SELECT path, kind, source_key FROM assets WHERE id = ? AND active = 1",
+                (asset_id,),
+            ).fetchone()
+        if row is None or (mode == "stream" and row["kind"] != "video"):
+            raise HTTPException(404, "Original media unavailable")
+        title = PurePosixPath(row["path"]).name
+        mime = "application/octet-stream"
+        if mode == "stream":
+            mime = {
+                ".mp4": "video/mp4",
+                ".mov": "video/quicktime",
+                ".m4v": "video/mp4",
+                ".mkv": "video/x-matroska",
+            }.get(Path(title).suffix.lower(), mime)
+
+        def open_original(stack: ExitStack):
+            jail = MediaJail(settings.libraries[library], settings.state_dir, validate=False)
+            fd, _ = stack.enter_context(jail.open_media(row["path"]))
+            info = os.fstat(fd)
+            if source_key(info) != row["source_key"]:
+                raise OSError("Source changed")
+            return fd, info
+
+        return OpenMedia(
+            open_original,
+            mime,
+            {"Cache-Control": NO_STORE, "X-Content-Type-Options": "nosniff"},
+            filename=title if mode == "download" else None,
+        )
+
+    return router

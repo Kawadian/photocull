@@ -107,10 +107,8 @@ def test_month_seek_scope_and_cursor_validation(timeline):
         {"limit": 121},
     ):
         assert timeline.get(TIMELINE, params=params | changes).status_code == 422
-    assert timeline.get(TIMELINE, params={"month": "2024-01"}).json() == {
-        "items": [],
-        "next_cursor": None,
-    }
+    empty = timeline.get(TIMELINE, params={"month": "2024-01"}).json()
+    assert empty["items"] == [] and empty["next_cursor"] is None
     assert timeline.get(TIMELINE, params={"library": "missing"}).status_code == 404
     assert timeline.get(MONTHS, params={"library": "../alpha"}).status_code == 422
     for path in (TIMELINE, MONTHS):

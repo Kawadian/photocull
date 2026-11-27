@@ -28,6 +28,8 @@ MemoryMax=2G
 # For directory exports, add ReadWritePaths=/srv/photocull-exports to the drop-in
 # and set the same destination under insights.export_roots in shared YAML.
 # For Archive, add ReadWritePaths for the separate archive export directory.
+# For browser derivatives on HDD, set derivatives.large_dir in shared YAML
+# and add ReadWritePaths for that cache root in a worker drop-in.
 # For destructive Archive jobs, also add only the subtrees listed in
 # PHOTOCULL_WRITE_ROOTS and any explicitly configured trash parent.
 # The worker requires a passing filesystem self-test for each approved mount.

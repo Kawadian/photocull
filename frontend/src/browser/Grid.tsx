@@ -4,27 +4,34 @@ import type { CSSProperties, KeyboardEvent, ReactNode } from 'react'
 import { mediaUrl } from '../api'
 import { gap, layout, neighbor, rowAt } from './layout'
 import type { BrowserLocation } from './location'
+import { Blurhash, ResponsiveImage } from './ResponsiveImage'
 import { formatDate } from './strings'
 import type { Strings } from './strings'
 import { assetKey, libraryUrl } from './timeline'
 import type { TimelineAsset } from './timeline'
 
-function Thumbnail({ asset, priority, text }: { asset: TimelineAsset; priority: boolean; text: Strings }) {
+function Thumbnail({ asset, priority, text, recipe, width }: {
+  asset: TimelineAsset; priority: boolean; text: Strings; recipe?: string | null; width: number
+}) {
   const url = mediaUrl(libraryUrl(asset.library), asset, 'thumb')
   const [failed, setFailed] = useState('')
   const pending = asset.preview_status !== 'error' && asset.preview_status !== 'skipped'
-  return asset.preview_status === 'done' && failed !== url
-    ? <img src={url} alt="" loading={priority ? 'eager' : 'lazy'} decoding="async"
-        fetchPriority={priority ? 'high' : 'auto'} onError={() => setFailed(url)} draggable={false} />
-    : <span className="pcb-thumbnail-empty" aria-hidden="true"
-        title={asset.preview_status !== 'done' && pending ? text.previewPending : text.previewError}>
-        {pending && failed !== url ? <Images size={21} /> : <ImageOff size={21} />}
-      </span>
+  return <>
+    {asset.blurhash && <Blurhash value={asset.blurhash} />}
+    {(asset.preview_status === 'done' || recipe) && failed !== url ?
+      <ResponsiveImage size="grid" recipe={recipe} sizes={width + 'px'} library={asset.library}
+        asset={asset} alt="" priority={priority} onError={() => setFailed(url)} />
+      : <span className="pcb-thumbnail-empty" aria-hidden="true"
+          title={asset.preview_status !== 'done' && pending ? text.previewPending : text.previewError}>
+          {pending && failed !== url ? <Images size={21} /> : <ImageOff size={21} />}
+        </span>}
+  </>
 }
 
-export function TimelineGrid({ assets, location, text, busy, canLoad, loadMore, onPhoto, onMonth, children }: {
+export function TimelineGrid({ assets, location, recipe, text, busy, canLoad, loadMore, onPhoto, onMonth, children }: {
   assets: TimelineAsset[]
   location: BrowserLocation
+  recipe?: string | null
   text: Strings
   busy: boolean
   canLoad: boolean
@@ -129,7 +136,7 @@ export function TimelineGrid({ assets, location, text, busy, canLoad, loadMore, 
                 ref={(node) => { if (node) buttons.current.set(index, node); else buttons.current.delete(index) }}
                 onFocus={() => setFocused(index)} onKeyDown={(event) => moveFocus(event, index)}
                 onClick={(event) => onPhoto(asset, event.currentTarget)}>
-                <Thumbnail asset={asset} priority={index < 2} text={text} />
+                <Thumbnail asset={asset} recipe={recipe} width={width} priority={index < 2} text={text} />
                 {asset.kind === 'video' && <span className="pcb-video-chip" aria-hidden="true">
                   <Film size={13} />
                   {asset.duration != null && ' ' + Math.floor(asset.duration / 60) + ':'

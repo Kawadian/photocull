@@ -187,6 +187,23 @@ class ArchiveSettings(BaseModel):
     timeout_seconds: int = Field(default=86400, ge=5, le=604800)
 
 
+class DerivativeSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = True
+    hot_dir: Path | None = None
+    large_dir: Path | None = None
+    hot_mib: int = Field(default=1536, ge=16)
+    large_mib: int = Field(default=4096, ge=16)
+    avif_quality: int = Field(default=58, ge=1, le=100)
+    webp_quality: int = Field(default=80, ge=1, le=100)
+    jpeg_quality: int = Field(default=86, ge=1, le=100)
+    prewarm: int = Field(default=64, ge=0, le=2048)
+    original_download: bool = False
+    original_streaming: bool = False
+    accel_redirect: bool = False
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -203,6 +220,7 @@ class Settings(BaseModel):
     ml: MLSettings = Field(default_factory=MLSettings)
     insights: InsightSettings = Field(default_factory=InsightSettings)
     archive: ArchiveSettings = Field(default_factory=ArchiveSettings)
+    derivatives: DerivativeSettings = Field(default_factory=DerivativeSettings)
 
     @model_validator(mode="after")
     def validate_state(self) -> Settings:
@@ -255,10 +273,28 @@ class Settings(BaseModel):
                 for area in self.archive.export_roots.values()
             ):
                 raise ValueError(f"Archive trash and export roots overlap for {name}")
+        if self.derivatives.enabled:
+            self._validate_derivative_roots(state, media)
         return self
+
+    def _validate_derivative_roots(self, state: Path, media: tuple[Path, ...]) -> None:
+        hot, large = (self.derivative_root(tier).resolve() for tier in ("hot", "large"))
+        exports = (*self.insights.export_roots.values(), *self.archive.export_roots.values())
+        areas = (*media, *(path.resolve() for path in exports), *self.archive.trash_roots.values())
+        for cache in (hot, large):
+            if state.is_relative_to(cache) or any(
+                cache.is_relative_to(root) or root.is_relative_to(cache) for root in areas
+            ):
+                raise ValueError("Derivative cache must be outside media and export directories")
+        if hot.is_relative_to(large) or large.is_relative_to(hot):
+            raise ValueError("Derivative cache tiers must be separate directories")
 
     def library_state(self, name: str) -> Path:
         return self.state_dir / "libraries" / name
+
+    def derivative_root(self, tier: Literal["hot", "large"]) -> Path:
+        root = self.derivatives.hot_dir if tier == "hot" else self.derivatives.large_dir
+        return root or self.state_dir / "derivatives" / tier
 
     @property
     def model_cache(self) -> Path:
@@ -298,6 +334,11 @@ def load_settings() -> Settings:
     if roots := insights.get("export_roots"):
         _paths(roots, tuple(roots), config.parent)
     archive = values.setdefault("archive", {})
+    derivatives = values.setdefault("derivatives", {})
+    _paths(derivatives, ("hot_dir", "large_dir"), config.parent)
+    for field in ("hot_dir", "large_dir"):
+        if setting := env.get(f"PHOTOCULL_DERIVATIVES_{field.upper()}"):
+            derivatives[field] = (cwd / Path(setting).expanduser()).absolute()
     for mapping in ("export_roots", "trash_roots"):
         if roots := archive.get(mapping):
             _paths(roots, tuple(roots), config.parent)
@@ -361,6 +402,7 @@ def load_settings() -> Settings:
         ("ml", MLSettings),
         ("insights", InsightSettings),
         ("archive", ArchiveSettings),
+        ("derivatives", DerivativeSettings),
     ):
         settings = values.setdefault(section, {})
         for field in model.model_fields.keys() - {
@@ -369,6 +411,8 @@ def load_settings() -> Settings:
             "export_roots",
             "trash_roots",
             "write_roots",
+            "hot_dir",
+            "large_dir",
         }:
             if (value := env.get(f"PHOTOCULL_{section.upper()}_{field.upper()}")) is not None:
                 settings[field] = value

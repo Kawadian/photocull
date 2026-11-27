@@ -19,6 +19,8 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
+# The optional large derivative tier is read-only to the API.
+ReadOnlyPaths=-/srv/photocull-cache-hdd
 # Writable for sidecars. Match the canonical media roots in the YAML configuration.
 ReadWritePaths=-/mnt/PhotoLibrary
 

@@ -19,6 +19,18 @@ worker:
   scan_overlap: false # Keep false for libraries on one spinning disk.
   stages: [exif, preview, score]
   device: cpu
+# derivatives:
+#   hot_dir: /var/lib/photocull/derivatives/hot
+#   hot_mib: 1536
+#   large_dir: /srv/photocull-cache-hdd
+#   large_mib: 4096
+#   prewarm: 64
+#   avif_quality: 58
+#   webp_quality: 80
+#   jpeg_quality: 86
+#   original_download: false
+#   original_streaming: false
+#   accel_redirect: false # Enable with matching internal nginx aliases.
 # scoring:
 #   min_sharpness: 0.02
 #   min_exposure: 0.08

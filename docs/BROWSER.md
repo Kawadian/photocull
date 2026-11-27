@@ -20,7 +20,7 @@ Before each PR, review the full diff, test edge cases and inspect Playwright scr
 
 Open **Photo browser** in the Photocull header. The default scope includes every configured library. Narrow it with the library selector. Use **Jump to month** or the right-hand scrubber to start at a month and continue into earlier photos. The photos in each row keep their aspect ratios. Use **Grid density** to change how many appear per row. The browser follows the device's color scheme. Choose English or Japanese in its header.
 
-Tab into the grid and use the arrow keys to move between thumbnails. Enter opens a preview. Left and Right step through the loaded photos, and Escape closes the preview. Listings and photo previews have shareable URLs. Use **Refresh timeline** after a scan or to update pending thumbnails. The grid uses the existing 320 px JPEGs, and previews use the existing fit JPEGs, including video posters.
+Tab into the grid and use the arrow keys to move between thumbnails. Enter opens a preview. Left and Right step through the loaded photos, and Escape closes the preview. Listings and photo previews have shareable URLs. Use **Refresh timeline** after a scan or to update pending thumbnails. For a video, choose a quality and select **Prepare playback**. **Download original** appears when the server enables it.
 
 ## Catalog and navigation
 
@@ -30,15 +30,39 @@ Use the History API for browser routing and lazy-load each view. Virtualize just
 
 `GET /api/browse/timeline` accepts `library`, `month` (YYYY-MM), `limit` (1–120, default 72) and an opaque `cursor` returned by the prior page. Keep the same library and month when continuing a page. `GET /api/browse/months` returns the occupied months in the selected library or across all libraries. The feed reflects the live catalogs. Indexing can add photos or update capture dates during a browse session, so refresh to see those changes from the top.
 
-## Media decisions for 6B
+## Derivatives and playback
 
-Use the existing worker scheduler for requested and background derivatives. The API looks up files and enqueues bounded work. Requested images take precedence over speculative work. Scanning and indexing take precedence over background warm-up. Use the existing media URL tree in both views and retain compatibility for the three JPEG URLs that review and analysis already use. Deploy X-Accel-Redirect as an option with private nginx locations and a direct-file fallback. Compress JSON at nginx.
+The browser's `picture` elements choose AVIF, WebP or JPEG and provide intrinsic widths to match the layout and device pixel ratio. Grid variants use 256 and 512 px long edges. Fit variants use 1280, 1920 and 2560 px. The native JPEG preserves all decoded pixels and is available on demand. RAW native resolution is the resolution of the embedded JPEG or, when absent, the existing half-size demosaic. Video grid and fit images use the shared poster frame. The timeline includes the BlurHash when a derivative has generated one. The original JPEG URLs remain available to the review workflow and as the browser's fallback while a derivative is pending.
 
-Start with 256 and 512 px grid images and 1280, 1920 and 2560 px fit images in AVIF, WebP and JPEG. Encode lazily using a versioned recipe and source hash. Store a blurhash or thumbhash for display while media is pending. Apply EXIF orientation, convert to sRGB, retain an sRGB profile where needed for consistent presentation, and strip source metadata including GPS. Native zoom can use a metadata-stripped JPEG generated on demand. RAW uses the existing embedded preview or demosaic path. The worker makes low and medium fast-start H.264/AAC MP4 proxies. Progressive MP4 with byte ranges meets the initial playback requirement. Revisit HLS only if measured seek and startup results warrant segment generation and extra storage. Keep original streaming and download subject to explicit configuration.
+The worker shares the existing decoder. It applies orientation, converts ICC-tagged input to sRGB and embeds a compact sRGB ICC profile. It also handles NCLX Display P3 with the sRGB transfer function. For untagged or malformed profiles it assumes sRGB after decoding to RGB. Wide-gamut source colors outside sRGB are clipped. Derivatives carry no source EXIF, XMP or GPS. Browser and worker use a small BlurHash library on each side. Color profiles are CC0 and pinned. [Compact ICC Profiles](https://github.com/saucecontrol/Compact-ICC-Profiles/tree/bdd84663061bc4ae95ca70decff54f581e27f702)
 
-Use configurable SSD and HDD cache roots outside the libraries, separate from archive exports, with per-tier limits, batched access tracking and worker eviction. Keep existing JPEGs usable during migration. Reuse them as inputs only where their dimensions and color handling meet the requested recipe. Document which files get regenerated and how existing cache space is reclaimed.
+The H.264/AAC MP4 proxies use fast start and byte ranges. The 480p variant caps video at 850 kb/s and uses 64 kb/s audio. The 720p variant caps video at 2 Mb/s and uses 96 kb/s audio. The worker uses the encoder already used for video review. Progressive MP4 covers the initial playback and seek requirements. HLS would add segment generation, files and player logic, so this release uses progressive MP4. Original downloads are separate authenticated requests with Unicode filenames and byte ranges. Original video streaming and original downloads each have their own setting and are off by default. Bulk export still uses the existing archive and ZIP workflows.
 
-Initial capacity allowance for 16,000 stills is about 3.1 GiB on SSD at 210 KiB per fully warmed grid set of six images. The analogous nine-image fit set is about 24.4 GiB on HDD at 1.6 MiB per still. These are planning allowances, pending fixture measurements. At a combined 3 Mb/s, two video proxies use about 22.5 MB per minute before audio and container overhead. Actual bytes depend on cache demand, encoder settings, video duration and source content.
+The versioned URL is `/api/libraries/{library}/assets/{id}/media/{variant}/{source_sha256}-{recipe}`. The recipe identifies the encoder settings and implementation revision. Files are private and immutable for one year. A request for a missing file queues work in the catalog and returns `202` with `Retry-After`. The worker deduplicates requests and encodes multiple requested stills from one decode. Explicit requests take priority over warm-up. The worker uses one low-priority execution slot for derivatives, and starts new derivative jobs after scans. A warm-up pass uses recent photos and dates represented in recent cache access, and stops when the hot tier reaches 80% of its limit. Once a proxy exists the API or nginx serves it directly with conditional and range requests.
+
+## Cache configuration and migration
+
+| YAML under `derivatives` | Default | Purpose |
+| --- | --- | --- |
+| `enabled` | `true` | Enables the new worker and serving routes |
+| `hot_dir`, `hot_mib` | `<state>/derivatives/hot`, 1536 MiB | Grid variants |
+| `large_dir`, `large_mib` | `<state>/derivatives/large`, 4096 MiB | Fit, native and video variants |
+| `prewarm` | 64 | Candidate photos per library for the newest captures and the most viewed recent day. Use zero to disable. |
+| `avif_quality`, `webp_quality`, `jpeg_quality` | 58, 80, 86 | Image encoder quality |
+| `original_download`, `original_streaming` | `false`, `false` | Permit original file download or playback |
+| `accel_redirect` | `false` | Hand versioned cache files to nginx via its internal locations |
+
+Use the same paths and encoder settings on API and worker. The `PHOTOCULL_DERIVATIVES_*` environment settings are listed in `.env.example`. Cache roots must be outside media and export directories. With 13 GiB of free SSD space, keep the hot tier on SSD and configure the large tier to a dedicated HDD directory such as `/srv/photocull-cache-hdd`. The two limits apply across all catalogs. The API batches access timestamps every 10 seconds. The worker evicts the least recently accessed files across libraries, and evicted files can be regenerated. Allow free space for one in-progress encode and the existing JPEG cache.
+
+The upgrade retains existing 320 px thumbnails, 1600 px detail crops and 2560 px fit JPEGs at their existing paths for review, fallback, ML and reports. They continue to use the existing stale-source cleanup. New still variants decode from the source on demand to avoid JPEG re-encoding and correct the input color. Video variants can reuse the existing 2560 px poster. After a cache directory move, requests regenerate missing files at the new location. An old derivative cache root can be cleared after both services point to the new location.
+
+Nine generated stills (3200–3840 px long edge, with varied detail) measured 9.8–48.6 KiB per photo for all six grid files, with a 17.5 KiB median, and 0.48–6.27 MiB for the complete fit set, with a 3.57 MiB median. At 16,000 stills this extrapolates to 0.27 GiB hot and 55.9 GiB large at the medians, before video, native JPEGs and the legacy cache. The texture mix and encoder settings affect these figures. Two proxies need at most about 22.6 MB per minute at their configured caps, before container overhead. The cache normally stores the variants clients request rather than every combination. Reproduce the still estimate with `uv run --locked --extra worker python -m scripts.benchmark_derivatives`.
+
+## nginx and deployment
+
+For Compose, pre-create the host cache directories, make them writable to the worker, and apply `deploy/compose.browser.example.yml` with the base Compose file. The override mounts the two roots read-only in the API and proxy and enables X-Accel-Redirect. For host nginx, match the `alias` paths in `deploy/systemd/nginx-photocull.conf` to the canonical cache paths. Grant nginx read and traverse permissions for those roots. Add a systemd drop-in with `ReadWritePaths=/srv/photocull-cache-hdd` for the worker when using that HDD path. Keep the existing IP rules and token injection.
+
+The two nginx locations are internal. Public media requests still pass through the API authentication and catalog check. nginx serves the resulting file with sendfile, ETag, Last-Modified, 304 and Range support. To serve directly with FastAPI, leave `accel_redirect` off. The nginx example enables gzip for JSON and UI assets. Test the configuration with `nginx -t` before reloading.
 
 ## Performance budgets
 
@@ -54,4 +78,4 @@ Run `uv run --locked python -m scripts.benchmark_browser` for the API gate. The 
 
 ## Authentication and offline
 
-The browser inherits the API's shared authentication and uses same-origin requests through nginx. It stores no tokens. Derivative URLs can use long-lived private caching after their version is in the URL. Keep offline catalog scope minimal and size-limited. Offline browsing will be opt-in, with a clear-data control and recent thumbnail eviction. External map tiles stay off by default. Browse by indexed place names with or without a map.
+The browser inherits the API's shared authentication and uses same-origin requests through nginx. It stores no tokens. Offline browsing will be opt-in, with a clear-data control and recent thumbnail eviction. External map tiles stay off by default. Browse by indexed place names with or without a map.

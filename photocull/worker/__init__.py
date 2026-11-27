@@ -395,6 +395,7 @@ class LibraryWorker:
 
 def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=None) -> int:
     from photocull.worker.archive import Archives
+    from photocull.worker.derivatives import Derivatives
 
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     if not settings.libraries:
@@ -466,6 +467,7 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=N
             stack.callback(inference.close)
             gates = {worker.state.name: worker.archive_gate for worker in workers}
             archives = Archives(settings, stop, stack, gates)
+            derivatives = Derivatives(settings, workers, stack, stop)
             stack.callback(stop.set)
             for worker in workers:
                 stack.callback(worker.offline)
@@ -510,6 +512,7 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=N
                     return 75
                 if scans and not config.scan_overlap:
                     archives.step(idle=False)
+                    derivatives.step(available=False, idle=False)
                     stop.wait(SEARCH_POLL_SECONDS)
                     continue
 
@@ -530,6 +533,7 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=N
                         busy = True
                         break
                 archives.step(idle=not busy and not scans)
+                busy = derivatives.step(available=not scans, idle=not busy and not scans) or busy
                 if not busy:
                     stop.wait(SEARCH_POLL_SECONDS if poll_search or scans else 0.25)
     except StopWorker:

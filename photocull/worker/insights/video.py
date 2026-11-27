@@ -274,8 +274,9 @@ def metrics(source, fd, threads, duration, has_audio, pulse):
 
 
 @contextmanager
-def proxy(source, fd, threads, target, pulse):
-    target.parent.mkdir(exist_ok=True)
+def proxy(source, fd, threads, target, pulse, *, limits=(1280, 720, "2M", "96k"), max_bytes=None):
+    width, height, bitrate, audio = limits
+    target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".video-", delete=False) as tmp:
         staged = Path(tmp.name)
     try:
@@ -287,8 +288,12 @@ def proxy(source, fd, threads, target, pulse):
             "0:a:0?",
             "-map_metadata",
             "-1",
+            "-map_metadata:s",
+            "-1",
+            "-map_chapters",
+            "-1",
             "-vf",
-            "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:"
+            f"scale='min({width},iw)':'min({height},ih)':force_original_aspect_ratio=decrease:"
             "force_divisible_by=2,format=yuv420p",
             "-c:v",
             "libx264",
@@ -299,13 +304,13 @@ def proxy(source, fd, threads, target, pulse):
             "-crf",
             "25",
             "-maxrate",
-            "2M",
+            bitrate,
             "-bufsize",
-            "4M",
+            "4M" if bitrate == "2M" else "1700k",
             "-c:a",
             "aac",
             "-b:a",
-            "96k",
+            audio,
             "-movflags",
             "+faststart",
             "-progress",
@@ -315,7 +320,13 @@ def proxy(source, fd, threads, target, pulse):
             "-y",
             str(staged),
         ]
-        for _ in chunks(args, fd, 1024, pulse):
+
+        def check():
+            pulse()
+            if max_bytes is not None and staged.stat().st_size > max_bytes:
+                raise ValueError("Video exceeds the derivative cache limit")
+
+        for _ in chunks(args, fd, 1024, check):
             pass
         yield staged
     finally:

@@ -6,7 +6,7 @@ import os
 import sqlite3
 import time
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from pathlib import Path
 from secrets import compare_digest
@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, StringConstraints, model_validator
 from photocull.api.archive import mount_archive
 from photocull.api.browse import browse_router
 from photocull.api.insights import mount_insights
+from photocull.api.media import CacheAccess, mount_media
 from photocull.config import MLSettings, Settings, Stage, load_settings
 from photocull.db import connect, initialize
 from photocull.db.bursts import (
@@ -161,6 +162,7 @@ def _rss_mb() -> float:
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     token: bytes | None = None
+    cache_access = CacheAccess()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -173,7 +175,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             token = value
         for name in settings.libraries:
             initialize(settings.library_state(name) / "index.db")
-        yield
+        task = asyncio.create_task(cache_access.run())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
     app = FastAPI(title="Photocull", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.settings = settings
@@ -581,6 +589,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     mount_insights(app, settings, library_path)
     mount_archive(app, settings, library_path)
     app.include_router(browse_router(settings))
+    app.include_router(mount_media(settings, library_path, cache_access))
     if (settings.static_dir / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=settings.static_dir / "assets"), name="frontend")
     return app

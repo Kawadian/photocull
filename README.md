@@ -4,6 +4,8 @@ Photocull is a self-hosted photo and video culler for a LAN or Tailscale network
 
 Open **Photo browser** for a cross-library capture timeline with a justified photo grid, month navigation and shareable photo previews. The grid supports touch, keyboard navigation and three densities. Choose English or Japanese in the browser header. [Photo browser guide](docs/BROWSER.md)
 
+The worker prepares responsive AVIF, WebP and JPEG images and two fast-start video proxies. Configure separate SSD and HDD cache roots for larger libraries. Optional original downloads use the existing authentication. [Derivative configuration and nginx examples](docs/BROWSER.md#cache-configuration-and-migration)
+
 ## Run locally
 
 Use Linux, Python 3.12, [uv](https://docs.astral.sh/uv/) and Node.js 24. Install `ffmpeg` and `ffprobe` for video posters and durations (`apt install ffmpeg` on Debian or Ubuntu).
