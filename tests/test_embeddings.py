@@ -1,4 +1,7 @@
 import fcntl
+import inspect
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 
@@ -13,7 +16,7 @@ from photocull.db.search import MAX_PENDING, REQUEST_TTL
 from photocull.media.cache import cache_path
 from photocull.worker import LibraryWorker
 from photocull.worker.ml import LibraryML
-from photocull.worker.ml.process import InferenceProcess
+from photocull.worker.ml.process import InferenceProcess, _child
 from tests.fake_embedding import FakeEmbedding
 from tests.worker_harness import photo
 
@@ -348,6 +351,25 @@ def test_inference_allocation_cap_is_applied_in_the_child(settings):
         assert all(blob for blob, error in inference.call("images", (paths,), lambda: None))
     finally:
         inference.close()
+
+
+def test_ml_child_imports_onnxruntime_before_the_engine():
+    source = inspect.getsource(_child)
+    assert source.index("import onnxruntime") < source.index(
+        "from photocull.worker.ml.engine import Engine"
+    )
+
+
+def test_onnxruntime_import_survives_when_it_precedes_usearch():
+    pytest.importorskip("onnxruntime")
+    pytest.importorskip("usearch")
+    completed = subprocess.run(
+        [sys.executable, "-c", "import onnxruntime; from usearch.index import Index"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_search_and_tag_flags_are_independent(settings):
