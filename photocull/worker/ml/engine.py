@@ -40,10 +40,12 @@ class Engine:
             raise ValueError("Invalid aesthetic head")
         return weights.astype("<f4").tobytes()
 
-    def faces(self, path: Path, revision: str, offline: bool, threads: int) -> list:
+    def faces(
+        self, path: Path, revision: str, offline: bool, threads: int, score: float, min_px: int
+    ) -> list:
         from photocull.worker.insights.face_model import FaceModel
 
-        key = (revision, offline, threads)
+        key = (revision, offline, threads, score, min_px)
         if self.face_key != key:
             try:
                 self.face_model = FaceModel(self.cache, *key)

@@ -58,8 +58,12 @@ Hugging Face Hub client.
   pixel size and detector confidence contribute to face quality. Five
   landmarks do not resolve eyelids, so the stage does not produce a closed-eye
   classification. SFace uses a 128-value float16 vector. An incremental HNSW
-  lookup assigns sufficiently similar faces to existing groups. Distant or
-  low-quality detections can remain singletons. Manual edits and named groups
+  lookup assigns sufficiently similar, high-quality faces to existing groups.
+  Low-quality detections are saved as unassigned. Open **Unassigned faces** to
+  assign them to an existing or new person. By default, People shows named
+  people with indexed faces and unnamed groups with faces in at least two
+  different photos. Use **Show small groups** to see all assigned groups.
+  The migration retains manual and named assignments. Those assignments also
   carry forward when a reprocessed box overlaps the original detection.
   Matched boxes retain their face IDs so in-progress selections remain valid.
   The worker checks current assignments after taking the same SQLite writer
@@ -76,11 +80,21 @@ Hugging Face Hub client.
   is displayed as coordinates. [GeoNames downloads and attribution terms](https://www.geonames.org/export/)
 - **Videos** samples low-resolution frames twice per second and 4-second
   audio levels. Motion, scene changes, audio energy and image detail rank
-  highlight candidates. Heuristics flag extremely short clips, unusually dark
-  and low-detail clips, possible pocket recordings, and static quiet clips.
-  The override can set or clear a flag explicitly or restore the automatic value.
+  highlight candidates. The blur measure scales edge strength by frame
+  contrast. Very short clips and possible pocket recordings receive an
+  automatic dead-clip flag. Other signals need corroboration. Darkness
+  contributes to the flag only with quiet audio or pocket evidence.
+  Review hints show reasons without setting a dead-clip flag. The video list
+  groups stabilized copies and copies with a YYYYMMDD or YYYY-MM-DD suffix
+  when their unique original is in the same folder and on the current page.
+  The override can set or clear the flag explicitly or restore the automatic
+  value. The API and export filters apply the current thresholds to stored
+  measurements. Changing a threshold leaves the measurements and proxy
+  reusable.
   Clicking a highlight plays its interval in a state-directory 720p H.264/AAC
-  proxy. Local speech recognition defaults to off. The optional base model
+  proxy. The worker reuses the proxy for the same source hash when analysis
+  changes. On upgrade, it moves matching legacy proxies to the current cache
+  name and removes stale copies. Local speech recognition defaults to off. The optional base model
   runs in INT8 with 30-second audio blocks and supplies seekable text and
   WebVTT captions. Codec, motion and speech results
   vary with source conditions. No original file changes are needed.
@@ -125,7 +139,17 @@ YAML section. All feature switches default to false.
 | `offline` | `OFFLINE` | `false`. Enables offline-only model loading for faces and speech. `ml.offline` controls SigLIP 2 separately. |
 | `threads` | `THREADS` | `2` for native Phase 4 stages |
 | `face_revision` | `FACE_REVISION` | `48b10fa505aeb51fbd127fc60a5c660040e823b7` |
+| `face_detect_score` | `FACE_DETECT_SCORE` | `0.85` YuNet confidence |
+| `face_min_px` | `FACE_MIN_PX` | `12` pixels on the detector input |
 | `face_threshold` | `FACE_THRESHOLD` | `0.45` SFace cosine |
+| `face_min_quality` | `FACE_MIN_QUALITY` | `0.12` for automatic assignment |
+| `people_min_faces` | `PEOPLE_MIN_FACES` | `2` |
+| `video_very_short_s` | `VIDEO_VERY_SHORT_S` | `1.5` seconds |
+| `video_dark_fraction` | `VIDEO_DARK_FRACTION` | `0.65` |
+| `video_pocket_fraction` | `VIDEO_POCKET_FRACTION` | `0.5` |
+| `video_blur_fraction` | `VIDEO_BLUR_FRACTION` | `0.8` |
+| `video_static_motion` | `VIDEO_STATIC_MOTION` | `0.008` |
+| `video_static_volume` | `VIDEO_STATIC_VOLUME` | `0.012` |
 | `taste_min_per_class` | `TASTE_MIN_PER_CLASS` | `8` |
 | `story_gap_minutes` | `STORY_GAP_MINUTES` | `90` |
 | `story_distance_km` | `STORY_DISTANCE_KM` | `15` |

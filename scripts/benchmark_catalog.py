@@ -287,7 +287,9 @@ def seed_insights(db, settings, size):
     while story.step(pulse):
         pass
     print(f"Full story build: {perf_counter() - start:,.2f} s")
-    query, arguments = select_assets(Selection(minimum_rating=0, person_id=2), {"faces": face})
+    query, arguments = select_assets(
+        db, Selection(minimum_rating=0, person_id=2), {"faces": face}, settings.insights
+    )
     start = perf_counter()
     assert len(db.execute(query, arguments).fetchall()) >= 1
     print(f"Keeper selection by person: {(perf_counter() - start) * 1000:,.2f} ms")

@@ -80,10 +80,11 @@ class ScoringSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     min_sharpness: Ratio = 0.02
-    min_exposure: Ratio = 0.08
-    max_exposure: Ratio = 0.92
-    max_clipped_highlights: Ratio = 0.25
-    max_clipped_shadows: Ratio = 0.40
+    min_exposure: Ratio = 0.012
+    max_exposure: Ratio = 0.95
+    max_clipped_highlights: Ratio = 0.85
+    max_clipped_shadows: Ratio = 0.98
+    min_detail_when_clipped: Ratio = 0.05
 
     @model_validator(mode="after")
     def validate_exposure(self) -> ScoringSettings:
@@ -167,7 +168,17 @@ class InsightSettings(BaseModel):
     offline: bool = False
     threads: int = Field(default=2, ge=1, le=8)
     face_revision: str = Field(default=DEFAULT_FACE_REVISION, pattern=r"^[a-f0-9]{40}$")
+    face_detect_score: Ratio = 0.85
+    face_min_px: int = Field(default=12, ge=1, le=960)
     face_threshold: Ratio = 0.45
+    face_min_quality: Ratio = 0.12
+    people_min_faces: int = Field(default=2, ge=1, le=2**63 - 1)
+    video_very_short_s: float = Field(default=1.5, ge=0, allow_inf_nan=False)
+    video_dark_fraction: Ratio = 0.65
+    video_pocket_fraction: Ratio = 0.5
+    video_blur_fraction: Ratio = 0.8
+    video_static_motion: Ratio = 0.008
+    video_static_volume: Ratio = 0.012
     taste_min_per_class: int = Field(default=8, ge=2, le=1000)
     story_gap_minutes: int = Field(default=90, ge=1, le=1440)
     story_distance_km: float = Field(default=15, gt=0, le=1000)

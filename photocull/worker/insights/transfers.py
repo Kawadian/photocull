@@ -278,7 +278,7 @@ class Transfers:
             raise ValueError("Face grouping is disabled")
         if config.selection.dead is not None and "video" not in keys:
             raise ValueError("Video analysis is disabled")
-        query, arguments = select_assets(config.selection, keys)
+        query, arguments = select_assets(self.db, config.selection, keys, self.settings.insights)
         # A temporary on-disk plan takes a consistent selection snapshot. Later ratings
         # are independent, and the source descriptor is checked for each copied file.
         self.db.execute("PRAGMA temp_store=FILE")

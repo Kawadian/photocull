@@ -6,7 +6,6 @@ from itertools import islice
 from photocull.db import write
 from photocull.db.insights import finish
 
-MIN_QUALITY = 0.12
 INDEX_BATCH = 512
 
 
@@ -34,7 +33,7 @@ def match_boxes(prior, detections, key):
     for manual, iou, index, row in overlaps:
         if iou >= 0.55 and index not in matched and row["id"] not in used:
             person = row["person_id"] if manual or row["key"] == key else None
-            matched[index] = row["id"], person, row["manual"] if person is not None else 0
+            matched[index] = row["id"], person, row["manual"] if person is not None else 0, manual
             used.add(row["id"])
     return matched, used
 
@@ -57,7 +56,7 @@ class FaceGroups:
                 threads=1,
             )
 
-    def prepare(self, db, key, pulse):
+    def prepare(self, db, key, min_quality, pulse):
         from usearch.index import Index
 
         rebuild = (
@@ -72,8 +71,9 @@ class FaceGroups:
                         """SELECT f.id, f.vector FROM faces AS f
                            JOIN assets AS a ON a.id = f.asset_id
                            WHERE f.key = ? AND a.active = 1 AND f.quality >= ?
+                             AND f.person_id IS NOT NULL
                              AND f.content_hash = a.content_hash ORDER BY f.id""",
-                        (key, MIN_QUALITY),
+                        (key, min_quality),
                     )
                 ) as rows:
                     while batch := list(islice(rows, INDEX_BATCH)):
@@ -85,10 +85,10 @@ class FaceGroups:
                 """SELECT d.id, CASE WHEN a.active=1 AND f.content_hash=a.content_hash
                                       THEN f.vector END AS vector
                    FROM face_index_dirty AS d LEFT JOIN faces AS f
-                     ON f.id = d.id AND f.key = ? AND f.quality >= ?
+                     ON f.id = d.id AND f.key = ? AND f.quality >= ? AND f.person_id IS NOT NULL
                    LEFT JOIN assets AS a ON a.id = f.asset_id
                    ORDER BY d.id LIMIT ?""",
-                (key, MIN_QUALITY, INDEX_BATCH),
+                (key, min_quality, INDEX_BATCH),
             ).fetchall():
                 pulse()
                 for row in batch:
@@ -112,7 +112,7 @@ class FaceGroups:
                 break
             row = db.execute(
                 """SELECT f.person_id FROM faces AS f JOIN assets AS a ON a.id = f.asset_id
-                   WHERE f.id = ? AND f.asset_id <> ? AND a.active = 1
+                   WHERE f.id = ? AND f.asset_id <> ? AND a.active = 1 AND f.person_id IS NOT NULL
                      AND f.content_hash=a.content_hash""",
                 (int(hit.key), asset_id),
             ).fetchone()
@@ -120,35 +120,44 @@ class FaceGroups:
                 return row[0]
         return None
 
-    def save(self, db, key, threshold, asset, detections, pulse):
+    def save(self, db, key, config, asset, detections, pulse):
+        min_quality = config.face_min_quality
         asset_id = asset["id"]
         # An empty detection still replaces obsolete boxes. Only a photo that can
         # join an existing group needs the nearest-neighbor index.
-        if any(quality >= MIN_QUALITY for _, _, quality, _ in detections):
-            self.prepare(db, key, pulse)
+        if any(quality >= min_quality for _, _, quality, _ in detections):
+            self.prepare(db, key, min_quality, pulse)
         with write(db):
             prior = db.execute(
                 """SELECT f.id, f.person_id, f.manual, f.left, f.top, f.right, f.bottom,
                           f.key, p.name
-                   FROM faces AS f JOIN people AS p ON p.id = f.person_id WHERE f.asset_id = ?""",
+                   FROM faces AS f LEFT JOIN people AS p ON p.id = f.person_id
+                   WHERE f.asset_id = ?""",
                 (asset_id,),
             ).fetchall()
             # Read assignments after acquiring the writer lock. A rename, split,
             # or merge committed during detection is authoritative here.
             matched, used = match_boxes(prior, detections, key)
-            reserved = {person for _, person, _ in matched.values() if person is not None}
+            reserved = {
+                person
+                for index, (_, person, _, protected) in matched.items()
+                if person is not None and (protected or detections[index][2] >= min_quality)
+            }
             db.executemany(
                 "DELETE FROM faces WHERE id = ?", ((r["id"],) for r in prior if r["id"] not in used)
             )
             for index, (box, confidence, quality, vector) in enumerate(detections):
-                face, person, manual = matched.get(index, (None, None, 0))
-                if person is None and quality >= MIN_QUALITY:
-                    person = self.nearest(db, asset_id, vector, threshold, reserved)
-                if person is None:
-                    person = db.execute(
-                        "INSERT INTO people DEFAULT VALUES RETURNING id"
-                    ).fetchone()[0]
-                reserved.add(person)
+                face, person, manual, protected = matched.get(index, (None, None, 0, False))
+                if quality < min_quality and not protected:
+                    person = None
+                elif person is None:
+                    person = self.nearest(db, asset_id, vector, config.face_threshold, reserved)
+                    if person is None:
+                        person = db.execute(
+                            "INSERT INTO people DEFAULT VALUES RETURNING id"
+                        ).fetchone()[0]
+                if person is not None:
+                    reserved.add(person)
                 db.execute(
                     """INSERT INTO faces(id, asset_id, person_id, key, content_hash, left, top,
                                          right, bottom, confidence, quality, vector, manual)

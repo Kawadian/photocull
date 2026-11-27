@@ -17,7 +17,7 @@ from photocull.db.catalog import mark_catalog_updated
 from photocull.db.insights import public_keys, queue, stage_key
 from photocull.db.stories import days, segments
 from photocull.db.transfers import ExportRequest, ReportRequest, cancel, enqueue, public
-from photocull.insights import taste_input
+from photocull.insights import classify_video, taste_input
 from photocull.media.artifacts import artifact_name, open_regular, transfer_directory
 from photocull.media.cache import video_path
 
@@ -46,6 +46,11 @@ class MergePeople(BaseModel):
 class SplitPerson(BaseModel):
     faces: list[BodyId] = Field(min_length=1, max_length=200)
     name: Name | None = None
+
+
+class AssignFaces(SplitPerson):
+    person_id: BodyId | None = None
+    expected_revision: int | None = Field(default=None, ge=0, le=MAX_ID)
 
 
 class TransferDownload(Response):
@@ -242,7 +247,7 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
         return {"status": "pending"}
 
     @app.get(PREFIX + "/people")
-    def people(library: str, cursor: After = 0, limit: Limit = 40):
+    def people(library: str, cursor: After = 0, limit: Limit = 40, include_small: bool = False):
         with connect(library_path(library)) as db:
             key = face_key(db, settings)
             rows = db.execute(
@@ -256,17 +261,65 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
                     WHERE f.person_id = p.id AND f.key = :key AND a.active = 1
                     AND f.content_hash=a.content_hash
                     ORDER BY f.quality DESC, f.id LIMIT 1) AS cover
-                   FROM people AS p WHERE p.id > :cursor AND EXISTS (
+                   FROM people AS p WHERE p.id > :cursor
+                   AND (p.name IS NOT NULL OR EXISTS (
                     SELECT 1 FROM faces AS f JOIN assets AS a ON a.id = f.asset_id
                     WHERE f.person_id = p.id AND f.key = :key AND a.active = 1
-                    AND f.content_hash=a.content_hash)
+                    AND f.content_hash = a.content_hash
+                    GROUP BY f.asset_id LIMIT 1 OFFSET :min_photo_offset))
+                   AND cover IS NOT NULL
                    ORDER BY p.id LIMIT :limit""",
-                {"key": key, "cursor": cursor, "limit": limit + 1},
+                {
+                    "key": key,
+                    "cursor": cursor,
+                    "limit": limit + 1,
+                    "min_photo_offset": 0 if include_small else config.people_min_faces - 1,
+                },
             ).fetchall()
         result = page(rows, limit)
         for item in result["items"]:
             item["cover"] = json.loads(item["cover"])
         return result
+
+    @app.get(PREFIX + "/faces/unassigned")
+    def unassigned_faces(library: str, cursor: After = 0, limit: Limit = 40):
+        with connect(library_path(library)) as db:
+            key = face_key(db, settings)
+            rows = db.execute(
+                """SELECT f.id, f.asset_id, f.left, f.top, f.right, f.bottom, f.quality,
+                          f.confidence, a.path, a.content_hash
+                   FROM faces AS f JOIN assets AS a ON a.id = f.asset_id
+                   WHERE f.person_id IS NULL AND f.key = ? AND a.active = 1 AND f.id > ?
+                     AND f.content_hash = a.content_hash
+                   ORDER BY f.id LIMIT ?""",
+                (key, cursor, limit + 1),
+            ).fetchall()
+        return page(rows, limit)
+
+    @app.post(PREFIX + "/faces/unassigned/assign")
+    def assign_faces(library: str, body: AssignFaces):
+        faces = set(body.faces)
+        with connect(library_path(library)) as db, write(db):
+            key = face_key(db, settings)
+            target = body.person_id
+            if target is None:
+                target = db.execute(
+                    "INSERT INTO people(name) VALUES (?) RETURNING id", (body.name,)
+                ).fetchone()[0]
+            else:
+                check_person(db, target, body.expected_revision)
+                db.execute("UPDATE people SET revision = revision + 1 WHERE id = ?", (target,))
+            moved = db.execute(
+                """UPDATE faces SET person_id = ?, manual = 1 WHERE person_id IS NULL AND key = ?
+                   AND id IN (SELECT value FROM json_each(?))
+                   AND EXISTS (SELECT 1 FROM assets AS a WHERE a.id = faces.asset_id
+                               AND a.active = 1 AND a.content_hash = faces.content_hash)""",
+                (target, key, json.dumps(sorted(faces))),
+            ).rowcount
+            if moved != len(faces):
+                raise HTTPException(409, "Face membership changed. Reload and select faces again.")
+            mark_catalog_updated(db)
+            return {"id": target, "moved": moved}
 
     @app.get(PREFIX + "/people/{person_id}/faces")
     def person_faces(library: str, person_id: Id, cursor: After = 0, limit: Limit = 40):
@@ -385,6 +438,9 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
                     "SELECT 1 FROM insight_work WHERE stage = ? AND asset_id = ?",
                     (stage, asset_id),
                 ).fetchone()
+                data = json.loads(row["payload"]) if row and row["payload"] else None
+                if stage == "video" and data is not None:
+                    data["reasons"], data["dead"] = classify_video(data, config)
                 output[stage] = {
                     "status": "pending"
                     if pending or row is None
@@ -392,7 +448,7 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
                     if row["error"]
                     else "done",
                     "error": row["error"] if row else None,
-                    "data": json.loads(row["payload"]) if row and row["payload"] else None,
+                    "data": data,
                 }
             return output
 
@@ -408,7 +464,7 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
                    AND content_hash=? AND json_extract(payload, '$.preview')=1""",
                 (asset_id, key, asset["content_hash"]),
             ).fetchone()
-        target = video_path(path.parent, asset_id, asset["content_hash"], key)
+        target = video_path(path.parent, asset_id, asset["content_hash"])
         if row is None:
             raise HTTPException(404, "Video preview unavailable")
         return cached_media(target, "video/mp4")

@@ -37,10 +37,11 @@ worker:
 #   accel_redirect: false # Enable with matching internal nginx aliases.
 # scoring:
 #   min_sharpness: 0.02
-#   min_exposure: 0.08
-#   max_exposure: 0.92
-#   max_clipped_highlights: 0.25
-#   max_clipped_shadows: 0.40
+#   min_exposure: 0.012
+#   max_exposure: 0.95
+#   max_clipped_highlights: 0.85
+#   max_clipped_shadows: 0.98
+#   min_detail_when_clipped: 0.05
 # burst:
 #   window_seconds: 2
 #   max_hamming_distance: 8
@@ -65,9 +66,20 @@ worker:
 #   aesthetic: true          # Also enable ml.enabled.
 #   taste: true
 #   faces: true
+#   face_detect_score: 0.85
+#   face_min_px: 12
+#   face_threshold: 0.45
+#   face_min_quality: 0.12
+#   people_min_faces: 2
 #   story: true
 #   # story_geonames: /var/lib/photocull/geodata/cities1000.txt
 #   video: true
+#   video_very_short_s: 1.5
+#   video_dark_fraction: 0.65
+#   video_pocket_fraction: 0.5
+#   video_blur_fraction: 0.8
+#   video_static_motion: 0.008
+#   video_static_volume: 0.012
 #   transcript: false
 #   watch: true
 #   watch_mode: auto          # Use poll for a remote mount with unreliable events.

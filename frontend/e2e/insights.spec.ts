@@ -153,3 +153,36 @@ test('mobile export reports validation errors and allows a queued transfer to be
   await page.keyboard.press('Enter')
   await expect(page.getByText('cancelled', { exact: true })).toBeVisible()
 })
+
+test('video copies stay together and a review hint can be overridden', async ({ page }) => {
+  const paths = ['event/walk.mov', 'event/other.mov', 'event/walk_stabilized.mp4',
+    'event/walk_2025-02-03.mp4', 'other/walk_stabilized.mp4']
+  await page.route('**/assets?kind=video&*', (route) => route.fulfill({
+    json: { items: paths.map((path, i) => ({ id: i + 1, path, content_hash: 'fixture' })), next_cursor: null },
+  }))
+  let override: boolean | null = null
+  await page.route('**/insights/assets/*/video', (route) => {
+    if (route.request().method() === 'PATCH') {
+      override = route.request().postDataJSON().dead
+      return route.fulfill({ json: { override } })
+    }
+    return route.fulfill({ json: {
+      override, video: { status: 'done', data: {
+        dead: false, reasons: ['mostly_dark'], duration: 10, highlights: [], preview: false,
+      } },
+    } })
+  })
+  await page.goto('/')
+  await page.getByLabel('Library', { exact: true }).selectOption('insights')
+  await page.getByRole('button', { name: 'Videos', exact: true }).click()
+  const copies = page.getByRole('group', { name: 'Versions of walk.mov' })
+  await expect(copies.getByRole('button')).toHaveCount(3)
+  await expect(copies.getByRole('button', { name: 'walk.mov' })).toHaveAttribute('aria-current', 'true')
+  await page.keyboard.press('ArrowRight')
+  await expect(copies.getByRole('button', { name: 'walk_stabilized.mp4' })).toHaveAttribute('aria-current', 'true')
+  await expect(page.getByText('Review suggested · Mostly dark')).toBeVisible()
+  await page.getByRole('button', { name: 'Flag as dead clip' }).click()
+  await expect(page.getByText('Flagged as a dead clip · Mostly dark')).toBeVisible()
+  await page.getByRole('button', { name: 'Restore automatic flag' }).click()
+  await expect(page.getByText('Review suggested · Mostly dark')).toBeVisible()
+})

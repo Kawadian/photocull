@@ -120,7 +120,7 @@ class LibraryWorker:
                     break
         for variant in CACHE_DIRS:
             prune_artifacts(self.state / variant, ".[0-9]*-*-*")
-        configure_scoring(self.db, self.settings.scoring, self.pulse)
+        configure_scoring(self.db, self.state, self.settings.scoring, self.pulse)
         if self.ml is not None:
             self.ml.configure()
         if self.insights is not None:

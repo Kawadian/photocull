@@ -52,7 +52,8 @@ def timeline(tmp_path):
                     db.execute("""UPDATE assets SET make='Sony',model='A7',lens='FE 35 mm',
                                    rating=4 WHERE id = 5""")
                     db.execute("""
-                        INSERT INTO asset_scores
+                        INSERT INTO asset_scores (asset_id, sharpness, exposure, clipped_highlights,
+                                                  clipped_shadows, dhash, suggested_reject_reason)
                         VALUES (5,.72,.6,0,0,'3333333333333333',NULL),
                                (3,.12,.4,0,0,'2222222222222222','soft_focus')
                     """)

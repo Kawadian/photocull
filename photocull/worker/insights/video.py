@@ -5,16 +5,19 @@ import json
 import logging
 import math
 import os
+import re
 import selectors
+import stat
 import subprocess
 import time
 from contextlib import closing, contextmanager
 from pathlib import Path
 
+from photocull.config import InsightSettings
 from photocull.media.artifacts import prune_artifacts, stage_artifact
 from photocull.media.cache import video_path
 from photocull.media.decode import VIDEO_FORMATS
-from photocull.media.walk import MediaJail, SourceChanged, source_key
+from photocull.media.walk import MediaJail, SourceChanged, open_directory, source_key
 
 LOG = logging.getLogger(__name__)
 FRAME = (90, 160)
@@ -164,11 +167,11 @@ def audio_levels(source, fd, threads, pulse):
             yield float(np.sqrt(np.mean(samples**2)) / 32768) if len(samples) else 0
 
 
-def metrics(source, fd, threads, duration, has_audio, pulse):
+def metrics(source, fd, config: InsightSettings, duration, has_audio, pulse):
     import numpy as np
 
     args = [
-        *ffmpeg(source, threads),
+        *ffmpeg(source, config.threads),
         "-map",
         "0:V:0",
         "-an",
@@ -180,7 +183,7 @@ def metrics(source, fd, threads, duration, has_audio, pulse):
         "rawvideo",
         "pipe:1",
     ]
-    levels = audio_levels(source, fd, threads, pulse) if has_audio else iter(())
+    levels = audio_levels(source, fd, config.threads, pulse) if has_audio else iter(())
     count = black = blurry = pocket = cuts = 0
     motion_sum = volume_sum = 0.0
     candidates = []
@@ -215,7 +218,10 @@ def metrics(source, fd, threads, duration, has_audio, pulse):
             image = np.frombuffer(data, dtype=np.uint8).reshape(FRAME).astype(np.float32) / 255
             darkness = float(np.mean(image)) < 0.09
             edges = float(np.mean(np.abs(np.diff(image, axis=0))))
-            blur = edges < 0.012
+            # Scale the edge cutoff down for flat profiles while keeping the
+            # original cutoff for normal contrast and a floor for near-flat noise.
+            contrast = max(0.025, min(float(image.std()), 0.1))
+            blur = edges < 0.12 * contrast
             motion = float(np.mean(np.abs(prior - image))) if prior is not None else 0.0
             scene = motion > 0.24 and not darkness
             count += 1
@@ -237,17 +243,9 @@ def metrics(source, fd, threads, duration, has_audio, pulse):
     duration = duration or count / FRAME_RATE
     if not duration:
         raise ValueError("The clip has no decodable video frames")
-    reasons = []
-    if duration < 1.5:
-        reasons.append("very_short")
-    if black / max(1, count) >= 0.65:
-        reasons.append("mostly_dark")
-    if pocket / max(1, count) >= 0.50:
-        reasons.append("possible_pocket_recording")
-    if blurry / max(1, count) >= 0.80:
-        reasons.append("low_detail_or_blur")
-    if duration >= 4 and motion_sum / max(1, count) < 0.008 and volume_sum / max(1, count) < 0.012:
-        reasons.append("static_and_quiet")
+    samples = max(1, count)
+    motion, volume = motion_sum / samples, volume_sum / samples
+    dark_fraction, blur_fraction = black / samples, blurry / samples
     ranked = sorted(candidates, reverse=True)[:12]
     highlights = []
     for score, start, end in sorted(ranked, key=lambda item: -item[1]):
@@ -263,11 +261,11 @@ def metrics(source, fd, threads, duration, has_audio, pulse):
     return {
         "duration": duration,
         "highlights": highlights,
-        "reasons": reasons,
-        "motion": motion_sum / max(1, count),
-        "volume": volume_sum / max(1, count),
-        "dark_fraction": black / max(1, count),
-        "blur_fraction": blurry / max(1, count),
+        "motion": motion,
+        "volume": volume,
+        "dark_fraction": dark_fraction,
+        "pocket_fraction": pocket / samples,
+        "blur_fraction": blur_fraction,
         "scene_changes": cuts,
         "has_audio": has_audio,
     }
@@ -384,7 +382,45 @@ def transcribe(worker, source, fd, audio, pulse):
     return {"segments": result, "has_audio": True}
 
 
-def run_stage(worker, stage, asset, key, pulse):
+def migrate_video_proxies(db, state: Path, pulse) -> None:
+    directory = state / "video"
+    legacy_name = re.compile(r"([1-9][0-9]{0,18})-([0-9a-f]{64})-[0-9a-f]{64}\.mp4")
+    try:
+        with open_directory(directory.absolute()) as parent, os.scandir(parent) as entries:
+            for entry in entries:
+                pulse()
+                match = legacy_name.fullmatch(entry.name)
+                if not match or entry.is_dir(follow_symlinks=False):
+                    continue
+                asset_id, digest = match.groups()
+                current = db.execute(
+                    """SELECT 1 FROM assets WHERE id = ? AND active = 1
+                       AND kind = 'video' AND content_hash = ?""",
+                    (asset_id, digest),
+                ).fetchone()
+                target = video_path(state, int(asset_id), digest)
+                try:
+                    if current and entry.is_file(follow_symlinks=False):
+                        try:
+                            info = os.stat(target.name, dir_fd=parent, follow_symlinks=False)
+                            has_proxy = stat.S_ISREG(info.st_mode)
+                        except FileNotFoundError:
+                            has_proxy = False
+                        if not has_proxy:
+                            os.replace(
+                                entry.name, target.name, src_dir_fd=parent, dst_dir_fd=parent
+                            )
+                            continue
+                    os.unlink(entry.name, dir_fd=parent)
+                except FileNotFoundError:
+                    continue
+                except OSError as error:
+                    LOG.warning("Could not migrate video proxy %s: %s", entry.name, error)
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+
+
+def run_stage(worker, stage, asset, pulse):
     jail = MediaJail(worker.library, worker.settings.state_dir)
     config = worker.settings.insights
 
@@ -402,17 +438,20 @@ def run_stage(worker, stage, asset, key, pulse):
             results = transcribe(worker, source, fd, audio, pulse)
             verify_source()
             return results
-        results = metrics(source, fd, config.threads, duration, audio, pulse)
-        target = video_path(worker.state, asset["id"], asset["content_hash"], key)
+        results = metrics(source, fd, config, duration, audio, pulse)
+        target = video_path(worker.state, asset["id"], asset["content_hash"])
         try:
-            with proxy(source, fd, config.threads, target, pulse) as staged:
+            if not target.is_symlink() and target.is_file():
                 verify_source()
-                staged.replace(staged.with_name(target.name))
+            else:
+                with proxy(source, fd, config.threads, target, pulse) as staged:
+                    verify_source()
+                    staged.replace(staged.with_name(target.name))
         except SourceChanged:
             raise
         except (OSError, ValueError) as error:
             verify_source()
             results["preview_error"] = str(error)
-        results["preview"] = target.is_file()
+        results["preview"] = not target.is_symlink() and target.is_file()
     prune_artifacts(target.parent, f"{asset['id']}-*.mp4", keep=target.name)
     return results

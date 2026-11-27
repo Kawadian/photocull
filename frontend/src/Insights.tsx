@@ -1,4 +1,4 @@
-import { Archive, CalendarDays, Film, FolderOutput, Image, Map, Sparkles, Users } from 'lucide-react'
+import { Archive, CalendarDays, Film, FolderOutput, Image, Map as MapIcon, Sparkles, Users } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { assetName, json, mediaUrl, message, request, useRemote } from './api'
@@ -13,7 +13,7 @@ export const views = [
   { id: 'video', label: 'Videos', icon: Film },
   { id: 'taste', label: 'Recommendations', icon: Sparkles },
   { id: 'export', label: 'Exports', icon: FolderOutput },
-  { id: 'report', label: 'Trip reports', icon: Map },
+  { id: 'report', label: 'Trip reports', icon: MapIcon },
   { id: 'archive', label: 'Archive', icon: Archive },
 ] as const
 export type View = typeof views[number]['id']
@@ -136,7 +136,7 @@ function PersonDetail({ base, initial, version, openReview, beginMerge, openPers
     </div>
     <form className="insight-actions" onSubmit={(event) => {
       event.preventDefault()
-      void work.action<Person>(url, json('PATCH', { name: name.trim() || null, expected_revision: person.revision }),
+      void work.action<Person>(url, json('PATCH', { name: name.trim() || null, expected_revision: current.revision }),
         (value) => setPerson({ ...person, ...value })).catch(() => {})
     }}>
       <label>Person name <input value={name} maxLength={120} onChange={(event) => setName(event.target.value)} /></label>
@@ -179,24 +179,54 @@ function People(props: ScreenProps) {
   const [person, setPerson] = useState<Person>()
   const [source, setSource] = useState<Person>()
   const [target, setTarget] = useState<Person>()
+  const [includeSmall, setIncludeSmall] = useState(false)
+  const [showUnassigned, setShowUnassigned] = useState(false)
+  const [assigning, setAssigning] = useState<number[]>([])
   const cursor = usePageCursor(0)
   const work = useAction(version)
   const url = `${base}/insights/people`
-  const result = useRemote<Page<Person>>(person ? null : `${url}?cursor=${cursor.cursor}`, work.version)
+  const result = useRemote<Page<Person>>(person || showUnassigned ? null :
+    `${url}?cursor=${cursor.cursor}&include_small=${includeSmall || !!assigning.length}`, work.version)
+  const assignUrl = `${base}/insights/faces/unassigned/assign`
+  if (showUnassigned) return <UnassignedFaces base={base} version={work.version} url={assignUrl}
+    close={() => { setShowUnassigned(false); work.retry() }}
+    choosePerson={(faces) => { setAssigning(faces); setShowUnassigned(false); cursor.reset() }} />
   const people = result?.data?.items ?? []
   if (person) return <PersonDetail key={person.id} {...props} initial={person} openPerson={setPerson} close={() => setPerson(undefined)}
     beginMerge={(entry) => { setSource(entry); setPerson(undefined) }} />
   return <>
+    <div className="insight-actions">
+      {assigning.length ? <>
+        <span role="status">Choose a person for {assigning.length} selected {assigning.length === 1 ? 'face' : 'faces'}.</span>
+        <button className="button secondary" onClick={() => { setAssigning([]); setShowUnassigned(true) }}>Cancel</button>
+      </> : <>
+        <label><input type="checkbox" checked={includeSmall} onChange={(event) => {
+          setIncludeSmall(event.target.checked)
+          cursor.reset()
+        }} /> Show small groups</label>
+        {!source && <button className="button secondary" onClick={() => setShowUnassigned(true)}>Unassigned faces</button>}
+      </>}
+    </div>
     {source && <div className="insight-actions" role="status">
       Choose who should receive the faces from <strong>{personName(source)}</strong>.
       <button className="button secondary" onClick={() => setSource(undefined)}>Cancel merge</button>
     </div>}
-    <Status error={result?.error || capability.stages.faces?.error}
+    <Status error={work.error || result?.error || capability.stages.faces?.error}
       pending={!result || (!people.length && capability.stages.faces?.pending)} empty={!people.length}
       retry={work.retry}>No faces found in this library.</Status>
     <div className="insight-grid">
-      {people.map((item) => <button className="insight-card" key={item.id} disabled={item.id === source?.id}
-        onClick={() => source ? setTarget(item) : setPerson(item)}>
+      {people.map((item) => <button className="insight-card" key={item.id} disabled={work.busy || item.id === source?.id}
+        onClick={() => {
+          if (assigning.length) {
+            void work.action(assignUrl, json('POST', {
+              faces: assigning, person_id: item.id, expected_revision: item.revision,
+            }), () => { setAssigning([]); setPerson(item) }).catch(() => {})
+          } else if (source) {
+            setTarget(item)
+          } else {
+            setPerson(item)
+          }
+        }}>
         <FacePicture base={base} face={item.cover} />
         <strong>{personName(item)}</strong>
         <span>{item.count} {item.count === 1 ? 'photo' : 'photos'}</span>
@@ -214,6 +244,47 @@ function People(props: ScreenProps) {
           setPerson({ ...target, name, revision, count: target.count + source.count })
         })} />}
   </>
+}
+
+function UnassignedFaces({ base, version, url, close, choosePerson }: {
+  base: string; version: number; url: string; close: () => void; choosePerson: (ids: number[]) => void
+}) {
+  const cursor = usePageCursor(0)
+  const work = useAction(version)
+  const [selected, setSelected] = useState<number[]>([])
+  const [name, setName] = useState('')
+  const result = useRemote<Page<Face>>(`${base}/insights/faces/unassigned?cursor=${cursor.cursor}`, work.version)
+  const faces = result?.data?.items ?? []
+  return <section className="insight-section">
+    <h2>Unassigned faces</h2>
+    <button className="button secondary" onClick={close}>All people</button>
+    <Status error={work.error || result?.error} pending={!result} empty={!faces.length}
+      retry={() => { setSelected([]); work.retry() }}>No unassigned faces.</Status>
+    {!!faces.length && <fieldset className="insight-fieldset">
+      <legend>Select faces to assign</legend>
+      <div className="insight-grid">
+        {faces.map((face) => <label className="insight-card selectable" key={face.id}>
+          <FacePicture base={base} face={face} />
+          <span><input type="checkbox" checked={selected.includes(face.id)} onChange={() =>
+            setSelected((all) => all.includes(face.id) ? all.filter((id) => id !== face.id) : [...all, face.id])
+          } /> {assetName(face)}</span>
+        </label>)}
+      </div>
+      <form className="insight-actions" onSubmit={(event) => {
+        event.preventDefault()
+        void work.action(url, json('POST', { faces: selected, name: name.trim() || null }),
+          () => { setSelected([]); setName(''); cursor.reset() }).catch(() => {})
+      }}>
+        <button className="button secondary" type="button" disabled={!selected.length || work.busy}
+          onClick={() => choosePerson(selected)}>Assign to existing person</button>
+        <label>New person name <input value={name} maxLength={120}
+          onChange={(event) => setName(event.target.value)} /></label>
+        <button className="button primary" disabled={!selected.length || work.busy}>Create person</button>
+      </form>
+    </fieldset>}
+    <Paging {...cursor} previous={() => { setSelected([]); cursor.previous() }} next={result?.data?.next_cursor}
+      forward={() => { setSelected([]); cursor.forward(result?.data?.next_cursor) }} />
+  </section>
 }
 
 type StoryDay = { day: string; count: number; segments: number }
@@ -330,7 +401,7 @@ type Highlight = { start: number; end: number; score: number }
 type Stage<T> = { status: 'pending' | 'done' | 'error'; error: string | null; data: T | null }
 type VideoAnalysis = {
   override: boolean | null
-  video: Stage<{ duration: number; highlights: Highlight[]; reasons: string[]
+  video: Stage<{ duration: number; highlights: Highlight[]; reasons: string[]; dead: boolean
     preview: boolean; preview_error?: string; scene_changes: number }>
   transcript?: Stage<{ has_audio: boolean; segments: { start: number; end: number; text: string }[] }>
 }
@@ -355,7 +426,8 @@ function VideoDetail({ base, version, asset, enabled }: {
   const analysis = result?.data?.video
   const transcript = result?.data?.transcript
   const reasons = analysis?.data?.reasons ?? []
-  const flagged = result?.data?.override ?? reasons.length > 0
+  const flagged = result?.data?.override ?? analysis?.data?.dead ?? false
+  const needsReview = result?.data?.override === null && !flagged && reasons.length > 0
   function play(start: number, end?: number) {
     const player = video.current
     if (!player) return
@@ -401,7 +473,7 @@ function VideoDetail({ base, version, asset, enabled }: {
     </section>}
     {result?.data && <section>
       <h3>Clip flag</h3>
-      <p className="insight-muted" role="status">{flagged ? 'Flagged as a dead clip' : 'No dead-clip flag'}
+      <p className="insight-muted" role="status">{flagged ? 'Flagged as a dead clip' : needsReview ? 'Review suggested' : 'No dead-clip flag'}
         {reasons.length ? ` · ${reasons.map((reason) => deadReasons[reason] ?? reason).join(', ')}` : ''}</p>
       <div className="insight-actions">
         <button className="button secondary" disabled={work.busy}
@@ -429,11 +501,32 @@ function VideoDetail({ base, version, asset, enabled }: {
   </section>
 }
 
+function videoGroups(assets: Asset[]) {
+  const stem = (asset: Asset) => asset.path.replace(/\.[^/.]+$/, '')
+  const originalStem = (asset: Asset) => stem(asset).replace(/[_ -](?:stabilized|20\d{2}[-_]?\d{2}[-_]?\d{2})$/i, '')
+  const originals = new Map<string, Asset[]>()
+  for (const asset of assets) {
+    if (stem(asset) !== originalStem(asset)) continue
+    const key = stem(asset)
+    originals.set(key, [...(originals.get(key) ?? []), asset])
+  }
+  const groups = new Map<number, Asset[]>()
+  for (const asset of assets) {
+    const candidates = originals.get(originalStem(asset))
+    const original = candidates?.length === 1 ? candidates[0] : asset
+    const group = groups.get(original.id) ?? [original]
+    if (asset.id !== original.id) group.push(asset)
+    groups.set(original.id, group)
+  }
+  return [...groups.values()]
+}
+
 function Videos({ base, version, capability, start }: ScreenProps & { start?: number }) {
   const cursor = usePageCursor(start ? start - 1 : 0)
   const work = useAction(version)
   const result = useRemote<Page<Asset>>(`${base}/assets?kind=video&limit=30&cursor=${cursor.cursor}`, work.version)
-  const assets = result?.data?.items ?? []
+  const groups = videoGroups(result?.data?.items ?? [])
+  const assets = groups.flat()
   const [selected, setSelected] = useState<number>()
   const active = assets.find((item) => item.id === selected) ?? assets[0]
   const index = assets.findIndex((item) => item.id === active?.id)
@@ -452,9 +545,15 @@ function Videos({ base, version, capability, start }: ScreenProps & { start?: nu
     </Status>
     {active && <div className="video-layout">
       <div className="insight-list video-list" aria-label="Clips">
-        {assets.map((asset) => <button className="insight-row" key={asset.id}
-          aria-current={active.id === asset.id ? 'true' : undefined}
-          onClick={() => setSelected(asset.id)}>{assetName(asset)}</button>)}
+        {groups.map((group) => {
+          const items = group.map((asset) => <button className="insight-row" key={asset.id}
+            aria-current={active.id === asset.id ? 'true' : undefined}
+            onClick={() => setSelected(asset.id)}>{assetName(asset)}</button>)
+          return group.length > 1
+            ? <div className="insight-list video-group" role="group" key={group[0].id}
+                aria-label={`Versions of ${assetName(group[0])}`}>{items}</div>
+            : items[0]
+        })}
         <Paging {...cursor} next={result?.data?.next_cursor}
           forward={() => cursor.forward(result?.data?.next_cursor)} />
       </div>

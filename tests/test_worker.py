@@ -198,12 +198,24 @@ def test_scores_wait_for_preview_and_preserve_dismissal_on_retry(tmp_path):
         assert get_asset(db, 1)["auto_reject_reason"] is None
         assert db.execute("SELECT attempts FROM jobs WHERE stage = 'score'").fetchone()[0] == 3
 
+        # Simulate an existing row awaiting the migration backfill. The source can
+        # be offline while the new signals are filled from its existing preview.
+        offline = photo.rename(root / "a.offline")
+        db.execute("UPDATE asset_scores SET detail=NULL, bright_p99=NULL, dark_p01=NULL")
         worker.settings = Settings(scoring=ScoringSettings(max_clipped_highlights=1))
         worker.configure()
         assert db.execute("SELECT suggested_reject_reason FROM asset_scores").fetchone()[0] == (
             "overexposed"
         )
         assert get_asset(db, 1)["auto_reject_reason"] is None
+        assert tuple(
+            db.execute("SELECT detail, bright_p99, dark_p01 FROM asset_scores").fetchone()
+        ) == (
+            0,
+            1,
+            1,
+        )
+        offline.rename(photo)
         assert photo.read_bytes() == original
         assert sidecar.read_bytes() == b"user sidecar"
 
