@@ -1,3 +1,5 @@
+import base64
+import re
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
@@ -303,7 +305,11 @@ def test_day_stories_report_and_keeper_outputs(tmp_path):
                     "日本.jpg",
                 ):
                     assert (value in report.text) is include
-                assert "data:image/jpeg;base64," in report.text
+                thumbnails = re.findall(r"data:image/jpeg;base64,([A-Za-z0-9+/=]+)", report.text)
+                assert thumbnails
+                for encoded in thumbnails:
+                    with Image.open(BytesIO(base64.b64decode(encoded))) as thumbnail:
+                        assert not thumbnail.getexif().get_ifd(34853)
                 assert report.headers["Cache-Control"] == "private, no-store"
                 assert "Content-Security-Policy" in report.headers
         assert {path.name: path.read_bytes() for path in root.iterdir()} == originals

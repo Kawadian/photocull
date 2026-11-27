@@ -240,6 +240,8 @@ def test_metadata_only_copy_keeps_format_and_essence(tmp_path, suffix):
         with Image.new("RGB", (80, 60), "green") as image:
             image.save(source, format="HEIF", exif=jpeg_exif((35.25, 139.25)))
     if suffix == ".dng":
+        payload = tmp_path / "embedded-original"
+        payload.write_bytes(b"Synthetic embedded RAW payload with private metadata")
         subprocess.run(
             [
                 "exiftool",
@@ -248,6 +250,8 @@ def test_metadata_only_copy_keeps_format_and_essence(tmp_path, suffix):
                 "-GPSLatitudeRef=N",
                 "-GPSLongitude=139.25",
                 "-GPSLongitudeRef=E",
+                f"-OriginalRawFileData<={payload}",
+                "-OriginalRawFileName=original.raw",
                 source,
             ],
             check=True,
@@ -255,8 +259,12 @@ def test_metadata_only_copy_keeps_format_and_essence(tmp_path, suffix):
         )
     original = source.read_bytes()
     tools = Tools(ArchiveSettings(), lambda: None)
-    tags = ("exiftool", "-j", "-n", "-GPSLatitude", "-GPSCoordinates")
-    assert len(json.loads(tools.run(*tags, source))[0]) > 1
+    tags = ("exiftool", "-j", "-n", "-GPSLatitude", "-GPSCoordinates", "-OriginalRawFileName")
+    original_tags = json.loads(tools.run(*tags, source))[0]
+    assert len(original_tags) > 1
+    if suffix == ".dng":
+        assert original_tags["OriginalRawFileName"] == "original.raw"
+        assert tools.run("exiftool", "-b", "-OriginalRawFileData", source) == payload.read_bytes()
     strip_copy(tools, source, target)
     assert len(json.loads(tools.run(*tags, target))[0]) == 1
     assert source.read_bytes() == original
