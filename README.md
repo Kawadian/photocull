@@ -44,10 +44,14 @@ The [YAML example](deploy/photocull.example.yaml) shows both layouts, and [.env.
 | `PHOTOCULL_STATIC_DIR` | `frontend/dist` |
 | `PHOTOCULL_TOKEN_FILE` | Optional path to a shared printable ASCII token |
 | `PHOTOCULL_WORKER_MEMORY_MB` | `1536` MiB worker budget, `6144` MiB recommended with ML on a 16 GiB host |
-| `PHOTOCULL_WORKER_BATCH_SIZE`, `PHOTOCULL_WORKER_PARALLELISM` | `8` assets per scan transaction and `1` decoding task at a time |
+| `PHOTOCULL_WORKER_BATCH_SIZE`, `PHOTOCULL_WORKER_PARALLELISM` | `8` media jobs per library turn and `1` concurrent EXIF, preview or scoring job |
+| `PHOTOCULL_WORKER_SCAN_PARALLELISM`, `PHOTOCULL_WORKER_SCAN_BATCH_SIZE` | `1` concurrent library scan and up to `64` files or errors per scan transaction |
+| `PHOTOCULL_WORKER_HASH_READ_MIB`, `PHOTOCULL_WORKER_SCAN_OVERLAP` | `4` MiB reusable read buffer per scan and `false` to run scans ahead of media jobs |
 | `PHOTOCULL_WORKER_STAGES`, `PHOTOCULL_WORKER_DEVICE` | `exif,preview,score` and `cpu` |
 
 Photocull scans DNG, ARW and common RAW formats, HEIF/HEIC/HIF, AVIF, JPEG, PNG, WebP, TIFF, and MP4/MOV/M4V/MKV. RAW previews prefer an embedded JPEG and fall back to a half-size demosaic. Videos display a poster and duration. Capture day uses the best available EXIF timestamp and falls back to the file modification day in UTC. A **100%** view displays decoded pixels at their natural size. If an image exceeds the fit preview limit, **100%** opens a native-size center crop.
+
+For unreadable-file reports and tuning initial imports from HDDs, see [Library indexing](docs/INGEST.md).
 
 ## Archive and storage
 
