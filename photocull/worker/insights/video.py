@@ -11,6 +11,7 @@ import time
 from contextlib import closing, contextmanager
 from pathlib import Path
 
+from photocull.config import InsightSettings
 from photocull.media.artifacts import prune_artifacts, stage_artifact
 from photocull.media.cache import video_path
 from photocull.media.decode import VIDEO_FORMATS
@@ -164,11 +165,11 @@ def audio_levels(source, fd, threads, pulse):
             yield float(np.sqrt(np.mean(samples**2)) / 32768) if len(samples) else 0
 
 
-def metrics(source, fd, threads, duration, has_audio, pulse):
+def metrics(source, fd, config: InsightSettings, duration, has_audio, pulse):
     import numpy as np
 
     args = [
-        *ffmpeg(source, threads),
+        *ffmpeg(source, config.threads),
         "-map",
         "0:V:0",
         "-an",
@@ -180,7 +181,7 @@ def metrics(source, fd, threads, duration, has_audio, pulse):
         "rawvideo",
         "pipe:1",
     ]
-    levels = audio_levels(source, fd, threads, pulse) if has_audio else iter(())
+    levels = audio_levels(source, fd, config.threads, pulse) if has_audio else iter(())
     count = black = blurry = pocket = cuts = 0
     motion_sum = volume_sum = 0.0
     candidates = []
@@ -215,7 +216,10 @@ def metrics(source, fd, threads, duration, has_audio, pulse):
             image = np.frombuffer(data, dtype=np.uint8).reshape(FRAME).astype(np.float32) / 255
             darkness = float(np.mean(image)) < 0.09
             edges = float(np.mean(np.abs(np.diff(image, axis=0))))
-            blur = edges < 0.012
+            # Scale the edge cutoff down for flat profiles while keeping the
+            # original cutoff for normal contrast and a floor for near-flat noise.
+            contrast = max(0.025, min(float(image.std()), 0.1))
+            blur = edges < 0.12 * contrast
             motion = float(np.mean(np.abs(prior - image))) if prior is not None else 0.0
             scene = motion > 0.24 and not darkness
             count += 1
@@ -237,17 +241,33 @@ def metrics(source, fd, threads, duration, has_audio, pulse):
     duration = duration or count / FRAME_RATE
     if not duration:
         raise ValueError("The clip has no decodable video frames")
-    reasons = []
-    if duration < 1.5:
-        reasons.append("very_short")
-    if black / max(1, count) >= 0.65:
-        reasons.append("mostly_dark")
-    if pocket / max(1, count) >= 0.50:
-        reasons.append("possible_pocket_recording")
-    if blurry / max(1, count) >= 0.80:
-        reasons.append("low_detail_or_blur")
-    if duration >= 4 and motion_sum / max(1, count) < 0.008 and volume_sum / max(1, count) < 0.012:
-        reasons.append("static_and_quiet")
+    samples = max(1, count)
+    motion, volume = motion_sum / samples, volume_sum / samples
+    dark_fraction, blur_fraction = black / samples, blurry / samples
+    quiet = not has_audio or volume < config.video_static_volume
+    very_short = duration < config.video_very_short_s
+    mostly_dark = dark_fraction >= config.video_dark_fraction
+    possible_pocket = pocket / samples >= config.video_pocket_fraction
+    low_detail = blur_fraction >= config.video_blur_fraction
+    static_and_quiet = duration >= WINDOW and motion < config.video_static_motion and quiet
+    reasons = [
+        reason
+        for reason, present in (
+            ("very_short", very_short),
+            ("mostly_dark", mostly_dark),
+            ("possible_pocket_recording", possible_pocket),
+            ("low_detail_or_blur", low_detail),
+            ("static_and_quiet", static_and_quiet),
+        )
+        if present
+    ]
+    # Quiet corroborates darkness, but the strong flag still needs two reasons
+    # unless the clip is very short or resembles a pocket recording.
+    dead = (
+        very_short
+        or possible_pocket
+        or (sum((mostly_dark and quiet, low_detail, static_and_quiet)) >= 2)
+    )
     ranked = sorted(candidates, reverse=True)[:12]
     highlights = []
     for score, start, end in sorted(ranked, key=lambda item: -item[1]):
@@ -264,10 +284,11 @@ def metrics(source, fd, threads, duration, has_audio, pulse):
         "duration": duration,
         "highlights": highlights,
         "reasons": reasons,
-        "motion": motion_sum / max(1, count),
-        "volume": volume_sum / max(1, count),
-        "dark_fraction": black / max(1, count),
-        "blur_fraction": blurry / max(1, count),
+        "dead": dead,
+        "motion": motion,
+        "volume": volume,
+        "dark_fraction": dark_fraction,
+        "blur_fraction": blur_fraction,
         "scene_changes": cuts,
         "has_audio": has_audio,
     }
@@ -402,7 +423,7 @@ def run_stage(worker, stage, asset, key, pulse):
             results = transcribe(worker, source, fd, audio, pulse)
             verify_source()
             return results
-        results = metrics(source, fd, config.threads, duration, audio, pulse)
+        results = metrics(source, fd, config, duration, audio, pulse)
         target = video_path(worker.state, asset["id"], asset["content_hash"], key)
         try:
             with proxy(source, fd, config.threads, target, pulse) as staged:

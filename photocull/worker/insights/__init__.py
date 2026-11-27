@@ -84,10 +84,17 @@ class Insights:
         else:
             detections = self.inference.call(
                 "faces",
-                (path, self.config.face_revision, self.config.offline, self.config.threads),
+                (
+                    path,
+                    self.config.face_revision,
+                    self.config.offline,
+                    self.config.threads,
+                    self.config.face_detect_score,
+                    self.config.face_min_px,
+                ),
                 self.worker.pulse,
             )
-        self.groups.save(self.db, key, self.config.face_threshold, asset, detections, pulse)
+        self.groups.save(self.db, key, self.config, asset, detections, pulse)
 
     def _train(self, pulse):
         if not self.taste_enabled:

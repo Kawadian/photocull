@@ -4,16 +4,19 @@ from pathlib import Path
 
 
 class FaceModel:
-    def __init__(self, cache: Path, revision: str, offline: bool, threads: int):
+    def __init__(
+        self, cache: Path, revision: str, offline: bool, threads: int, score: float, min_px: int
+    ):
         import cv2
 
         from photocull.worker.insights.model_cache import face_files
 
         detector, recognizer = face_files(cache, revision, offline)
         cv2.setNumThreads(threads)
-        self.detector = cv2.FaceDetectorYN.create(str(detector), "", (320, 320), 0.85, 0.3, 100)
+        self.detector = cv2.FaceDetectorYN.create(str(detector), "", (320, 320), score, 0.3, 100)
         self.recognizer = cv2.FaceRecognizerSF.create(str(recognizer), "")
         self.cv = cv2
+        self.min_px = min_px
 
     def detect(self, path: Path) -> list:
         import numpy as np
@@ -36,7 +39,7 @@ class FaceModel:
             x, y, w, h = (float(value) for value in detection[:4])
             left, top = max(0, int(x)), max(0, int(y))
             right, bottom = min(width, int(x + w)), min(height, int(y + h))
-            if min(right - left, bottom - top) < 12:
+            if min(right - left, bottom - top) < self.min_px:
                 continue
             aligned = self.recognizer.alignCrop(image, detection)
             vector = normalized(self.recognizer.feature(aligned).reshape(-1))

@@ -125,7 +125,7 @@ def select_assets(config: Selection, keys: dict):
         joins += """ LEFT JOIN video_flags AS f ON f.asset_id=a.id AND f.content_hash=a.content_hash
                      LEFT JOIN insight_results AS i ON i.asset_id=a.id
                        AND i.content_hash=a.content_hash AND i.stage='video' AND i.key=?"""
-        clauses.append("COALESCE(f.dead, json_array_length(i.payload,'$.reasons') > 0, 0) = ?")
+        clauses.append("COALESCE(f.dead, json_extract(i.payload, '$.dead'), 0) = ?")
         values = [keys.get("video", ""), *values]
         values.append(config.dead)
     return (

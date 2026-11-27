@@ -461,7 +461,12 @@ def test_duplicates_and_storage(catalog):
         source = root / name
         source.write_bytes(payload)
         id_ = record(db, root, source, kind=kind)
-        db.execute("INSERT INTO asset_scores VALUES(?,1,1,0,0,'0000000000000000',NULL)", (id_,))
+        db.execute(
+            """INSERT INTO asset_scores
+               (asset_id, sharpness, exposure, clipped_highlights, clipped_shadows, dhash)
+               VALUES (?,1,1,0,0,'0000000000000000')""",
+            (id_,),
+        )
     assert len(duplicates(db, "exact", 0)["items"][0]["assets"]) == 2
     assert len(duplicates(db, "near", 0)["items"][0]["assets"]) == 4
     assert len(duplicates(db, "pairs", 0)["items"][0]["assets"]) == 2

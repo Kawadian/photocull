@@ -43,3 +43,50 @@ burst:
     assert settings.scoring.max_exposure == 0.85
     assert settings.burst.max_hamming_distance == 12
     assert settings.burst.window_seconds == 2.5
+
+
+def test_tuning_defaults_and_configurable_insight_identity(tmp_path, monkeypatch):
+    from photocull.config import InsightSettings, ScoringSettings, Settings
+    from photocull.insights import models
+
+    assert ScoringSettings().model_dump() == {
+        "min_sharpness": 0.02,
+        "min_exposure": 0.012,
+        "max_exposure": 0.95,
+        "max_clipped_highlights": 0.85,
+        "max_clipped_shadows": 0.98,
+        "min_detail_when_clipped": 0.05,
+    }
+    defaults = InsightSettings(faces=True, video=True)
+    assert (defaults.face_detect_score, defaults.face_min_px, defaults.face_threshold) == (
+        0.85,
+        12,
+        0.45,
+    )
+    assert (defaults.face_min_quality, defaults.people_min_faces) == (0.12, 2)
+    assert (
+        defaults.video_very_short_s,
+        defaults.video_dark_fraction,
+        defaults.video_pocket_fraction,
+        defaults.video_blur_fraction,
+        defaults.video_static_motion,
+        defaults.video_static_volume,
+    ) == (1.5, 0.65, 0.5, 0.8, 0.008, 0.012)
+    baseline = models(Settings(insights=defaults))
+    monkeypatch.chdir(tmp_path)
+    for field, value in (
+        ("FACES", "true"),
+        ("VIDEO", "true"),
+        ("FACE_DETECT_SCORE", "0.9"),
+        ("FACE_MIN_PX", "16"),
+        ("FACE_MIN_QUALITY", "0.2"),
+        ("VIDEO_STATIC_VOLUME", "0.02"),
+    ):
+        monkeypatch.setenv(f"PHOTOCULL_INSIGHTS_{field}", value)
+    settings = load_settings()
+    config = settings.insights
+    assert (config.face_detect_score, config.face_min_px, config.face_min_quality) == (0.9, 16, 0.2)
+    assert config.video_static_volume == 0.02
+    updated = models(settings)
+    assert updated["faces"].key != baseline["faces"].key
+    assert updated["video"].key != baseline["video"].key

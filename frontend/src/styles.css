@@ -613,6 +613,7 @@ dialog.modal { max-height: 88dvh; overflow-y: auto; }
 .story-map { display: block; background: var(--panel-raised); border: 1px solid var(--line); max-width: 100%; border-radius: var(--radius); }
 .story-segment { padding-top: 12px; border-top: 1px solid var(--line); }
 .video-layout { display: grid; grid-template-columns: minmax(150px, 220px) minmax(0, 1fr); gap: 20px; }
+.video-group { border-inline-start: 2px solid var(--accent); padding-inline-start: 8px; }
 .video-list { max-height: 60vh; overflow: auto; }
 .insight-video { width: 100%; max-height: 56vh; background: #111; }
 .transcript, .taste-factors { padding-left: 18px; margin-block: 4px; }

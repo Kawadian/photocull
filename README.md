@@ -100,15 +100,18 @@ The worker scores still-image previews using grayscale luminance and Laplacian v
 | Worker environment variable | YAML key | Default |
 | --- | --- | --- |
 | `PHOTOCULL_SCORING_MIN_SHARPNESS` | `scoring.min_sharpness` | `0.02` |
-| `PHOTOCULL_SCORING_MIN_EXPOSURE` | `scoring.min_exposure` | `0.08` |
-| `PHOTOCULL_SCORING_MAX_EXPOSURE` | `scoring.max_exposure` | `0.92` |
-| `PHOTOCULL_SCORING_MAX_CLIPPED_HIGHLIGHTS` | `scoring.max_clipped_highlights` | `0.25` |
-| `PHOTOCULL_SCORING_MAX_CLIPPED_SHADOWS` | `scoring.max_clipped_shadows` | `0.40` |
+| `PHOTOCULL_SCORING_MIN_EXPOSURE` | `scoring.min_exposure` | `0.012` |
+| `PHOTOCULL_SCORING_MAX_EXPOSURE` | `scoring.max_exposure` | `0.95` |
+| `PHOTOCULL_SCORING_MAX_CLIPPED_HIGHLIGHTS` | `scoring.max_clipped_highlights` | `0.85` |
+| `PHOTOCULL_SCORING_MAX_CLIPPED_SHADOWS` | `scoring.max_clipped_shadows` | `0.98` |
+| `PHOTOCULL_SCORING_MIN_DETAIL_WHEN_CLIPPED` | `scoring.min_detail_when_clipped` | `0.05` |
 | `PHOTOCULL_BURST_WINDOW_SECONDS` | `burst.window_seconds` | `2` |
 | `PHOTOCULL_BURST_MAX_HAMMING_DISTANCE` | `burst.max_hamming_distance` | `8` |
 | `PHOTOCULL_BURST_MIN_COSINE` | `burst.min_cosine` | `0.88` |
 
-Scoring thresholds are inclusive bounds from 0 to 1. Set minimums to 0 and maximums to 1 to disable automatic flag suggestions. Restart the worker after changing settings. With Compose, edit the mounted YAML. The worker re-evaluates stored scores against new thresholds and refreshes groups after pending indexing work completes.
+Scoring thresholds are inclusive bounds from 0 to 1. Set minimums to 0 and maximums to 1 to disable automatic flag suggestions. Restart the worker after changing settings. With Compose, edit the mounted YAML. Clipping and extreme-exposure suggestions require low detail. Detail is a normalized Laplacian variance over stencils with luminance strictly between 5 and 250 in the 8-bit preview. Preview clipping reflects the rendered tone curve. The 1st and 99th luminance percentiles are stored on a 0–1 scale.
+
+On upgrade the worker fills the new signals from cached previews and re-evaluates existing suggestions. Original media is unnecessary for this backfill. When the cache is missing or unreadable, the new signals remain unset and clipping and exposure suggestions wait for a fresh score. Threshold changes re-evaluate stored scores. Burst groups refresh after pending indexing work completes.
 
 Upgrading from Phase 1 schedules one score job per active still image through `0004_scores_and_bursts.sql`. Ensure `score` is in the worker's stage list if you previously set it explicitly. Scoring reads cached previews and adds one compact score row per photo plus membership rows for grouped photos. Allow CPU time and preview reads for the initial backfill. A 512 × 512 float analysis plane occupies 1 MiB, with additional temporary arrays and a decoded preview per worker task. The default worker parallelism of 1 and 1536 MiB restart threshold also cover media decoding. The API uses the existing 500 MiB deployment budget and queries SQLite for results.
 

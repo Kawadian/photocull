@@ -1,3 +1,6 @@
+from dataclasses import asdict
+
+import pytest
 from PIL import Image, ImageDraw, ImageFilter
 
 from photocull.worker.scoring import score_preview
@@ -38,3 +41,48 @@ def test_dhash_distinguishes_opposing_gradients(tmp_path):
     opposite = int(score_preview(tmp_path / "opposite.png").dhash, 16)
     assert (original ^ similar).bit_count() == 0
     assert (original ^ opposite).bit_count() == 64
+
+
+@pytest.mark.parametrize(
+    ("background", "patch", "size", "reason"),
+    [
+        (255, (40, 180), 12, None),
+        (0, (20, 160), 12, None),
+        (0, (12, 64), 16, None),
+        (0, (25, 25), 16, "underexposed"),
+        (255, (255, 255), 12, "clipped_highlights"),
+        (0, (0, 0), 12, "clipped_shadows"),
+        (5, (25, 25), 12, "blur"),
+        (127, (127, 127), 12, "blur"),
+    ],
+)
+def test_reject_requires_low_detail_in_exposure_extremes(tmp_path, background, patch, size, reason):
+    import sqlite3
+    from contextlib import closing
+
+    from photocull.config import ScoringSettings
+    from photocull.worker.rejections import REJECT_REASON_SQL
+
+    image = Image.new("L", (100, 100), background)
+    for y in range(size):
+        for x in range(size):
+            image.putpixel((10 + x, 10 + y), patch[(x + y) % 2])
+    preview = tmp_path / "synthetic.png"
+    image.save(preview)
+    scores = score_preview(preview)
+    if patch[0] != patch[1]:
+        assert scores.detail > ScoringSettings().min_detail_when_clipped
+    else:
+        assert scores.detail == 0
+    if background == 255:
+        assert scores.bright_p99 == 1
+    elif background == 0:
+        assert scores.dark_p01 == 0
+    with closing(sqlite3.connect(":memory:")) as db:
+        (actual,) = db.execute(
+            f"""SELECT {REJECT_REASON_SQL} FROM (
+                SELECT :sharpness AS sharpness, :exposure AS exposure, :detail AS detail,
+                :clipped_highlights AS clipped_highlights, :clipped_shadows AS clipped_shadows)""",
+            asdict(scores) | ScoringSettings().model_dump(),
+        ).fetchone()
+    assert actual == reason

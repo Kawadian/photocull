@@ -48,6 +48,11 @@ class SplitPerson(BaseModel):
     name: Name | None = None
 
 
+class AssignFaces(SplitPerson):
+    person_id: BodyId | None = None
+    expected_revision: int | None = Field(default=None, ge=0, le=MAX_ID)
+
+
 class TransferDownload(Response):
     def __init__(self, state, job):
         super().__init__()
@@ -242,7 +247,7 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
         return {"status": "pending"}
 
     @app.get(PREFIX + "/people")
-    def people(library: str, cursor: After = 0, limit: Limit = 40):
+    def people(library: str, cursor: After = 0, limit: Limit = 40, include_small: bool = False):
         with connect(library_path(library)) as db:
             key = face_key(db, settings)
             rows = db.execute(
@@ -259,14 +264,59 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
                    FROM people AS p WHERE p.id > :cursor AND EXISTS (
                     SELECT 1 FROM faces AS f JOIN assets AS a ON a.id = f.asset_id
                     WHERE f.person_id = p.id AND f.key = :key AND a.active = 1
-                    AND f.content_hash=a.content_hash)
+                    AND f.content_hash=a.content_hash LIMIT 1 OFFSET :min_face_offset)
                    ORDER BY p.id LIMIT :limit""",
-                {"key": key, "cursor": cursor, "limit": limit + 1},
+                {
+                    "key": key,
+                    "cursor": cursor,
+                    "limit": limit + 1,
+                    "min_face_offset": 0 if include_small else config.people_min_faces - 1,
+                },
             ).fetchall()
         result = page(rows, limit)
         for item in result["items"]:
             item["cover"] = json.loads(item["cover"])
         return result
+
+    @app.get(PREFIX + "/faces/unassigned")
+    def unassigned_faces(library: str, cursor: After = 0, limit: Limit = 40):
+        with connect(library_path(library)) as db:
+            key = face_key(db, settings)
+            rows = db.execute(
+                """SELECT f.id, f.asset_id, f.left, f.top, f.right, f.bottom, f.quality,
+                          f.confidence, a.path, a.content_hash
+                   FROM faces AS f JOIN assets AS a ON a.id = f.asset_id
+                   WHERE f.person_id IS NULL AND f.key = ? AND a.active = 1 AND f.id > ?
+                     AND f.content_hash = a.content_hash
+                   ORDER BY f.id LIMIT ?""",
+                (key, cursor, limit + 1),
+            ).fetchall()
+        return page(rows, limit)
+
+    @app.post(PREFIX + "/faces/unassigned/assign")
+    def assign_faces(library: str, body: AssignFaces):
+        faces = set(body.faces)
+        with connect(library_path(library)) as db, write(db):
+            key = face_key(db, settings)
+            target = body.person_id
+            if target is None:
+                target = db.execute(
+                    "INSERT INTO people(name) VALUES (?) RETURNING id", (body.name,)
+                ).fetchone()[0]
+            else:
+                check_person(db, target, body.expected_revision)
+                db.execute("UPDATE people SET revision = revision + 1 WHERE id = ?", (target,))
+            moved = db.execute(
+                """UPDATE faces SET person_id = ?, manual = 1 WHERE person_id IS NULL AND key = ?
+                   AND id IN (SELECT value FROM json_each(?))
+                   AND EXISTS (SELECT 1 FROM assets AS a WHERE a.id = faces.asset_id
+                               AND a.active = 1 AND a.content_hash = faces.content_hash)""",
+                (target, key, json.dumps(sorted(faces))),
+            ).rowcount
+            if moved != len(faces):
+                raise HTTPException(409, "Face membership changed. Reload and select faces again.")
+            mark_catalog_updated(db)
+            return {"id": target, "moved": moved}
 
     @app.get(PREFIX + "/people/{person_id}/faces")
     def person_faces(library: str, person_id: Id, cursor: After = 0, limit: Limit = 40):
