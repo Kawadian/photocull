@@ -10,9 +10,11 @@ import stat
 import time
 import zipfile
 from contextlib import ExitStack, contextmanager, suppress
+from functools import lru_cache
 from html import escape
 from pathlib import Path
 
+from photocull.archive import ArchiveError, sidecar_listing, sidecar_state
 from photocull.db import write
 from photocull.db.catalog import mark_catalog_updated
 from photocull.db.insights import public_keys
@@ -20,6 +22,7 @@ from photocull.db.stories import segments
 from photocull.db.transfers import ExportRequest, ReportRequest, select_assets
 from photocull.media.artifacts import artifact_name, open_regular, transfer_directory
 from photocull.media.cache import cache_path
+from photocull.media.export_location import MEDIA_SUFFIXES, LocationSkip, unsupported_reason
 from photocull.media.walk import MediaJail, SourceChanged, open_directory, source_key
 from photocull.worker.location import clean_copy
 
@@ -61,7 +64,7 @@ def identity(info: os.stat_result) -> tuple[int, int]:
     return info.st_dev, info.st_ino
 
 
-def file_name(asset, *, sidecar=False):
+def file_name(asset):
     # A stable ID keeps names unique. Portable filenames also make ZIP extraction safe.
     name = Path(asset["path"]).name
     stem, extension = os.path.splitext(name)
@@ -70,7 +73,7 @@ def file_name(asset, *, sidecar=False):
     # Preserve supported camera/file extensions. Never copy separators or
     # control characters from a filesystem name into an archive member.
     suffix = extension.lower() if re.fullmatch(r"\.[A-Za-z0-9]{1,12}", extension) else ""
-    return f"{asset['id']}-{stem or 'media'}{'.xmp' if sidecar else suffix}"
+    return f"{asset['id']}-{stem or 'media'}{suffix}"
 
 
 @contextmanager
@@ -93,22 +96,6 @@ def copy_destination(settings, name):
 def remove_private(root_fd, name):
     with suppress(FileNotFoundError):
         shutil.rmtree(name, dir_fd=root_fd)
-
-
-@contextmanager
-def sidecar(jail, path):
-    parent = Path(path).parent
-    stem = Path(path).stem
-    with ExitStack() as stack:
-        for extension in (".xmp", ".XMP"):
-            candidate = (parent / f"{stem}{extension}").as_posix()
-            try:
-                fd, _ = stack.enter_context(jail.open_media(candidate))
-            except FileNotFoundError:
-                continue
-            yield fd
-            return
-        yield None
 
 
 class Transfers:
@@ -209,10 +196,12 @@ class Transfers:
         with write(self.db):
             job = self.db.execute(
                 """UPDATE transfers SET status='running', attempts=attempts+1, processed=0,
-                   total=0, written_bytes=0, total_bytes=0 WHERE id=? AND status='pending'
-                   RETURNING *""",
+                   total=0, written_bytes=0, total_bytes=0, skipped=0
+                   WHERE id=? AND status='pending' RETURNING *""",
                 (row[0],),
             ).fetchone()
+            if job is not None:
+                self.db.execute("DELETE FROM transfer_skips WHERE transfer_id=?", (job["id"],))
         if job is None:
             return True
         try:
@@ -298,6 +287,7 @@ class Transfers:
             else:
                 with (
                     self.output(job, pulse) as handle,
+                    transfer_directory(self.state) as parent,
                     zipfile.ZipFile(
                         handle,
                         mode="w",
@@ -309,6 +299,7 @@ class Transfers:
                         config,
                         job_id,
                         pulse,
+                        parent,
                         lambda name: archive.open(name, "w", force_zip64=True),
                     )
         finally:
@@ -333,7 +324,7 @@ class Transfers:
                         "wb",
                     )
 
-                self.copy_files(config, job_id, pulse, open_output)
+                self.copy_files(config, job_id, pulse, fd, open_output)
                 self.publish(job_id, pulse, root_fd, staged, name, os.fstat(fd))
             finally:
                 os.close(fd)
@@ -350,10 +341,11 @@ class Transfers:
             yield from assets
             after = assets[-1]["id"]
 
-    def copy_files(self, config, job_id, pulse, output):
+    def copy_files(self, config, job_id, pulse, parent, output):
         jail = MediaJail(self.worker.library, self.settings.state_dir)
         written = 0
         processed = 0
+        skipped = 0
         updated = 0.0
 
         def transfer(fd, name, *, count_bytes):
@@ -374,39 +366,91 @@ class Transfers:
             if before != source_key(os.fstat(fd)):
                 raise SourceChanged(f"Source changed while exporting {name}")
 
-        for asset in self.planned_assets():
+        strip = config.include_location is False
+        listing = lru_cache(maxsize=8)(sidecar_listing)
+
+        def check():
             self.check(job_id, pulse)
-            with jail.open_media(asset["path"]) as (fd, _):
-                if source_key(os.fstat(fd)) != asset["source_key"]:
-                    raise SourceChanged(f"{asset['path']} changed since indexing; rescan and retry")
-                if config.include_location is False:
-                    with (
-                        clean_copy(
-                            self.settings,
-                            fd,
-                            Path(asset["path"]).suffix,
-                            self.state,
-                            lambda: self.check(job_id, pulse),
-                        ) as staged,
-                        staged.open("rb") as clean,
-                    ):
-                        transfer(clean.fileno(), file_name(asset), count_bytes=True)
-                    if source_key(os.fstat(fd)) != asset["source_key"]:
-                        raise SourceChanged(f"{asset['path']} changed while exporting")
-                else:
-                    transfer(fd, file_name(asset), count_bytes=True)
-                with jail.open_media(asset["path"]) as (current, _):
-                    if source_key(os.fstat(current)) != asset["source_key"]:
-                        raise SourceChanged(f"{asset['path']} was replaced while exporting")
-            if config.xmp and config.include_location is not False:
-                with sidecar(jail, asset["path"]) as fd:
-                    if fd is not None:
-                        transfer(fd, file_name(asset, sidecar=True), count_bytes=False)
+
+        for asset in self.planned_assets():
+            check()
+            name = file_name(asset)
+            try:
+                with ExitStack() as stack:
+                    sources = self.export_sources(
+                        stack,
+                        jail,
+                        asset,
+                        name,
+                        parent,
+                        check,
+                        listing,
+                        xmp=config.xmp,
+                        strip=strip,
+                    )
+                    # Finish checking the photo and all requested sidecars before opening a
+                    # destination member. ZIP members cannot be removed once written.
+                    for source, member, count_bytes in sources:
+                        transfer(source, member, count_bytes=count_bytes)
+                    self.check_source(jail, asset["path"], asset["source_key"])
+            except LocationSkip as error:
+                skipped += 1
+                with write(self.db):
+                    self.db.execute(
+                        "INSERT INTO transfer_skips VALUES (?,?,?,?)",
+                        (job_id, asset["id"], asset["path"], str(error)),
+                    )
+                    self.db.execute("UPDATE transfers SET skipped=skipped+1 WHERE id=?", (job_id,))
             processed += 1
         self.db.execute(
             "UPDATE transfers SET processed=?, written_bytes=? WHERE id=?",
             (processed, written, job_id),
         )
+        if processed and skipped == processed:
+            raise ValueError("No media could be verified for export with location removed")
+
+    @staticmethod
+    def check_source(jail, path, key):
+        with jail.open_media(path) as (fd, _):
+            if source_key(os.fstat(fd)) != key:
+                raise SourceChanged(f"{path} changed while exporting; rescan and retry")
+
+    def export_sources(self, stack, jail, asset, name, parent, check, listing, *, xmp, strip):
+        path = Path(asset["path"])
+        if strip and path.suffix.lower() not in MEDIA_SUFFIXES:
+            raise LocationSkip(unsupported_reason(path.suffix))
+        fd, actual = stack.enter_context(jail.open_media(path.as_posix()))
+        if source_key(os.fstat(fd)) != asset["source_key"]:
+            raise SourceChanged(f"{path} changed since indexing; rescan and retry")
+        entries = [(fd, path, asset["source_key"], name, True)]
+        if xmp:
+            try:
+                files, _ = sidecar_state(actual, listing)
+            except ArchiveError as error:
+                if strip:
+                    raise LocationSkip(str(error)) from error
+                raise
+            for file in files:
+                sidecar = path.with_name(Path(file["path"]).name)
+                handle, _ = stack.enter_context(jail.open_media(sidecar.as_posix()))
+                suffix = name if file["qualified"] else str(Path(name).with_suffix(""))
+                entries.append((handle, sidecar, file["key"], suffix + ".xmp", False))
+
+        sources = []
+        for raw, path, key, member, count_bytes in entries:
+            if source_key(os.fstat(raw)) != key:
+                raise SourceChanged(f"{path} changed while exporting; rescan and retry")
+            if strip:
+                try:
+                    staged = stack.enter_context(
+                        clean_copy(self.settings, raw, path.suffix, parent, check)
+                    )
+                except LocationSkip as error:
+                    raise LocationSkip(f"{path.name}: {error}") from error
+                self.check_source(jail, path.as_posix(), key)
+                raw = stack.enter_context(staged.open("rb")).fileno()
+            sources.append((raw, member, count_bytes))
+        return sources
 
     def report(self, job, pulse):
         job_id = job["id"]

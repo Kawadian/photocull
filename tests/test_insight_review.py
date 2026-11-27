@@ -257,7 +257,7 @@ def test_failed_output_removes_private_staging(staged_worker, monkeypatch, kind,
     worker, root, media = staged_worker
     job = queue_export(worker.db, kind)
 
-    def fail(_config, _job, _pulse, output):
+    def fail(_config, _job, _pulse, _parent, output):
         with output("part.jpg") as stream:
             stream.write(b"unfinished")
         raise OSError(number, os.strerror(number))
@@ -390,7 +390,7 @@ def test_face_upgrade_and_manual_assignment_preserve_identity(tmp_path):
     initialize(path)
 
     with TestClient(create_app(settings)) as client, connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 28
+        assert db.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
         assert db.execute("SELECT favorite FROM assets WHERE id=?", (assets[0]["id"],)).fetchone()[
             0
         ]

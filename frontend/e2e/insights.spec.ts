@@ -25,7 +25,7 @@ test('people and stories lead back to keyboard review on a 375px screen', async 
   await expect(nav.getByRole('button', { name: 'Review' })).toHaveAttribute('aria-current', 'page')
 })
 
-test('video review, recommendations and portable downloads use the indexed library', async ({ page }) => {
+test('video review, recommendations and portable downloads use the indexed library', async ({ page }, info) => {
   await page.goto('/')
   await page.getByLabel('Library', { exact: true }).selectOption('insights')
   await page.getByRole('button', { name: 'Scan library' }).click()
@@ -51,8 +51,12 @@ test('video review, recommendations and portable downloads use the indexed libra
 
   await nav.getByRole('button', { name: 'Exports' }).click()
   await page.getByLabel('Minimum rating').selectOption('0')
-  await expect(page.getByRole('combobox', { name: 'Location information' })).toHaveValue('true')
-  await page.getByRole('button', { name: 'Start export' }).click()
+  await expect(page.getByRole('combobox', { name: 'Location information' })).toHaveValue('false')
+  await page.getByRole('button', { name: 'Preview export' }).click()
+  const preview = page.getByRole('region', { name: 'Export preview' })
+  await expect(preview).toContainText('Export removes source location information.')
+  await page.screenshot({ path: info.outputPath('desktop-keeper-preview.png') })
+  await preview.getByRole('button', { name: 'Start export' }).click()
   const zip = page.getByRole('link', { name: 'Download ZIP' }).first()
   await expect(zip).toBeVisible({ timeout: 20_000 })
   const zipEvent = page.waitForEvent('download')
@@ -126,28 +130,37 @@ test('insight views expose disabled, loading, empty and recoverable errors on mo
   }
 })
 
-test('mobile export reports validation errors and allows a queued transfer to be cancelled', async ({ page }) => {
+test('mobile export reports validation errors and allows a queued transfer to be cancelled', async ({ page }, info) => {
   await page.setViewportSize({ width: 375, height: 812 })
   await page.goto('/')
   const nav = page.getByRole('navigation', { name: 'Library views' })
   await nav.getByRole('button', { name: 'Exports' }).click()
   await page.getByLabel('From date').fill('2025-02-04')
   await page.getByLabel('To date').fill('2025-02-03')
-  await page.getByRole('button', { name: 'Start export' }).click()
+  await page.getByRole('button', { name: 'Preview export' }).click()
   await expect(page.getByRole('alert')).toContainText('End date must be on or after the start date')
 
   const id = 'a'.repeat(32)
   let status = 'pending'
   await page.route('**/insights/transfers?kind=export', (route) => route.fulfill({ json: { items: [{
     id, kind: 'zip', status, destination: null, error: null, processed: 0, total: 0,
-    total_bytes: 0, written_bytes: 0, cancellable: status === 'pending',
+    total_bytes: 0, written_bytes: 0, skipped: 1, cancellable: status === 'pending',
   }] } }))
+  await page.route(`**/insights/transfers/${id}/skips?*`, (route) => route.fulfill({ json: {
+    items: [{ path: 'sample.png', reason: 'Metadata-only location removal is unavailable for .png' }], next_cursor: null,
+  } }))
   await page.route(`**/insights/transfers/${id}`, (route) => {
     status = 'cancelled'
     return route.fulfill({ json: { id, status } })
   })
   await page.getByRole('button', { name: 'Retry', exact: true }).focus()
   await page.keyboard.press('Enter')
+  await page.getByText('1 skipped', { exact: true }).click()
+  await expect(page.getByText('sample.png')).toBeVisible()
+  const reason = page.getByText(/location removal is unavailable for .png/)
+  await expect(reason).toBeVisible()
+  await reason.scrollIntoViewIfNeeded()
+  await page.screenshot({ path: info.outputPath('mobile-keeper-skips.png') })
   const cancel = page.getByRole('button', { name: 'Cancel', exact: true })
   await cancel.focus()
   await page.keyboard.press('Enter')

@@ -19,7 +19,7 @@ type Plan = {
 }
 type FileRecord = { path: string; size: number; original?: string; sha256?: string }
 type Preview = {
-  confirmation: string; count: number; source_bytes: number; estimated_output_bytes: number
+  confirmation: string; include_location?: boolean | null; count: number; source_bytes: number; estimated_output_bytes: number
   affected_bytes: number; estimated_reduction_bytes: number; estimated_after_purge_bytes: number; estimated_seconds: number
   id: string; status: "pending" | "running" | "ready" | "error"; error?: string
   matched_count: number; matched_bytes: number; skipped_count: number; next_cursor: number | null
@@ -35,7 +35,7 @@ type Rule = {
   preview_id: string | null; status: string | null; summary?: { count: number }; unread: boolean
   preview_error?: string; error?: string
 }
-type Capability = { write_checks: WriteCheck[]; export: boolean; destructive: boolean; retention_days: number; destructive_reason?: string; export_reason?: string }
+type Capability = { strip_location?: boolean; write_checks: WriteCheck[]; export: boolean; destructive: boolean; retention_days: number; destructive_reason?: string; export_reason?: string }
 type Job = {
   id: string; actor: string; request: Plan; created_at: number; finished_at: number | null
   cancelled: number; next_cursor?: number | null; counts: Record<string, number>; items?: { ordinal: number; path: string; status: string; phase?: string; error: string }[]
@@ -85,10 +85,12 @@ function ArchiveForm({ capability, seed, exportOnly, busy, execute, clear, saveR
 }) {
   const [operation, setOperation] = useState<Operation>('copy')
   const [mode, setMode] = useState<Mode>('export')
-  const [includeLocation, setIncludeLocation] = useState(true)
+  const [locationOverride, setLocationOverride] = useState<boolean>()
+  const metadataCopy = operation === 'copy' || operation === 'rename'
+  const includeLocation = locationOverride ?? (!metadataCopy || capability.strip_location === false)
   const image = ['jpeg', 'heic', 'avif'].includes(operation)
   const video = operation === 'hevc' || operation === 'av1'
-  const requiresWrite = ['trash', 'rename'].includes(operation) || mode !== 'export'
+  const requiresWrite = operation === 'trash' || mode !== 'export'
   const requiresOutput = operation !== 'trash' && mode !== 'overwrite'
 
   function parsed(event: FormEvent<HTMLFormElement>) {
@@ -123,7 +125,7 @@ function ArchiveForm({ capability, seed, exportOnly, busy, execute, clear, saveR
           {Object.entries(operations).filter(([id]) => exportOnly
             ? id === 'copy' || conversions.has(id as Operation)
             : !['restore', 'purge', 'undo'].includes(id)).map(([id, name]) =>
-            <option key={id} value={id} disabled={['trash', 'rename'].includes(id) && !capability.destructive}>{name}</option>)}
+            <option key={id} value={id} disabled={id === 'trash' && !capability.destructive}>{name}</option>)}
         </select></label>
         {!exportOnly && !['copy', 'trash'].includes(operation) && <label>Destination<select value={mode} onChange={(e) => setMode(e.target.value as Mode)}>
           <option value="export">Separate export folder</option>
@@ -131,7 +133,7 @@ function ArchiveForm({ capability, seed, exportOnly, busy, execute, clear, saveR
           {operation !== 'rename' && <option value="remove" disabled={!capability.destructive}>Export and trash verified originals</option>}
         </select></label>}
         {requiresOutput && <label>Location information<select value={String(includeLocation)}
-          onChange={(event) => setIncludeLocation(event.target.value === 'true')}>
+          onChange={(event) => setLocationOverride(event.target.value === 'true')}>
           <option value="false">Remove location information</option>
           <option value="true">Include location information</option>
         </select></label>}
@@ -155,8 +157,8 @@ function ArchiveForm({ capability, seed, exportOnly, busy, execute, clear, saveR
         <label>Audit reason <input name="reason" maxLength={200} /></label>
       </div>
       {requiresOutput && !includeLocation && <p className="insight-muted">
-        {operation === 'copy' || operation === 'rename'
-          ? 'Location removal preserves the original format without re-encoding JPEG, HEIC, DNG or supported MP4, MOV and MKV files. XMP sidecars are omitted. For files that cannot be verified, keep location or choose a conversion explicitly.'
+        {metadataCopy
+          ? 'Location removal keeps the original media format and cleans any XMP sidecars. Unsupported files or files that fail verification are skipped.'
           : 'Location-free exports omit source metadata and sidecars.'}
         {operation === 'dng' && ' Embedded previews and thumbnails are omitted.'}
         {video && ' Video and audio tracks are kept.'}
@@ -226,6 +228,8 @@ function PreviewDetails({ planned, proceed, previous, next }: {
     </div>
     <p className="insight-muted">Sizes and runtime are estimates. Originals in trash still use storage until purged.</p>
     <p>Confirmation covers all eligible items across every page.</p>
+    {typeof planned.include_location === 'boolean' && <p>{planned.include_location
+      ? 'Export includes available source location information.' : 'Export removes source location information.'}</p>}
     {!planned.count && <Status empty>No files are eligible for this operation.</Status>}
     {!!planned.items.length && <ul className="archive-list">
       {planned.items.map((item) => <li key={item.relative}>
@@ -336,6 +340,8 @@ function JobDetails({ job, busy, action }: { job: Job; busy: boolean; action: (p
   const processed = total - (c.pending ?? 0) - (c.running ?? 0)
   return <section className="insight-section" aria-label="Job details">
     <h3>{operations[job.request.operation]}</h3>
+    {typeof job.request.include_location === 'boolean' && <p className="insight-muted">{job.request.include_location
+      ? 'Source location included when available' : 'Location information removed from exports'}</p>}
     <div className="insight-actions"><progress aria-label="Items processed" value={processed} max={total || 1} />
       <span>{processed} of {total} items processed</span></div>
     {!job.finished_at && <div><button className="button secondary" disabled={busy || !!job.cancelled}
@@ -532,7 +538,8 @@ export function Archive({ base, online, initialSeed }: { base: string; online: b
 
   async function apply() {
     if (!planned || result?.status !== 'ready') return
-    const id = await mutate('jobs', { plan: planned.plan, confirmation: result.confirmation })
+    const plan = { ...planned.plan, include_location: result.include_location ?? planned.plan.include_location }
+    const id = await mutate('jobs', { plan, confirmation: result.confirmation })
     if (id) {
       setJobId(id)
       setPanel('Jobs')
@@ -589,9 +596,11 @@ export function Archive({ base, online, initialSeed }: { base: string; online: b
       <p>{result.count} {result.count === 1 ? 'item' : 'items'} · {bytes(result.source_bytes)} of source media.</p>
       {result.affected_bytes > 0 && <p>{bytes(result.affected_bytes)} of originals and sidecars affected.</p>}
       <p>{consequences(planned.plan)}</p>
-      {typeof planned.plan.include_location === 'boolean' && <p>{planned.plan.include_location
+      {typeof result.include_location === 'boolean' && <p>{result.include_location
         ? 'Export includes available source location information.'
-        : 'Export excludes source location information and XMP sidecars.'}</p>}
+        : conversions.has(planned.plan.operation)
+          ? 'Export excludes source location information and XMP sidecars.'
+          : 'Export removes source location from copies and XMP sidecars.'}</p>}
       {error && <Status error={error} />}
       <div className="dialog-actions">
         <button autoFocus className="button secondary" disabled={busy} onClick={() => setConfirm(false)}>Go back</button>

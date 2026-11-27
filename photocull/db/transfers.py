@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import date
+from pathlib import PurePosixPath
 from sqlite3 import Connection
 from typing import Annotated, Literal
 from uuid import uuid4
@@ -13,6 +14,7 @@ from photocull.config import InsightSettings
 from photocull.db import write
 from photocull.db.catalog import AUTO_REJECT_REASON, mark_catalog_updated
 from photocull.insights import classify_video
+from photocull.media.export_location import MEDIA_SUFFIXES, unsupported_reason
 
 MAX_QUEUED = 16
 
@@ -141,3 +143,42 @@ def select_assets(db: Connection, config: Selection, keys: dict, insights: Insig
             WHERE {" AND ".join(clauses)} ORDER BY a.id""",
         values,
     )
+
+
+def export_preview(db, request, keys, insights, after, limit=50):
+    selection, params = select_assets(db, request.selection, keys, insights)
+    if request.include_location:
+        total = db.execute(f"SELECT count(*) FROM ({selection})", params).fetchone()[0]
+        return {"total": total, "skipped": 0, "items": [], "next_cursor": None}
+    accepted = " OR ".join("lower(path) LIKE ?" for _ in MEDIA_SUFFIXES)
+    suffixes = [f"%{suffix}" for suffix in MEDIA_SUFFIXES]
+    total, skipped = db.execute(
+        f"SELECT count(*), coalesce(sum(NOT ({accepted})), 0) FROM ({selection})",
+        (*suffixes, *params),
+    ).fetchone()
+    rows = db.execute(
+        f"""SELECT id,path FROM ({selection}) WHERE id > ? AND NOT ({accepted})
+            ORDER BY id LIMIT ?""",
+        (*params, after, *suffixes, limit + 1),
+    ).fetchall()
+    return {
+        "total": total,
+        "skipped": skipped,
+        "items": [
+            {"path": row["path"], "reason": unsupported_reason(PurePosixPath(row["path"]).suffix)}
+            for row in rows[:limit]
+        ],
+        "next_cursor": rows[limit - 1]["id"] if len(rows) > limit else None,
+    }
+
+
+def transfer_skips(db, job_id, after, limit=50):
+    rows = db.execute(
+        """SELECT asset_id,path,reason FROM transfer_skips
+           WHERE transfer_id=? AND asset_id>? ORDER BY asset_id LIMIT ?""",
+        (job_id, after, limit + 1),
+    ).fetchall()
+    return {
+        "items": [{"path": row["path"], "reason": row["reason"]} for row in rows[:limit]],
+        "next_cursor": rows[limit - 1]["asset_id"] if len(rows) > limit else None,
+    }

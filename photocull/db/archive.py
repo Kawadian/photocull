@@ -75,6 +75,14 @@ def insert_job(db, request, result, actor, preview_id=None):
                 "INSERT INTO archive_items(job_id,ordinal,plan) VALUES(?,?,?)",
                 [(id_, n, packed(item)) for n, item in enumerate(result["items"], 1)],
             )
+        elif request.scrub_copy and result["skipped_count"]:
+            db.execute(
+                """INSERT INTO archive_items(job_id,ordinal,plan,status,error)
+                   SELECT ?,ordinal,json_object('relative',json_extract(payload,'$.path')),
+                          'skipped',json_extract(payload,'$.reason')
+                   FROM archive_preview_items WHERE preview_id=? AND eligible=0""",
+                (id_, preview_id),
+            )
         audit(
             db,
             id_,

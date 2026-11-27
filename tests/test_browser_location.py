@@ -12,10 +12,12 @@ from PIL import Image
 
 from photocull.api import create_app
 from photocull.config import ArchiveSettings, BrowserSettings, InsightSettings, load_settings
+from photocull.db import MIGRATIONS, connect, initialize
 from photocull.media.derivatives import VARIANTS, derivative_path
 from photocull.media.exif import read_metadata
+from photocull.media.export_location import LocationSkip
 from photocull.media.images import register_heif
-from photocull.worker.archive_media import Tools
+from photocull.worker.archive_media import Tools, raw_parameters
 from photocull.worker.location import jpeg_exif, strip_copy
 from tests.archive_fixtures import synthetic_dng, synthetic_image, synthetic_video
 from tests.test_derivatives import BASE, media_path, ready, scan, settings_for, version
@@ -25,6 +27,42 @@ from tests.worker_harness import start_worker, wait_for
 def has_gps(data):
     with Image.open(BytesIO(data)) as image:
         return bool(image.getexif().get_ifd(34853))
+
+
+def exif_write(path, *tags):
+    subprocess.run(
+        ["exiftool", "-overwrite_original", *tags, path],
+        check=True,
+        capture_output=True,
+    )
+
+
+def exif_read(path, *tags):
+    return json.loads(subprocess.check_output(["exiftool", "-j", "-n", *tags, path]))[0]
+
+
+def xmp_fixture(path):
+    subprocess.run(
+        [
+            "exiftool",
+            "-o",
+            path,
+            "-XMP-exif:GPSLatitude=35.25 N",
+            "-XMP-photoshop:City=Kyoto",
+            "-XMP-xmp:Rating=4",
+            "-XMP-dc:Title=Keep this title",
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def check_xmp(path, include):
+    data = exif_read(path, "-GPSLatitude", "-City", "-Rating", "-Title")
+    assert ("GPSLatitude" in data) is include
+    assert ("City" in data) is include
+    assert data["Rating"] == 4
+    assert data["Title"] == "Keep this title"
 
 
 def test_location_config_yaml_and_env(tmp_path, monkeypatch):
@@ -55,8 +93,9 @@ def test_location_delivery_derived_original_and_exports(tmp_path, strip_location
     source = settings.libraries["photos"].root / "Location.jpg"
     synthetic_image(source, (384, 256))
     sidecar = source.with_suffix(".xmp")
-    sidecar.write_text("Synthetic location: 35.25, 139.25")
-    original = source.read_bytes()
+    xmp_fixture(sidecar)
+    original, original_xmp = source.read_bytes(), sidecar.read_bytes()
+    check_xmp(sidecar, True)
 
     with TestClient(create_app(settings)) as client, start_worker(settings):
         asset = scan(client)[source.name]
@@ -93,14 +132,18 @@ def test_location_delivery_derived_original_and_exports(tmp_path, strip_location
         assert client.get(clean_url, headers={"Range": "bytes=0-3"}).status_code == 206
 
         options = {"selection": {"minimum_rating": 0}}
-        denied = {"kind": "zip", "xmp": True, "include_location": False, **options}
-        assert client.post(BASE + "/insights/exports", json=denied).status_code == 422
         for override in (None, False, True):
             option = {} if override is None else {"include_location": override}
-            expect = override is not False
-            body = {"kind": "zip", **options, **option}
-            if override is True:
-                body["xmp"] = True
+            expect = not strip_location if override is None else override
+            body = {"kind": "zip", "xmp": True, **options, **option}
+            keeper_preview = client.post(BASE + "/insights/exports/preview", json=body).json()
+            assert keeper_preview == {
+                "total": 1,
+                "skipped": 0,
+                "items": [],
+                "next_cursor": None,
+                "include_location": expect,
+            }
             start = client.post(BASE + "/insights/exports", json=body)
             start.raise_for_status()
             transfer = start.json()["id"]
@@ -116,11 +159,13 @@ def test_location_delivery_derived_original_and_exports(tmp_path, strip_location
             with ZipFile(BytesIO(zip_bytes)) as archive:
                 photo = next(name for name in archive.namelist() if name.endswith(".jpg"))
                 assert has_gps(archive.read(photo)) is expect
-                assert any(name.endswith(".xmp") for name in archive.namelist()) is (
-                    override is True
-                )
+                xmp = next(name for name in archive.namelist() if name.endswith(".xmp"))
+                extracted = tmp_path / "keeper.xmp"
+                extracted.write_bytes(archive.read(xmp))
+                check_xmp(extracted, expect)
                 if expect:
                     assert archive.read(photo) == original
+                    assert archive.read(xmp) == original_xmp
                 else:
                     with (
                         Image.open(BytesIO(original)) as before,
@@ -139,7 +184,9 @@ def test_location_delivery_derived_original_and_exports(tmp_path, strip_location
                 assert status["status"] not in {"error", "failed"}, status
                 return status if status["status"] == "ready" else None
 
-            confirmation = wait_for(previewed, timeout=15)["confirmation"]
+            preview_result = wait_for(previewed, timeout=15)
+            assert preview_result["include_location"] is expect
+            confirmation = preview_result["confirmation"]
             wrong_plan = plan | {"include_location": not expect}
             assert (
                 client.post(
@@ -165,16 +212,20 @@ def test_location_delivery_derived_original_and_exports(tmp_path, strip_location
                 status = client.get(archive_path + "/jobs/" + job_id).json()
                 return status if status["finished_at"] else None
 
-            assert wait_for(published, timeout=15)["counts"] == {"done": 1}
+            completed = wait_for(published, timeout=20)
+            assert completed["counts"] == {"done": 1}
+            assert completed["request"]["include_location"] is expect
             exported = archive_root / source.name
             assert has_gps(exported.read_bytes()) is expect
-            exported.unlink()
             exported_sidecar = archive_root / sidecar.name
-            assert exported_sidecar.exists() is expect
+            check_xmp(exported_sidecar, expect)
             if expect:
-                exported_sidecar.unlink()
+                assert exported.read_bytes() == original
+                assert exported_sidecar.read_bytes() == original_xmp
+            exported.unlink()
+            exported_sidecar.unlink()
     assert source.read_bytes() == original
-    assert "Synthetic location" in sidecar.read_text()
+    assert sidecar.read_bytes() == original_xmp
 
 
 @pytest.mark.skipif(
@@ -220,61 +271,268 @@ def test_jpeg_coordinates_carry_rounded_seconds(tmp_path, coordinates):
         assert 0 <= gps[2][2] < 60 and 0 <= gps[4][2] < 60
 
 
-@pytest.mark.parametrize("suffix", [".heic", ".dng", ".mov"])
-def test_metadata_only_copy_keeps_format_and_essence(tmp_path, suffix):
-    required = {
-        ".heic": ("exiftool",),
-        ".dng": ("exiftool", "dnglab"),
-        ".mov": ("exiftool", "ffmpeg", "ffprobe"),
-    }
-    if any(not shutil.which(tool) for tool in required[suffix]):
+@pytest.mark.parametrize("suffix", [".jpg", ".heic", ".tiff", ".dng", ".mov", ".mp4"])
+def test_metadata_only_copy_keeps_format_metadata_and_essence(tmp_path, suffix):
+    is_video = suffix in {".mov", ".mp4"}
+    required = ["exiftool"]
+    if suffix == ".dng":
+        required.append("dnglab")
+    if is_video:
+        required.extend(("ffmpeg", "ffprobe"))
+    if any(not shutil.which(tool) for tool in required):
         pytest.skip("Metadata tools are unavailable")
     source = tmp_path / f"original{suffix}"
     target = tmp_path / f"stripped{suffix}"
     if suffix == ".dng":
         synthetic_dng(source)
-    elif suffix == ".mov":
+    elif is_video:
         synthetic_video(source)
+        exif_write(
+            source,
+            "-Keys:Make=Photocull",
+            "-Keys:Model=Synthetic",
+            "-Keys:GPSCoordinates=35.25 139.25",
+        )
+    elif suffix == ".jpg":
+        synthetic_image(source)
     else:
         register_heif()
         with Image.new("RGB", (80, 60), "green") as image:
-            image.save(source, format="HEIF", exif=jpeg_exif((35.25, 139.25)))
-    if suffix == ".dng":
-        payload = tmp_path / "embedded-original"
-        payload.write_bytes(b"Synthetic embedded RAW payload with private metadata")
-        subprocess.run(
-            [
-                "exiftool",
-                "-overwrite_original",
-                "-GPSLatitude=35.25",
-                "-GPSLatitudeRef=N",
-                "-GPSLongitude=139.25",
-                "-GPSLongitudeRef=E",
-                f"-OriginalRawFileData<={payload}",
-                "-OriginalRawFileName=original.raw",
-                source,
-            ],
-            check=True,
-            capture_output=True,
+            image.save(source, format="HEIF" if suffix == ".heic" else "TIFF")
+    if not is_video:
+        exif_write(
+            source,
+            "-GPSLatitude=35.25",
+            "-GPSLatitudeRef=N",
+            "-GPSLongitude=139.25",
+            "-GPSLongitudeRef=E",
+            "-Make=Photocull",
+            "-Model=Synthetic",
+            "-DateTimeOriginal=2020:04:20 12:34:45",
+            "-Orientation#=6",
+            "-IPTC:City=Kyoto" if suffix == ".jpg" else "-XMP-photoshop:City=Kyoto",
         )
+    exif_write(
+        source,
+        "-XMP-dc:Title=Keep this title",
+        "-XMP-xmp:Rating=4",
+        "-XMP-iptcExt:LocationCreatedCity=Kyoto",
+        "-XMP-exif:GPSAltitude=15",
+    )
     original = source.read_bytes()
     tools = Tools(ArchiveSettings(), lambda: None)
-    tags = ("exiftool", "-j", "-n", "-GPSLatitude", "-GPSCoordinates", "-OriginalRawFileName")
-    original_tags = json.loads(tools.run(*tags, source))[0]
-    assert len(original_tags) > 1
-    if suffix == ".dng":
-        assert original_tags["OriginalRawFileName"] == "original.raw"
-        assert tools.run("exiftool", "-b", "-OriginalRawFileData", source) == payload.read_bytes()
+    queries = (
+        "-FileType",
+        "-GPS:all",
+        "-GPSCoordinates",
+        "-GPSAltitude",
+        "-City",
+        "-LocationCreatedCity",
+        "-Rating",
+        "-XMP-dc:Title",
+        "-Make",
+        "-Model",
+        "-DateTimeOriginal",
+        "-Orientation",
+        "-QuickTime:CreateDate",
+    )
+    before = exif_read(source, *queries)
     strip_copy(tools, source, target)
-    assert len(json.loads(tools.run(*tags, target))[0]) == 1
+    after = exif_read(target, *queries)
+    before.pop("SourceFile")
+    after.pop("SourceFile")
+    for tag in (
+        "GPSCoordinates",
+        "GPSLatitude",
+        "GPSLatitudeRef",
+        "GPSLongitude",
+        "GPSLongitudeRef",
+        "GPSVersionID",
+        "GPSAltitude",
+        "City",
+        "LocationCreatedCity",
+    ):
+        assert tag not in after
+        before.pop(tag, None)
+    assert before == after
+    assert after["Make"] == "Photocull"
+    assert after["Title"] == "Keep this title"
+    assert after["Rating"] == 4
     assert source.read_bytes() == original
+    if suffix == ".dng":
+        assert raw_parameters(tools, source) == raw_parameters(tools, target)
+    elif is_video:
+
+        def packets(path):
+            return subprocess.check_output(
+                [
+                    "ffmpeg",
+                    "-v",
+                    "error",
+                    "-i",
+                    path,
+                    "-map",
+                    "0",
+                    "-c",
+                    "copy",
+                    "-f",
+                    "streamhash",
+                    "-hash",
+                    "sha256",
+                    "-",
+                ]
+            )
+
+        assert packets(source) == packets(target)
+    else:
+        with Image.open(source) as original, Image.open(target) as clean:
+            assert original.tobytes() == clean.tobytes()
+            assert original.info.get("icc_profile") == clean.info.get("icc_profile")
+
+
+@pytest.mark.skipif(not shutil.which("exiftool"), reason="ExifTool is required")
+def test_raw_with_opaque_original_is_not_exported(tmp_path):
+    source = tmp_path / "original.dng"
+    synthetic_dng(source)
+    payload = tmp_path / "embedded-original"
+    payload.write_bytes(b"Synthetic embedded RAW payload with private metadata")
+    exif_write(source, f"-OriginalRawFileData<={payload}", "-OriginalRawFileName=original.raw")
+    assert exif_read(source, "-OriginalRawFileName")["OriginalRawFileName"] == "original.raw"
+    output = tmp_path / "stripped.dng"
+    with pytest.raises(LocationSkip, match="opaque private block or embedded original"):
+        strip_copy(Tools(ArchiveSettings(), lambda: None), source, output)
+    assert not output.exists()
 
 
 def test_metadata_only_copy_unsupported_format_has_no_fallback(tmp_path):
-    from photocull.archive import ArchiveError
-
     source = tmp_path / "original.png"
     target = tmp_path / "stripped.png"
-    with pytest.raises(ArchiveError, match="explicit Archive conversion"):
+    with pytest.raises(LocationSkip, match="unavailable for .png"):
         strip_copy(Tools(ArchiveSettings(), lambda: None), source, target)
     assert not target.exists()
+
+
+@pytest.mark.skipif(not shutil.which("exiftool"), reason="ExifTool is required")
+def test_read_only_rename_and_keeper_skip_reports(tmp_path):
+    config = settings_for(tmp_path)
+    archive_root, keepers = tmp_path / "archive", tmp_path / "keepers"
+    archive_root.mkdir()
+    keepers.mkdir()
+    settings = config.model_copy(
+        update={
+            "insights": InsightSettings(export=True, export_roots={"keepers": keepers}),
+            "archive": ArchiveSettings(export_roots={"photos": archive_root}),
+        }
+    )
+    root = settings.libraries["photos"].root
+    synthetic_image(root / "Safe.jpg")
+    xmp_fixture(root / "Safe.jpg.xmp")
+    synthetic_image(root / "Bad.jpg")
+    (root / "Bad.xmp").write_bytes(b"Not a parseable XMP sidecar")
+    with Image.new("RGB", (48, 48), "blue") as image:
+        image.save(root / "Unsupported.png")
+    originals = {
+        entry.name: (entry.read_bytes(), entry.stat().st_mtime_ns) for entry in root.iterdir()
+    }
+
+    with TestClient(create_app(settings)) as client, start_worker(settings):
+        assets = scan(client)
+        assert client.get(BASE + "/archive").json()["destructive"] is False
+        archive = BASE + "/archive"
+        plan = {
+            "operation": "rename",
+            "template": "exported_{stem}",
+            "filters": {"ids": [asset["id"] for asset in assets.values()]},
+        }
+        start = client.post(archive + "/preview", json=plan)
+        start.raise_for_status()
+        preview_url = archive + "/previews/" + start.json()["id"]
+
+        def ready_preview():
+            result = client.get(preview_url).json()
+            assert result["status"] != "error", result
+            return result if result["status"] == "ready" else None
+
+        preview = wait_for(ready_preview)
+        assert preview["include_location"] is False
+        assert preview["skipped_count"] == 1
+        [skipped] = preview["skipped"]
+        assert skipped["path"] == "Unsupported.png"
+        assert ".png" in skipped["reason"]
+        submit = client.post(
+            archive + "/jobs", json={"plan": plan, "confirmation": preview["confirmation"]}
+        )
+        submit.raise_for_status()
+        job_url = archive + "/jobs/" + submit.json()["id"]
+
+        def finished_archive():
+            result = client.get(job_url).json()
+            return result if result["finished_at"] else None
+
+        job = wait_for(finished_archive, timeout=20)
+        assert job["counts"] == {"done": 1, "skipped": 2}
+        assert {item["path"] for item in job["items"] if item["status"] == "skipped"} == {
+            "Unsupported.png",
+            "Bad.jpg",
+        }
+        assert all(item["error"] for item in job["items"] if item["status"] == "skipped")
+        assert sorted(path.name for path in archive_root.iterdir()) == [
+            "exported_Safe.jpg",
+            "exported_Safe.jpg.xmp",
+        ]
+        assert not has_gps((archive_root / "exported_Safe.jpg").read_bytes())
+        check_xmp(archive_root / "exported_Safe.jpg.xmp", False)
+
+        export = BASE + "/insights/exports"
+        options = {
+            "kind": "copy",
+            "destination": "keepers",
+            "xmp": True,
+            "selection": {"minimum_rating": 0},
+        }
+        preview = client.post(export + "/preview", json=options).json()
+        assert preview["total"] == 3 and preview["skipped"] == 1
+        assert preview["items"] == [{"path": "Unsupported.png", "reason": skipped["reason"]}]
+        assert preview["include_location"] is False
+        job_id = client.post(export, json=options).json()["id"]
+        transfers = BASE + "/insights/transfers"
+
+        def finished_export():
+            result = next(
+                row
+                for row in client.get(transfers + "?kind=export").json()["items"]
+                if row["id"] == job_id
+            )
+            assert result["status"] != "error", result
+            return result if result["status"] == "done" else None
+
+        completed = wait_for(finished_export, timeout=20)
+        assert (completed["processed"], completed["total"], completed["skipped"]) == (3, 3, 2)
+        report = client.get(transfers + f"/{job_id}/skips").json()["items"]
+        assert {item["path"] for item in report} == {"Unsupported.png", "Bad.jpg"}
+        assert all(item["reason"] for item in report)
+        outputs = sorted((keepers / job_id).iterdir())
+        assert len(outputs) == 2
+        assert not has_gps(outputs[0].read_bytes())
+        check_xmp(outputs[1], False)
+    assert {
+        entry.name: (entry.read_bytes(), entry.stat().st_mtime_ns) for entry in root.iterdir()
+    } == originals
+
+
+def test_skip_migration_preserves_completed_transfers(tmp_path):
+    path = tmp_path / "index.db"
+    initialize(path, MIGRATIONS[:-1])
+    with connect(path) as db:
+        db.execute(
+            "INSERT INTO transfers(id,kind,status,request,created_at,finished_at) "
+            "VALUES(?,?,?,?,?,?)",
+            ("legacy", "zip", "done", '{"kind":"zip","include_location":true}', 1, 2),
+        )
+    initialize(path)
+    initialize(path)
+    with connect(path) as db:
+        old = db.execute("SELECT status, request, skipped FROM transfers").fetchone()
+        assert tuple(old) == ("done", '{"kind":"zip","include_location":true}', 0)
+        assert db.execute("SELECT count(*) FROM transfer_skips").fetchone()[0] == 0
+        assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"

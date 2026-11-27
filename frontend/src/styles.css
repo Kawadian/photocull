@@ -626,6 +626,7 @@ dialog.modal { max-height: 88dvh; overflow-y: auto; }
 }
 .insight-form label { display: grid; gap: 5px; color: var(--muted); font-size: .84rem; }
 .insight-form .transfer-checkbox { display: flex; align-items: center; min-height: 37px; }
+.transfer-note { grid-column: 1 / -1; margin: 0; }
 .transfer-row progress { width: min(240px, 100%); accent-color: var(--accent); }
 .copy-target { color: var(--muted); overflow-wrap: anywhere; }
 .watch-status { padding: 0 15px 10px; color: var(--muted); font-size: .75rem; }

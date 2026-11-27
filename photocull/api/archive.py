@@ -65,7 +65,7 @@ def mount_archive(app: FastAPI, settings, library_path):
     @app.post(f"{base}/preview", status_code=202)
     def dry_run(library: str, body: ArchiveRequest):
         with connect(library_path(library)) as db:
-            return {"id": invoke(queue, db, settings, library, body.with_location_policy())}
+            return {"id": invoke(queue, db, settings, library, body.with_location_policy(settings))}
 
     @app.get(f"{base}/previews/{{preview_id}}")
     def preview_details(
@@ -82,7 +82,7 @@ def mount_archive(app: FastAPI, settings, library_path):
                 db,
                 settings,
                 library,
-                body.plan.with_location_policy(),
+                body.plan.with_location_policy(settings),
                 body.confirmation,
                 actor(request),
             )
@@ -148,7 +148,7 @@ def mount_archive(app: FastAPI, settings, library_path):
                 "id": invoke(
                     save_rule,
                     db,
-                    body.model_copy(update={"plan": body.plan.with_location_policy()}),
+                    body.model_copy(update={"plan": body.plan.with_location_policy(settings)}),
                 )
             }
 

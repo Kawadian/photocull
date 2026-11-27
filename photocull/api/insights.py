@@ -16,7 +16,15 @@ from photocull.db import connect, write
 from photocull.db.catalog import mark_catalog_updated
 from photocull.db.insights import public_keys, queue, stage_key
 from photocull.db.stories import days, segments
-from photocull.db.transfers import ExportRequest, ReportRequest, cancel, enqueue, public
+from photocull.db.transfers import (
+    ExportRequest,
+    ReportRequest,
+    cancel,
+    enqueue,
+    export_preview,
+    public,
+    transfer_skips,
+)
 from photocull.insights import classify_video, taste_input
 from photocull.media.artifacts import artifact_name, open_regular, transfer_directory
 from photocull.media.cache import video_path
@@ -504,8 +512,7 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
             mark_catalog_updated(db)
         return {"override": body.dead}
 
-    @app.post(PREFIX + "/exports", status_code=202)
-    def export(library: str, body: ExportRequest):
+    def export_options(body: ExportRequest) -> ExportRequest:
         require(config.export, "Keeper export")
         if body.kind == "copy" and body.destination not in config.export_roots:
             raise HTTPException(422, "Choose a configured copy destination")
@@ -515,10 +522,21 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
             require(config.faces, "Face grouping")
         if body.selection.dead is not None:
             require(config.video, "Video analysis")
-        include_location = body.include_location is not False
-        if body.xmp and not include_location:
-            raise HTTPException(422, "Existing XMP sidecars can contain location metadata")
-        options = body.model_copy(update={"include_location": include_location})
+        return body.model_copy(
+            update={"include_location": settings.browser.includes_location(body.include_location)}
+        )
+
+    @app.post(PREFIX + "/exports/preview")
+    def preview_export(library: str, body: ExportRequest, after: After = 0):
+        options = export_options(body)
+        with connect(library_path(library)) as db:
+            db.execute("BEGIN")
+            result = export_preview(db, options, public_keys(db, settings), config, after)
+        return result | {"include_location": options.include_location}
+
+    @app.post(PREFIX + "/exports", status_code=202)
+    def export(library: str, body: ExportRequest):
+        options = export_options(body)
         with connect(library_path(library)) as db:
             return submit_transfer(db, options.kind, options)
 
@@ -542,6 +560,14 @@ def mount_insights(app: FastAPI, settings: Settings, library_path):
                 (kind == "report", limit),
             ).fetchall()
         return {"items": [public(row) for row in rows]}
+
+    @app.get(PREFIX + "/transfers/{job_id}/skips")
+    def skipped_export(library: str, job_id: TaskId, after: After = 0):
+        with connect(library_path(library)) as db:
+            job = get_transfer(db, job_id, config)
+            if job["kind"] == "report":
+                raise HTTPException(404, "This transfer is not an export")
+            return transfer_skips(db, job_id, after)
 
     @app.delete(PREFIX + "/transfers/{job_id}")
     def cancel_transfer(library: str, job_id: TaskId):

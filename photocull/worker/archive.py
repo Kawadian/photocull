@@ -28,6 +28,7 @@ from photocull.db.archive import audit, insert_job, materialize
 from photocull.db.archive_preview import build as build_preview
 from photocull.db.archive_preview import prune as prune_previews
 from photocull.db.archive_rules import schedule as schedule_rules
+from photocull.media.export_location import LocationSkip
 from photocull.media.walk import MediaJail, OutsideLibrary, open_directory, source_key
 from photocull.worker import archive_fs as fs
 from photocull.worker import archive_selftest
@@ -100,7 +101,7 @@ class ArchiveWork:
         row = db.execute(*asset_query(request, asset_id=item["asset_id"])).fetchone()
         if not row or row["revision"] != item["revision"]:
             raise StalePlan("Asset rating or selection changed. Preview again.")
-        if not request.strip_location or request.destructive:
+        if not request.strip_location or request.scrub_copy or request.destructive:
             files, shared = sidecar_state(actual)
             if files != item["sidecars"] or (shared and not item["shared"]):
                 raise StalePlan("Sidecars or file pairing changed. Preview again.")
@@ -218,16 +219,19 @@ class ArchiveWork:
                 if target != source and child_stat(target):
                     raise StalePlan(f"Destination appeared after preview: {target}")
                 staged = Path(record["staged"])
-                if i == 0 and request.strip_location and request.operation in {"copy", "rename"}:
-                    snapshot = staged.with_name(f"input{source.suffix}")
+                if request.scrub_copy:
+                    snapshot = staged.with_name(f"in-{i}{source.suffix}")
                     fs.copy_file(source, snapshot, original, pulse)
                     with open_directory(staged.parent) as directory:
                         pinned = Path(f"/proc/self/fd/{directory}")
-                        strip_copy(
-                            Tools(self.config, pulse, pass_fds=(directory,)),
-                            pinned / snapshot.name,
-                            pinned / staged.name,
-                        )
+                        try:
+                            strip_copy(
+                                Tools(self.config, pulse, pass_fds=(directory,)),
+                                pinned / snapshot.name,
+                                pinned / staged.name,
+                            )
+                        except LocationSkip as error:
+                            raise LocationSkip(f"{source.name}: {error}") from error
                     snapshot.unlink()
                     fs.sync_result(staged, original)
                     record["output"] = fs.fingerprint(staged, pulse)
@@ -515,7 +519,7 @@ class ArchiveWork:
                 status = "error"
                 if plan:
                     status = "recovery"
-                elif isinstance(error, (Cancelled, StalePlan)):
+                elif isinstance(error, (Cancelled, StalePlan, LocationSkip)):
                     status = "cancelled" if isinstance(error, Cancelled) else "skipped"
                 detail = str(error) or status
                 with write(db):
