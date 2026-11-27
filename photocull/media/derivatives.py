@@ -23,6 +23,7 @@ class Variant:
     tier: Tier
     mime: str
     edge: int | None = None
+    include_location: bool = False
 
     @property
     def extension(self) -> str:
@@ -37,6 +38,9 @@ VARIANTS = {
 }
 VARIANTS["native.jpg"] = Variant("native.jpg", "large", "image/jpeg")
 VARIANTS.update({name: Variant(name, "large", "video/mp4") for name in VIDEO_LIMITS})
+VARIANTS["location-photo.jpg"] = Variant("location-photo.jpg", "large", "image/jpeg", 2560, True)
+VARIANTS["location-video.mp4"] = Variant("location-video.mp4", "large", "video/mp4", None, True)
+VIDEO_LIMITS["location-video.mp4"] = VIDEO_LIMITS["video-720.mp4"]
 
 
 def recipe(config: DerivativeSettings) -> str:

@@ -977,3 +977,43 @@ def test_publish_waits_for_scan_and_relinks_verified_rename(catalog, monkeypatch
     renamed = db.execute("SELECT id,path,rating FROM assets WHERE active=1").fetchall()
     assert [tuple(row) for row in renamed] == [(id_, target.name, 4)]
     assert jobs(db, job)["counts"] == {"done": 1}
+
+
+@pytest.mark.parametrize(
+    ("operation", "name", "kind", "fixture"),
+    [
+        ("jpeg", "photo.tiff", "image", synthetic_image),
+        ("hevc", "clip.mov", "video", synthetic_video),
+        ("dng", "camera.dng", "raw", synthetic_dng),
+    ],
+)
+def test_location_free_conversion_preserves_format(catalog, operation, name, kind, fixture):
+    formats("exiftool", *({"hevc": ("ffmpeg", "ffprobe"), "dng": ("dnglab",)}.get(operation, ())))
+    _, root, export, db = catalog
+    source = root / name
+    fixture(source)
+    if kind == "raw":
+        subprocess.run(
+            [
+                "exiftool",
+                "-overwrite_original",
+                "-GPSLatitude=35.25",
+                "-GPSLatitudeRef=N",
+                "-GPSLongitude=139.25",
+                "-GPSLongitudeRef=E",
+                source,
+            ],
+            check=True,
+            capture_output=True,
+        )
+    assert subprocess.check_output(["exiftool", "-n", "-GPSLatitude", source]).strip()
+    body = source.read_bytes()
+    id_ = record(db, root, source, kind=kind)
+    plan = ArchiveRequest(operation=operation, filters=Filters(ids=(id_,)), include_location=False)
+    result = perform(catalog, queue(catalog, plan))
+    assert result["counts"] == {"done": 1}, result
+    [output] = export.iterdir()
+    assert not subprocess.check_output(
+        ["exiftool", "-n", "-GPSLatitude", "-GPSLongitude", output]
+    ).strip()
+    assert source.read_bytes() == body

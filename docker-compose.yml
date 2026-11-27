@@ -31,6 +31,7 @@ services:
     mem_limit: 500m
     environment:
       PHOTOCULL_CONFIG: /etc/photocull/photocull.yaml
+      PHOTOCULL_BROWSER_STRIP_LOCATION:
       PHOTOCULL_BIND_HOST: 127.0.0.1
       PHOTOCULL_BIND_PORT: '8000'
     volumes:
@@ -55,6 +56,7 @@ services:
     mem_limit: ${PHOTOCULL_WORKER_MEM_LIMIT:-2g}
     environment:
       PHOTOCULL_CONFIG: /etc/photocull/photocull.yaml
+      PHOTOCULL_BROWSER_STRIP_LOCATION:
       PHOTOCULL_MODEL_DIR: /models
     volumes:
       - *config

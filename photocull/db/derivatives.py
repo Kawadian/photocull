@@ -95,7 +95,7 @@ def claim_files(db: sqlite3.Connection, recipe: str, priority: int) -> list[Deri
                               f.variant, f.priority
                        FROM derivative_files AS f JOIN assets AS a ON a.id = f.asset_id
                        WHERE f.asset_id = ? AND f.version = ? AND f.status = 'pending'
-                         AND f.variant <> ? AND f.variant NOT LIKE 'video-%'
+                         AND f.variant <> ? AND f.variant NOT LIKE '%.mp4'
                        ORDER BY f.priority DESC, f.requested_at LIMIT 3""",
                     (first["asset_id"], first["version"], first["variant"]),
                 )
