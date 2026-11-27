@@ -340,6 +340,8 @@ function JobDetails({ job, busy, action }: { job: Job; busy: boolean; action: (p
   const processed = total - (c.pending ?? 0) - (c.running ?? 0)
   return <section className="insight-section" aria-label="Job details">
     <h3>{operations[job.request.operation]}</h3>
+    {typeof job.request.include_location === 'boolean' && <p className="insight-muted">{job.request.include_location
+      ? 'Source location included when available' : 'Location information removed from exports'}</p>}
     <div className="insight-actions"><progress aria-label="Items processed" value={processed} max={total || 1} />
       <span>{processed} of {total} items processed</span></div>
     {!job.finished_at && <div><button className="button secondary" disabled={busy || !!job.cancelled}

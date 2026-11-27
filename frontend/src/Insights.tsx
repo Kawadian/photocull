@@ -737,16 +737,16 @@ function Transfers({ base, version, capability, report }: ScreenProps & { report
           <Status error={people?.error} pending={!people} retry={work.retry} />
         </>}
         <label className="transfer-checkbox"><input type="checkbox" name="xmp" /> Include existing XMP sidecars</label>
-        {!includeLocation && <p className="insight-muted">Location removal keeps the original media format and cleans any included XMP sidecars. Unsupported files or files that fail verification are skipped.</p>}
       </>}
       <label>Location information<select value={String(includeLocation)}
         onChange={(event) => setIncludeLocation(event.target.value === 'true')}>
-        <option value="true">Include location information</option>
-        <option value="false">Remove location information</option>
+        <option value="true">Include location</option>
+        <option value="false">Remove location</option>
       </select></label>
       <label>From date<input type="date" name="start" /></label>
       <label>To date<input type="date" name="end" /></label>
       <button className="button primary">{report ? 'Generate HTML report' : 'Preview export'}</button>
+      {!report && !includeLocation && <p className="insight-muted transfer-note">Location removal keeps the original media format and cleans any included XMP sidecars. Unsupported files or files that fail verification are skipped.</p>}
       </fieldset>
     </form>
     {preview && <section className="insight-section" aria-label="Export preview">
@@ -754,12 +754,14 @@ function Transfers({ base, version, capability, report }: ScreenProps & { report
       <p>{preview.data.total} matching items · {preview.data.skipped} unsupported</p>
       <p>{preview.data.include_location ? 'Export includes source location information.'
         : 'Export removes source location information. Copies and included sidecars are verified before export.'}</p>
-      <SkipItems items={preview.data.items} />
-      {preview.data.next_cursor !== null && <button className="button secondary" disabled={work.busy}
-        onClick={() => loadPreview(preview.body, preview.data.next_cursor ?? 0)}>Next skipped items</button>}
-      <button className="button primary" disabled={work.busy || preview.data.total === preview.data.skipped}
-        onClick={() => { void work.action(exportUrl, json('POST', preview.body), () => setPreview(undefined))
-          .catch(() => {}) }}>Start export</button>
+      {!!preview.data.items.length && <SkipItems items={preview.data.items} />}
+      <div className="insight-actions">
+        {preview.data.next_cursor !== null && <button className="button secondary" disabled={work.busy}
+          onClick={() => loadPreview(preview.body, preview.data.next_cursor ?? 0)}>Next skipped items</button>}
+        <button className="button primary" disabled={work.busy || preview.data.total === preview.data.skipped}
+          onClick={() => { void work.action(exportUrl, json('POST', preview.body), () => setPreview(undefined))
+            .catch(() => {}) }}>Start export</button>
+      </div>
     </section>}
     <Status error={work.error || result?.error} pending={!result} empty={!tasks.length} retry={work.retry}>
       {report ? 'No trip reports generated yet.' : 'No exports yet.'}

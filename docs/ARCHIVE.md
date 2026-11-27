@@ -157,14 +157,13 @@ The worker skips outputs that grow. Duplicate matches and filename pairs remain 
 
 ## Location information in exports
 
-Archive copies, export renames, and keeper folder or ZIP exports follow `browser.strip_location` (`PHOTOCULL_BROWSER_STRIP_LOCATION`), which defaults to `true`. Each operation lets you choose **Include location information** for a byte-identical copy. Archive binds the choice to the preview and job. The keeper confirmation carries it into the job. Exports with an already recorded choice keep that policy. Export renames work on read-only libraries. In-place operations and explicit conversion defaults retain their existing behavior.
+Archive copies, export renames, and keeper folder or ZIP exports follow `browser.strip_location` (`PHOTOCULL_BROWSER_STRIP_LOCATION`), which defaults to `true`. Choose to include location for a byte-identical copy. Archive binds the choice to the preview and job. The keeper confirmation carries it into the job. Exports with an already recorded choice keep that policy. Export renames work on read-only libraries. In-place operations and explicit conversion defaults retain their existing behavior.
 
 For JPEG, HEIC/HEIF/HIF, TIFF, DNG and compatible camera RAW files, ExifTool removes recognized location fields from EXIF, XMP, IPTC and other readable metadata. The worker compares decoded pixels or RAW samples and calibration, preserves unrelated metadata such as capture time, camera, orientation, rating and ICC, and verifies that location tags are absent. Archive includes and cleans both same-stem and extension-qualified XMP sidecars. Keeper exports do the same for sidecars when requested. Free text and filenames are preserved.
 
 For compatible MP4/M4V, MOV and MKV, FFmpeg copies the streams and removes location keys. Other metadata is retained and checked. ExifTool checks for QuickTime and embedded location tags. The worker also compares encoded packet hashes.
 
 Archive and keeper previews show unsupported formats, such as PNG, WebP and AVIF, by extension. Checks that require reading the source run in the job. Files that cannot be verified are skipped with a reason. Examples include unreadable sidecars, multi-image files that the verifier cannot compare, videos with extra or timed metadata streams, and RAW files with opaque private data or embedded originals. If any requested sidecar fails verification, the whole item is skipped. Copies are staged on the export side. Originals and source sidecars are opened read-only. An explicit format conversion is a separate Archive operation.
-
 
 ## Saved conversion rules
 

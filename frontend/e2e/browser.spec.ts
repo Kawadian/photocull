@@ -143,6 +143,7 @@ test('opens photo information, draws face boxes, rates, zooms and runs a slidesh
       faces: [{ id: 2, name: 'Mika', person_id: 1, left: .33, top: .25, right: .48, bottom: .52 }],
     } })
   })
+  await page.clock.install()
   await page.goto('/?view=browser&library=gallery-2025&lang=en')
   await page.getByRole('button', { name: 'Frame-118.jpg', exact: true }).click()
   const viewer = page.getByRole('dialog', { name: 'Frame-118.jpg' })
@@ -172,6 +173,8 @@ test('opens photo information, draws face boxes, rates, zooms and runs a slidesh
   await viewer.getByLabel('Interval').selectOption('2')
   await viewer.getByText('Slideshow options', { exact: true }).click()
   await viewer.getByRole('button', { name: 'Play slideshow' }).click()
+  await expect(viewer.getByRole('button', { name: 'Pause slideshow' })).toBeVisible()
+  await page.clock.runFor(2100)
   const next = page.getByRole('dialog', { name: 'Frame-117.jpg' })
   await expect(next).toBeVisible()
   await next.getByRole('button', { name: 'Pause slideshow' }).click()
