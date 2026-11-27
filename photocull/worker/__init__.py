@@ -29,6 +29,7 @@ from photocull.db.jobs import (
     recover,
     skip_unavailable_previews,
 )
+from photocull.media.artifacts import prune_artifacts, unlink_artifact
 from photocull.media.cache import cache_path
 from photocull.media.walk import MediaJail, SourceChanged, source_key
 from photocull.worker.bursts import refresh_bursts
@@ -118,15 +119,13 @@ class LibraryWorker:
                 if not count:
                     break
         for variant in CACHE_DIRS:
-            for temporary in (self.state / variant).glob(".[0-9]*-*-*"):
-                temporary.unlink(missing_ok=True)
+            prune_artifacts(self.state / variant, ".[0-9]*-*-*")
         configure_scoring(self.db, self.settings.scoring, self.pulse)
         if self.ml is not None:
             self.ml.configure()
         if self.insights is not None:
-            for staged in (self.state / "video").glob(".video-*"):
-                self.pulse()
-                staged.unlink(missing_ok=True)
+            self.pulse()
+            prune_artifacts(self.state / "video", ".video-*")
             self.insights.configure()
         if self.stories is not None:
             self.stories.configure(self.pulse)
@@ -288,7 +287,7 @@ class LibraryWorker:
         for asset_id, digest, current in rows:
             if digest != current:
                 for variant in CACHE_DIRS:
-                    cache_path(self.state, variant, asset_id, digest).unlink(missing_ok=True)
+                    unlink_artifact(cache_path(self.state, variant, asset_id, digest))
         with write(self.db):
             self.db.executemany(
                 "DELETE FROM preview_cleanup WHERE asset_id=? AND content_hash=?",

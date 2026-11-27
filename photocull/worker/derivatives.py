@@ -7,13 +7,19 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 
 from photocull.config import Settings
 from photocull.db import derivatives as queue
 from photocull.db import write
+from photocull.media.artifacts import (
+    open_artifact,
+    open_regular,
+    prune_artifacts,
+    stage_artifact,
+    unlink_artifact,
+)
 from photocull.media.derivatives import VARIANTS, VIDEO_LIMITS, derivative_path, recipe
-from photocull.media.walk import MediaJail, SourceChanged, source_key
+from photocull.media.walk import MediaJail, SourceChanged, open_directory, source_key
 
 LOG = logging.getLogger(__name__)
 MIB = 1024 * 1024
@@ -56,15 +62,10 @@ def image_blurhash(image) -> str:
 
 @contextmanager
 def staged_image(target: Path, pixels, variant, settings, *, coordinates=None):
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(dir=target.parent, prefix=".derivative-", delete=False) as file:
-        staged = Path(file.name)
-        try:
-            encode_image(pixels, variant, settings, file, coordinates=coordinates)
-            file.close()
-            yield staged
-        finally:
-            staged.unlink(missing_ok=True)
+    with stage_artifact(target, ".derivative-") as file:
+        encode_image(pixels, variant, settings, file, coordinates=coordinates)
+        file.close()
+        yield Path(file.name)
 
 
 def _generate(settings: Settings, library: str, jobs: list[queue.DerivativeJob], pulse: Callable):
@@ -91,9 +92,13 @@ def _generate(settings: Settings, library: str, jobs: list[queue.DerivativeJob],
         if not video:
             digest = first.version.split("-", 1)[0]
             legacy = cache_path(settings.library_state(library), "previews", first.asset_id, digest)
-            if first.kind == "video" and legacy.is_file():
-                pixels = stack.enter_context(Image.open(legacy))
-            else:
+            pixels = None
+            if first.kind == "video":
+                with suppress(OSError):
+                    poster, _ = stack.enter_context(open_artifact(legacy))
+                    handle = stack.enter_context(os.fdopen(poster, "rb", closefd=False))
+                    pixels = stack.enter_context(Image.open(handle))
+            if pixels is None:
                 pixels, _ = decode_source(fd, first.kind, color_managed=True)
                 stack.enter_context(pixels)
             blurhash = image_blurhash(pixels)
@@ -123,11 +128,12 @@ def _generate(settings: Settings, library: str, jobs: list[queue.DerivativeJob],
                 with output as staged:
                     with jail.open_media(first.path) as (current, _):
                         verify(current)
-                    size = staged.stat().st_size
-                    if not 0 < size <= budget:
-                        raise ValueError("File exceeds the derivative cache limit")
-                    staged.chmod(0o600 if variant.include_location else 0o644)
-                    staged.replace(target)
+                    with open_regular(None, str(staged)) as (staged_fd, info):
+                        size = info.st_size
+                        if not 0 < size <= budget:
+                            raise ValueError("File exceeds the derivative cache limit")
+                        os.fchmod(staged_fd, 0o600 if variant.include_location else 0o644)
+                    staged.replace(staged.with_name(target.name))
                 sizes[job.variant] = size
             except (OSError, RuntimeError, ValueError) as error:
                 LOG.warning(
@@ -155,15 +161,23 @@ class Derivatives:
                 for entry in queue.recover_files(db):
                     if variant := VARIANTS.get(entry["variant"]):
                         with suppress(OSError, ValueError):
-                            derivative_path(
-                                settings, name, entry["asset_id"], variant, entry["version"]
-                            ).unlink(missing_ok=True)
+                            unlink_artifact(
+                                derivative_path(
+                                    settings, name, entry["asset_id"], variant, entry["version"]
+                                )
+                            )
             for tier in ("hot", "large"):
                 root = settings.derivative_root(tier)
                 for name in self.catalogs:
-                    for prefix in (".derivative-", ".video-"):
-                        for staged in (root / name).glob(f"*/{prefix}*"):
-                            staged.unlink(missing_ok=True)
+                    directory = (root / name).absolute()
+                    with (
+                        suppress(FileNotFoundError, NotADirectoryError),
+                        open_directory(directory) as parent,
+                    ):
+                        for shard in os.listdir(parent):
+                            if shard.isascii() and shard.isdecimal():
+                                prune_artifacts(directory / shard, ".derivative-*")
+                                prune_artifacts(directory / shard, ".video-*")
         self.stop = stop
 
     def _pulse(self) -> None:
@@ -197,8 +211,8 @@ class Derivatives:
                 key = (oldest["asset_id"], oldest["variant"], oldest["version"])
                 if variant:
                     try:
-                        derivative_path(self.settings, name, key[0], variant, key[2]).unlink(
-                            missing_ok=True
+                        unlink_artifact(
+                            derivative_path(self.settings, name, key[0], variant, key[2])
                         )
                     except OSError as error:
                         LOG.warning("Could not evict derivative %s/%s: %s", name, key[0], error)

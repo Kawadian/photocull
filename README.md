@@ -169,8 +169,8 @@ Keep the API on loopback and expose the nginx example only on your LAN or Tailsc
 
 The [Compose example](docker-compose.yml) uses Linux Docker Engine host networking for nginx and the loopback API, which keeps the connecting client's IP visible to nginx. The worker shares state through the mounted directory and can be restarted independently.
 
-1. Set `PHOTOCULL_LIBRARY_DIR` in `.env`. The host path is mounted as `/mnt/PhotoLibrary`. For a symlink layout, supply your own YAML with `PHOTOCULL_CONFIG_FILE` and a Compose override that mounts the view and all allowed target roots at the paths used by the symlinks. The worker mounts the media read-only.
-2. Set `PHOTOCULL_UID` and `PHOTOCULL_GID` to a user and group that can access the media and write the state and cache directories. For sidecar export, give the API user write permission on the media directories.
+1. Set `PHOTOCULL_LIBRARY_DIR` in `.env`. The host path is mounted as `/mnt/PhotoLibrary`. For a symlink layout, supply your own YAML with `PHOTOCULL_CONFIG_FILE` and a Compose override that mounts the view and all allowed target roots at the paths used by the symlinks. The API and worker mount the media read-only.
+2. Set `PHOTOCULL_UID` and `PHOTOCULL_GID` to a user and group that can access the media and write the state and cache directories. To enable explicit sidecar export, use a Compose override to make only the API mount for that media path writable and grant the API user directory write permission.
 3. As that user, create the default state and cache directories and start the services.
 
 ```sh
@@ -186,7 +186,7 @@ Open port 80 on the host from an allowed client. Port 8000 is the API upstream o
 
 The example [API unit](deploy/systemd/photocull-api.service) and [worker unit](deploy/systemd/photocull-worker.service) expect a `photocull` service user, checkout and built frontend under `/opt/photocull`, and a Python 3.12 environment at `/opt/photocull/.venv`. Install the worker extra and FFmpeg there. Install the [example YAML](deploy/photocull.example.yaml) as `/etc/photocull/photocull.yaml`. The units accept optional overrides from `/etc/photocull/photocull.env`.
 
-Give the service user read access to the media. For XMP export, grant directory write access and set the API unit's `ReadWritePaths` to the canonical roots where sidecars are allowed. systemd creates `/var/lib/photocull` for state. If the library requires a separate mount, add the mount dependency in a unit drop-in.
+Give the service user read access to the media. For explicit XMP export, grant directory write access and set `ReadWritePaths` in an API unit drop-in to the canonical roots where sidecars are allowed. systemd creates `/var/lib/photocull` for state. If the library requires a separate mount, add the mount dependency in a unit drop-in.
 
 Install both units in `/etc/systemd/system/` and enable them with `systemctl enable --now photocull-api photocull-worker` after `systemctl daemon-reload`. Install the nginx site and enable it as the only default server on port 80. Run `nginx -t` before reloading nginx. Restart the indexer with `systemctl restart photocull-worker`.
 
