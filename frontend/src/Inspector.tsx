@@ -1,9 +1,8 @@
-import { providerLabel } from './api'
 import { Check, FileOutput, Scan, Star, Undo2, X } from 'lucide-react'
 import { useState } from 'react'
 import type { Ref } from 'react'
 import { Dialog } from './Dialog'
-import { assetName, json, message, request } from './api'
+import { assetName, json, message, providerLabel, request } from './api'
 import { ScoreBadges } from './Analysis'
 import type { Asset, Progress, XmpPlan } from './api'
 
@@ -200,7 +199,8 @@ export function Inspector({ base, asset, busy, undoAvailable, onRating, onUndo, 
               <button className="button secondary" onClick={() => onVideo(asset)}>Open video analysis</button>}
             {(asset.sharpness !== null || asset.auto_reject) && <ScoreBadges asset={asset} />}
             {asset.kind === 'video' ? <p className="score-state">Scores apply to still images.</p>
-              : !asset.flag_provider && (asset.sharpness === null || (asset.score_status && asset.score_status !== 'done')) && (
+              : (asset.flag_provider == null || asset.flag_provider === 'local') &&
+                (asset.sharpness === null || (asset.score_status && asset.score_status !== 'done')) && (
                 <p className={asset.score_status === 'error' ? 'inline-error' : 'score-state'} role="status">
                   {asset.score_status ? scoreStates[asset.score_status] : 'Awaiting scores'}
                   {asset.score_error && <> · {asset.score_error}</>}
