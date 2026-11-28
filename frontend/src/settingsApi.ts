@@ -5,7 +5,7 @@ export type Field = {
   default: unknown
   running: unknown
   source: string
-  restart: 'api-worker' | 'egress-proxy'
+  restart: 'api-worker' | 'egress-proxy' | 'live'
   pending: boolean
   type: string
   nullable: boolean
@@ -20,7 +20,23 @@ export type Field = {
   pattern?: string
 }
 
+export type RestartService = 'worker' | 'egress-proxy' | 'api'
+
+export type RestartInfo = {
+  services: RestartService[]
+  pending_fields: string[]
+  automatic: boolean
+  busy: boolean
+  result: {
+    request: { id: string; revision: string; requested_at: number; services: RestartService[] }
+    status: 'queued' | 'running' | 'succeeded' | 'failed' | 'expired'
+    restarted: RestartService[]
+    finished_at?: number
+  } | null
+}
+
 export type Settings = {
+  restart: RestartInfo
   fields: Record<string, Field>
   revision: string
   history: string[]

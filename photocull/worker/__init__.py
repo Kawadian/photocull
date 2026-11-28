@@ -15,7 +15,7 @@ from pathlib import Path
 from sqlite3 import Connection
 from threading import Event, Lock
 
-from photocull.config import STAGES, Library, Settings, load_settings
+from photocull.config import MAX_VLM_CONCURRENCY, STAGES, Library, Settings
 from photocull.db import connect, initialize, write
 from photocull.db.catalog import mark_catalog_updated
 from photocull.db.decisions import cancel_remote, enqueue_preview, selection
@@ -30,9 +30,11 @@ from photocull.db.jobs import (
     recover,
     skip_unavailable_previews,
 )
+from photocull.live_vlm import LiveVLM
 from photocull.media.artifacts import prune_artifacts, unlink_artifact
 from photocull.media.cache import cache_path
 from photocull.media.walk import MediaJail, SourceChanged, source_key
+from photocull.settings_store import SettingsStore
 from photocull.vlm import OpenAIProvider
 from photocull.worker.bursts import refresh_bursts
 from photocull.worker.decisions import LibraryDecisions
@@ -278,7 +280,7 @@ class LibraryWorker:
                     self.db,
                     job.asset_id,
                     job.content_hash,
-                    selection(self.db, self.settings.vlm.selection),
+                    selection(self.db, self.decisions.config.selection),
                     self.decisions.ml.tag_key,
                 )
             if not error and job.stage == "preview" and self.settings.ml.enabled:
@@ -378,7 +380,12 @@ class LibraryWorker:
         between_work()
         tagged = (
             ml.process_tags()
-            if ml and selection(self.db, self.settings.vlm.selection).tags == "local"
+            if ml
+            and selection(
+                self.db,
+                self.decisions.config.selection if self.decisions else self.settings.vlm.selection,
+            ).tags
+            == "local"
             else False
         )
         decided = self.decisions.step(between_work) if self.decisions else False
@@ -411,7 +418,14 @@ class LibraryWorker:
         return grouped or bool(video) or searched
 
 
-def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=None) -> int:
+def run(
+    settings: Settings,
+    stop: Event,
+    *,
+    model_factory=Siglip,
+    face_factory=None,
+    settings_store: SettingsStore | None = None,
+) -> int:
     from photocull.worker.archive import Archives
     from photocull.worker.derivatives import Derivatives
 
@@ -422,10 +436,11 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=N
         with ExitStack() as stack:
             workers: list[LibraryWorker] = []
             inference = InferenceProcess(settings, model_factory)
-            remote = OpenAIProvider(settings.state_dir, settings.vlm.openai, stop)
-            vlm_pool = stack.enter_context(
-                ThreadPoolExecutor(max_workers=settings.vlm.openai.concurrency)
-            )
+            applied_vlm = settings.vlm
+            live_vlm = LiveVLM(applied_vlm, settings_store)
+            remote = OpenAIProvider(settings.state_dir, applied_vlm.openai, stop)
+            # Each wave submits at most the current configured concurrency.
+            vlm_pool = stack.enter_context(ThreadPoolExecutor(max_workers=MAX_VLM_CONCURRENCY))
             ready = False
             search_cursor = 0
             next_search_probe = 0.0
@@ -517,6 +532,17 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=N
 
             while not stop.is_set():
                 pulse()
+                current_vlm = live_vlm.read()
+                if current_vlm != applied_vlm:
+                    for worker in workers:
+                        worker.decisions.configure(current_vlm)
+                        if current_vlm.selection != applied_vlm.selection:
+                            with write(worker.db):
+                                cancel_remote(
+                                    worker.db, selection(worker.db, current_vlm.selection)
+                                )
+                                mark_catalog_updated(worker.db)
+                    applied_vlm = current_vlm
                 for name, future in tuple(scans.items()):
                     if future.done():
                         future.result()
@@ -578,4 +604,5 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, handle_stop)
     signal.signal(signal.SIGINT, handle_stop)
-    raise SystemExit(run(load_settings(), stop))
+    store = SettingsStore.from_config()
+    raise SystemExit(run(store.read().settings, stop, settings_store=store))

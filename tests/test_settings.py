@@ -349,3 +349,162 @@ def test_models_and_connection_use_approved_targets(tmp_path, monkeypatch):
         ).json()
         assert saved["fields"]["vlm.openai.base_url"]["value"] == TRUSTED
         assert saved["fields"]["network.egress_allow"]["value"] == ["vlm.example.test"]
+
+
+def test_restart_request_status_and_restart_of_api(tmp_path, monkeypatch):
+    import os
+
+    from photocull import restart
+
+    monkeypatch.setattr(restart, "ROOT_UID", os.geteuid())
+    monkeypatch.setattr(restart, "validate_wrapper", lambda _: None)
+    store, headers, *_ = deployment(
+        tmp_path,
+        env={
+            "PHOTOCULL_SETTINGS_RESTART_SERVICES": "api,worker,egress-proxy",
+            "PHOTOCULL_SETTINGS_EGRESS_MANAGED": "1",
+        },
+    )
+    directory = store.directory / "restart"
+    requests = directory / "requests"
+    results = directory / "results"
+    calls = []
+    monkeypatch.setattr(restart.subprocess, "run", lambda args, **_: calls.append(args))
+    with TestClient(create_app(settings_store=store), headers=headers) as client:
+        saved = change(client, {"worker.batch_size": 12, "network.egress_allow": []}).json()
+        assert saved["restart"]["automatic"] is False
+        assert saved["restart"]["pending_fields"] == ["network.egress_allow", "worker.batch_size"]
+        requests.mkdir(mode=0o700, parents=True)
+        results.mkdir(mode=0o755)
+        request = {"revision": saved["revision"]}
+        assert client.get(f"{URL}/restart").json()["automatic"] is True
+        assert client.post(f"{URL}/restart", json={"revision": "base"}).status_code == 409
+        assert (
+            client.post(f"{URL}/restart", json=request | {"services": ["arbitrary"]}).status_code
+            == 422
+        )
+        assert (
+            client.post(
+                f"{URL}/restart", headers={"Origin": "https://wrong.test"}, json=request
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                f"{URL}/restart", headers={"Sec-Fetch-Site": "cross-site"}, json=request
+            ).status_code
+            == 403
+        )
+        assert not (requests / restart.REQUEST).exists()
+        reply = client.post(f"{URL}/restart", json=request)
+        assert reply.status_code == 202
+        queued = reply.json()["result"]
+        assert queued["status"] == "queued"
+        details = json.loads((requests / restart.REQUEST).read_text())
+        assert details["id"] == queued["request"]["id"]
+        assert details["services"] == ["worker", "egress-proxy", "api"]
+        assert details["requested_at"] > 0
+        assert (requests / restart.REQUEST).stat().st_mode & 0o777 == 0o600
+        assert client.post(f"{URL}/restart", json=request).status_code == 409
+        assert change(client, {"worker.batch_size": 16}, saved["revision"]).status_code == 409
+
+    wrapper = Path("/usr/local/bin/fixture-wrapper")
+    restart.run_host(directory, wrapper, restart.SERVICES)
+    assert calls == [[str(wrapper), "restart", name] for name in restart.SERVICES]
+    assert not (requests / restart.REQUEST).exists()
+
+    with TestClient(create_app(settings_store=store), headers=headers) as restarted:
+        done = restarted.get(f"{URL}/restart").json()
+        assert not done["busy"] and not done["services"]
+        assert done["result"]["status"] == "succeeded"
+        assert done["result"]["finished_at"] >= details["requested_at"]
+        assert done["result"]["request"]["id"] == details["id"]
+        assert done["result"]["restarted"] == details["services"]
+
+    # A duplicate request left after a crash must not invoke the wrapper again.
+    (requests / restart.REQUEST).write_text(json.dumps(details))
+    restart.run_host(directory, wrapper, restart.SERVICES)
+    assert len(calls) == 3
+
+
+def test_host_handoff_rejects_unlisted_stale_and_symlink_requests(tmp_path, monkeypatch):
+    import os
+    from time import time
+    from uuid import uuid4
+
+    from photocull import restart
+
+    monkeypatch.setattr(restart, "ROOT_UID", os.geteuid())
+    monkeypatch.setattr(restart, "validate_wrapper", lambda _: None)
+    directory = tmp_path / "restart"
+    requests = directory / "requests"
+    requests.mkdir(mode=0o700, parents=True)
+    results = directory / "results"
+    results.mkdir(mode=0o755)
+    wrapper = Path("/usr/local/bin/fixture-wrapper")
+    pending = requests / restart.REQUEST
+    base = {
+        "id": uuid4().hex,
+        "revision": "base",
+        "requested_at": int(time()),
+        "services": ["worker"],
+        "egress": None,
+    }
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("The host must not run this request")
+
+    monkeypatch.setattr(restart.subprocess, "run", forbidden)
+    for args in (
+        {"services": ["--privileged"]},
+        {"services": ["worker", "worker"]},
+        {"command": ["arbitrary"]},
+        {"requested_at": 1},
+        {"services": ["api"]},
+    ):
+        pending.write_text(json.dumps(base | args | {"id": uuid4().hex}))
+        restart.run_host(directory, wrapper, ("worker",))
+        assert not pending.exists()
+
+    outside = tmp_path / "untrusted.json"
+    outside.write_text(json.dumps(base))
+    pending.symlink_to(outside)
+    restart.run_host(directory, wrapper, ("worker",))
+    assert not pending.is_symlink() and outside.exists()
+
+
+def test_live_vlm_api_and_restart_only_endpoint(tmp_path):
+    store, headers, *_ = deployment(tmp_path)
+    with TestClient(create_app(settings_store=store), headers=headers) as client:
+        settings = change(
+            client,
+            {
+                "vlm.openai.max_requests_per_day": 90,
+                "vlm.openai.max_requests_per_run": 40,
+                "vlm.openai.concurrency": 5,
+                "vlm.openai.timeout_seconds": 10,
+                "vlm.openai.requests_per_minute": 60,
+                "vlm.on_failure": "local",
+                "vlm.flags": "openai",
+            },
+        ).json()
+        assert not settings["restart"]["services"]
+        assert settings["fields"]["vlm.openai.concurrency"]["running"] == 5
+        assert settings["fields"]["vlm.on_failure"]["restart"] == "live"
+        providers = "/api/libraries/photos/providers"
+        assert client.get(providers).json()["selection"]["flags"] == "openai"
+
+        settings = change(
+            client,
+            {
+                "vlm.tags": "openai",
+                "vlm.flags": "local",
+                "vlm.openai.base_url": TRUSTED,
+                "vlm.openai.model": "next",
+            },
+            settings["revision"],
+        ).json()
+        assert settings["fields"]["vlm.tags"]["pending"] is True
+        assert settings["fields"]["vlm.flags"]["restart"] == "live"
+        assert settings["fields"]["vlm.openai.model"]["restart"] == "api-worker"
+        assert client.get(providers).json()["selection"] == {"tags": "local", "flags": "local"}

@@ -167,13 +167,16 @@ class ProviderSelection(BaseModel):
     flags: DecisionProvider = "local"
 
 
+MAX_VLM_CONCURRENCY = 8
+
+
 class OpenAISettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     base_url: SecretStr = Field(default=SecretStr(""), repr=False, exclude=True)
     model: str = Field(default="", max_length=256, repr=False, exclude=True)
     timeout_seconds: float = Field(default=20, ge=0.1, le=60)
-    concurrency: int = Field(default=2, ge=1, le=8)
+    concurrency: int = Field(default=2, ge=1, le=MAX_VLM_CONCURRENCY)
     requests_per_minute: int = Field(default=30, ge=1, le=600)
     max_requests_per_run: int = Field(default=100, ge=0, le=100_000)
     max_requests_per_day: int = Field(default=500, ge=0, le=100_000)

@@ -1,9 +1,10 @@
 import { Aperture, History, Search, Settings2 } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, message } from './api'
 import { Dialog } from './Dialog'
 import { formatValue, settingsRequest } from './settingsApi'
-import type { Changes, Diff, Settings } from './settingsApi'
+import type { Changes, Diff, RestartInfo, Settings } from './settingsApi'
+import { SettingsApply } from './SettingsApply'
 import { SettingsEndpoint } from './SettingsEndpoint'
 import { categories, descriptions } from './settingsFields'
 import { inputProblem, SettingInput } from './SettingsInputs'
@@ -48,7 +49,10 @@ function SettingsEditor({ initial }: { initial: Settings }) {
   const active = useRef(false)
 
   const count = Object.keys(changes).length
-  const pending = Object.values(saved.fields).filter((field) => field.pending).length
+  const pending = saved.restart.pending_fields.length
+  const restartStatus = useCallback((restart: RestartInfo) => {
+    setSaved((current) => ({ ...current, restart }))
+  }, [])
   const search = query.trim().toLowerCase()
   const result = descriptions.filter((entry) => saved.fields[entry.key] && (
     search ? [entry.label, entry.help, entry.key, entry.category, saved.fields[entry.key].source]
@@ -124,14 +128,16 @@ function SettingsEditor({ initial }: { initial: Settings }) {
     return <section className="settings-field" aria-label={label} key={key}>
       <div className="settings-field-header">
         <div><h3>{label}</h3><code>{key}</code></div>
-        <span className="settings-restart">{field.restart === 'egress-proxy' ? 'egress 再起動が必要' : '再起動が必要'}</span>
+        <span className="settings-restart">{field.restart === 'live' ? '即時反映（次の処理から）' :
+          field.restart === 'egress-proxy' ? 'egress 再起動が必要' : '再起動が必要' }</span>
       </div>
       <p>{help}</p>
       {env && <p className="settings-source">env で上書き中 · {field.source}</p>}
       <SettingInput field={key} label={label} schema={field} value={current} disabled={env || busy}
         change={(next) => change(key, next)} pick={setPicker} lockedLibraries={saved.locked_libraries} />
       {problem && <p className="settings-error">{problem}</p>}
-      {field.pending && <p>稼働中の API の値 <code>{formatValue(field.running)}</code></p>}
+      {field.pending && field.restart !== 'egress-proxy' &&
+        <p>稼働中の API の値 <code>{formatValue(field.running)}</code></p>}
       {dirty && <p>保存済みの値 <code>{formatValue(field.value)}</code></p>}
       <div className="settings-default">
         <small>既定値 <code>{formatValue(field.default)}</code></small>
@@ -154,6 +160,8 @@ function SettingsEditor({ initial }: { initial: Settings }) {
         setShowHistory(true)
       }}><History size={17} aria-hidden="true" />変更履歴</button>
     </div>
+    <SettingsApply info={saved.restart} revision={saved.revision} managedEgress={saved.network.proxy_reads_saved_settings}
+      disabled={busy || count > 0 || saved.restart.busy} refresh={setSaved} update={restartStatus} />
     <label className="settings-search">
       <Search size={18} aria-hidden="true" />
       <input className="settings-input" type="search" aria-label="設定を検索" placeholder="すべての設定を検索"
@@ -203,7 +211,7 @@ function SettingsEditor({ initial }: { initial: Settings }) {
     <div className="settings-savebar">
       <div>
         <div role="status">{busy ? '処理しています…' : notice || (count ? `未保存の変更 ${count} 件` : '未保存の変更はありません')}</div>
-        {pending > 0 && <small>API に未反映の設定 {pending} 件</small>}
+        {pending > 0 && <small>再起動待ちの設定 {pending} 件</small>}
         {error && !preview && !showHistory && <p role="alert" className="settings-error">{error}</p>}
       </div>
       <div className="settings-row">
@@ -212,7 +220,7 @@ function SettingsEditor({ initial }: { initial: Settings }) {
           setError('')
           setNotice('変更を取り消しました。')
         }}>取り消し</button>
-        <button className="button primary" type="button" disabled={!count || busy} onClick={() => void apply(false)}>差分を確認</button>
+        <button className="button primary" type="button" disabled={!count || busy || saved.restart.busy} onClick={() => void apply(false)}>差分を確認</button>
       </div>
     </div>
     {picker && <SettingsPicker picker={picker} close={() => setPicker(undefined)} />}
@@ -222,7 +230,7 @@ function SettingsEditor({ initial }: { initial: Settings }) {
       <ul className="settings-history">
         {saved.history.map((backup) => <li key={backup}>
           <time>{timestamp(backup)}</time>
-          <button className="button secondary" type="button" disabled={busy || count > 0}
+          <button className="button secondary" type="button" disabled={busy || count > 0 || saved.restart.busy}
             onClick={() => void apply(false, backup)}>復元差分を確認</button>
         </li>)}
       </ul>

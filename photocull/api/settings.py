@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import nullcontext
+from hashlib import sha256
 from typing import Annotated
 from urllib.parse import urlsplit
 
@@ -10,7 +11,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from photocull.config import OpenAISettings, Settings
+from photocull.config import OpenAISettings, Settings, VLMSettings
+from photocull.live_vlm import LIVE_VLM_FIELDS, PROVIDER_FIELDS, LiveVLM
+from photocull.restart import SERVICES, RestartBridge, RestartError
 from photocull.settings_paths import PATH_FIELDS, PathBrowser
 from photocull.settings_store import (
     DEFAULTS,
@@ -39,6 +42,10 @@ class Body(BaseModel):
 class Change(Body):
     revision: Revision
     changes: dict[str, object] = Field(max_length=len(FIELDS))
+
+
+class Apply(Body):
+    revision: Revision
 
 
 class Restore(Body):
@@ -97,7 +104,9 @@ def _schema(key: str) -> dict:
     } | {"nullable": "anyOf" in raw, "path": PATH_FIELDS.get(key)}
 
 
-def settings_router(store: SettingsStore, running: Settings, provider: OpenAIProvider) -> APIRouter:
+def settings_router(
+    store: SettingsStore, running: Settings, provider: OpenAIProvider, live_vlm: LiveVLM
+) -> APIRouter:
     router = APIRouter(prefix="/api/settings")
     paths = PathBrowser(
         running,
@@ -111,6 +120,64 @@ def settings_router(store: SettingsStore, running: Settings, provider: OpenAIPro
     network_mode = environment.get("PHOTOCULL_WORKER_NETWORK_MODE") or "none"
     if network_mode not in {"none", "host", "bridge"}:
         network_mode = "custom"
+    managed_egress = environment.get("PHOTOCULL_SETTINGS_EGRESS_MANAGED") == "1"
+    bridge = RestartBridge(
+        store.directory / "restart", environment.get("PHOTOCULL_SETTINGS_RESTART_SERVICES") or ""
+    )
+
+    def egress_digest(snapshot: Snapshot) -> str:
+        return sha256(json.dumps(sorted(snapshot.egress)).encode()).hexdigest()
+
+    def is_live(key: str, snapshot: Snapshot, effective: VLMSettings) -> bool:
+        if key not in LIVE_VLM_FIELDS:
+            return False
+        if key in PROVIDER_FIELDS and not live_vlm.same_endpoint(snapshot.settings.vlm):
+            kind = key.removeprefix("vlm.")
+            return getattr(snapshot.settings.vlm, kind) == getattr(effective, kind)
+        return True
+
+    def running_value(key: str, effective: VLMSettings):
+        if key.startswith("vlm.openai.") and key in LIVE_VLM_FIELDS:
+            return getattr(effective.openai, key.removeprefix("vlm.openai."))
+        if key in LIVE_VLM_FIELDS:
+            return getattr(effective, key.removeprefix("vlm."))
+        return running_values[key]
+
+    def restart_info(snapshot: Snapshot) -> dict:
+        try:
+            allowed, result, applied_egress, busy = bridge.inspect()
+        except (RestartError, OSError, KeyError, TypeError):
+            allowed, result, applied_egress, busy = (), None, None, False
+        current = snapshot.values()
+        effective = live_vlm.read()
+        pending = {
+            key
+            for key in FIELDS
+            if key != EGRESS
+            and not is_live(key, snapshot, effective)
+            and current[key] != running_value(key, effective)
+        }
+        targets = {"api", "worker"} if pending else set()
+        if EGRESS not in snapshot.sources and (
+            egress_digest(snapshot) != (applied_egress or egress_digest(store.baseline))
+        ):
+            pending.add(EGRESS)
+            targets.add("egress-proxy")
+        if result:
+            request = result["request"]
+            result = {
+                **result,
+                "request": {key: value for key, value in request.items() if key != "egress"},
+            }
+        return {
+            "services": [name for name in SERVICES if name in targets],
+            "pending_fields": sorted(pending),
+            "automatic": bool(targets and targets <= set(allowed))
+            and ("egress-proxy" not in targets or managed_egress)
+            and (result is None or result["status"] != "expired"),
+            "busy": busy,
+            "result": result,
+        }
 
     def public(value: object, key: str = ""):
         try:
@@ -150,18 +217,29 @@ def settings_router(store: SettingsStore, running: Settings, provider: OpenAIPro
 
     def snapshot_payload(snapshot: Snapshot) -> dict:
         values = snapshot.values()
+        effective = live_vlm.read()
+        restart = restart_info(snapshot)
         return {
+            "restart": restart,
             "revision": snapshot.revision,
             "fields": {
                 key: _schema(key)
                 | {
                     "value": public(values[key], key),
                     "default": public(DEFAULTS[key], key),
-                    "running": public(running_values.get(key), key),
+                    "running": public(running_value(key, effective), key)
+                    if key != EGRESS
+                    else None,
                     "source": snapshot.sources.get(key)
                     or ("ui" if key in snapshot.overrides else "yaml"),
-                    "restart": "egress-proxy" if key == EGRESS else "api-worker",
-                    "pending": key != EGRESS and values[key] != running_values[key],
+                    "restart": (
+                        "live"
+                        if is_live(key, snapshot, effective)
+                        else "egress-proxy"
+                        if key == EGRESS
+                        else "api-worker"
+                    ),
+                    "pending": key in restart["pending_fields"],
                 }
                 for key in FIELDS
             },
@@ -175,8 +253,7 @@ def settings_router(store: SettingsStore, running: Settings, provider: OpenAIPro
             "network": {
                 "worker": "isolated" if isolated else network_mode,
                 "proxy": "egress" if isolated else "none",
-                "proxy_reads_saved_settings": environment.get("PHOTOCULL_SETTINGS_EGRESS_MANAGED")
-                == "1",
+                "proxy_reads_saved_settings": managed_egress,
             },
             "warnings": warnings(snapshot),
         }
@@ -273,11 +350,32 @@ def settings_router(store: SettingsStore, running: Settings, provider: OpenAIPro
         except (OSError, ValueError, RecursionError):
             raise HTTPException(503, "設定ストレージを確認してください。") from None
 
+    def ensure_idle(snapshot: Snapshot) -> None:
+        if restart_info(snapshot)["busy"]:
+            raise SettingsConflict("再起動の結果が出るまで設定の変更をお待ちください。")
+
+    def apply(value: Apply):
+        with store.transaction() as current:
+            check_revision(current, value.revision)
+            restart = restart_info(current)
+            if restart["busy"]:
+                raise SettingsConflict("再起動はすでに要求されています。")
+            if not restart["automatic"]:
+                raise SettingsConflict("対象サービスをホストから再起動してください。")
+            targets = tuple(restart["services"])
+            digest = egress_digest(current) if "egress-proxy" in targets else None
+            try:
+                bridge.submit(current.revision, targets, digest)
+            except (RestartError, OSError):
+                raise HTTPException(503, "ホストの再起動受付を確認してください。") from None
+            return restart_info(current)
+
     def update(value: Change, save: bool):
         with store.transaction() if save else nullcontext(store.read()) as current:
             check_revision(current, value.revision)
             after = candidate(current, value.changes)
             if save:
+                ensure_idle(current)
                 store.commit(current, after)
                 return snapshot_payload(store.read())
             return compare(current, after)
@@ -288,6 +386,7 @@ def settings_router(store: SettingsStore, running: Settings, provider: OpenAIPro
             after = store.previous(current, value.backup)
             paths.validate(current, after)
             if save:
+                ensure_idle(current)
                 store.commit(current, after)
                 return snapshot_payload(store.read())
             return compare(current, after)
@@ -306,13 +405,21 @@ def settings_router(store: SettingsStore, running: Settings, provider: OpenAIPro
         ):
             raise SettingsError("環境変数で指定された URL を使用してください。")
         options = OpenAISettings(
-            **provider.config.model_dump(), base_url=url, model=value.model or "models"
+            **live_vlm.read().openai.model_dump(), base_url=url, model=value.model or "models"
         )
         return provider.with_config(options)
 
     @router.get("")
     def read():
         return guarded(lambda: snapshot_payload(store.read()))
+
+    @router.get("/restart")
+    def restart_status():
+        return guarded(lambda: restart_info(store.read()))
+
+    @router.post("/restart", status_code=202)
+    async def queue_restart(request: Request):
+        return await run_in_threadpool(guarded, apply, await body(request, Apply))
 
     @router.post("/preview")
     async def preview(request: Request):

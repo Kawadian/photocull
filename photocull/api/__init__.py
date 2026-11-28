@@ -5,7 +5,7 @@ import json
 import os
 import sqlite3
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from pathlib import Path
@@ -64,6 +64,7 @@ from photocull.db.search import (
     get_result,
     worker_online,
 )
+from photocull.live_vlm import LiveVLM
 from photocull.media.cache import cache_path
 from photocull.media.derivatives import recipe
 from photocull.media.xmp import XMPConflict, XMPError, export_xmp
@@ -134,12 +135,14 @@ class XMPUpdate(BaseModel):
         return self
 
 
-def _get_progress(path: Path, settings: Settings | None = None) -> dict:
+def _get_progress(
+    path: Path, settings: Settings | None = None, defaults: ProviderSelection | None = None
+) -> dict:
     with connect(path) as db:
         result = progress(db)
         result["worker_online"] = worker_online(db, path, time.time())
         available = settings and tags_available(
-            db, settings.vlm.selection, settings.ml.enabled and settings.ml.tags_enabled
+            db, defaults or settings.vlm.selection, settings.ml.enabled and settings.ml.tags_enabled
         )
     if settings is not None:
         config = settings.ml
@@ -157,11 +160,19 @@ def _get_progress(path: Path, settings: Settings | None = None) -> dict:
     return result
 
 
-async def _events(path: Path, settings: Settings | None = None) -> AsyncIterator[str]:
+async def _events(
+    path: Path,
+    settings: Settings | None = None,
+    defaults: Callable[[], ProviderSelection] | None = None,
+) -> AsyncIterator[str]:
     last = ""
     sent = time.monotonic()
     while True:
-        payload = json.dumps(await asyncio.to_thread(_get_progress, path, settings))
+        payload = json.dumps(
+            await asyncio.to_thread(
+                lambda: _get_progress(path, settings, defaults() if defaults else None)
+            )
+        )
         if payload != last:
             yield f"data: {payload}\n\n"
             last, sent = payload, time.monotonic()
@@ -185,7 +196,8 @@ def create_app(
     token: bytes | None = None
     allowed_hosts = frozenset(settings.server.allowed_hosts)
     cache_access = CacheAccess()
-    provider_defaults = settings.vlm.selection
+    live_vlm = LiveVLM(settings.vlm, settings_store)
+    provider_defaults = live_vlm.selection
     remote = OpenAIProvider(settings.state_dir, settings.vlm.openai)
 
     @asynccontextmanager
@@ -225,7 +237,7 @@ def create_app(
             raise HTTPException(409, "Text search is disabled")
 
     def automatic_tags(db) -> bool:
-        return tags_available(db, provider_defaults, ml.enabled and ml.tags_enabled)
+        return tags_available(db, provider_defaults(), ml.enabled and ml.tags_enabled)
 
     def require_tag(db, tag: str | None) -> None:
         if tag is not None:
@@ -274,7 +286,7 @@ def create_app(
         api_recipe = recipe(settings.derivatives) if settings.derivatives.enabled else None
         for name in settings.libraries:
             path = library_path(name)
-            current = _get_progress(path, settings)
+            current = _get_progress(path, settings, provider_defaults())
             with connect(path) as db:
                 active_recipe = worker_recipe(db, path)
             current["derivatives"] = {
@@ -297,7 +309,7 @@ def create_app(
     def providers(library: str):
         with connect(library_path(library)) as db:
             return {
-                "selection": selection(db, provider_defaults),
+                "selection": selection(db, provider_defaults()),
                 "pending": db.execute("SELECT count(*) FROM decision_jobs").fetchone()[0],
             }
 
@@ -319,19 +331,19 @@ def create_app(
     def reset_providers(library: str):
         with connect(library_path(library)) as db, write(db):
             changed = db.execute("DELETE FROM provider_selection").rowcount
-            if cancel_remote(db, provider_defaults) or changed:
+            if cancel_remote(db, provider_defaults()) or changed:
                 mark_catalog_updated(db)
         return Response(status_code=204)
 
     @app.post("/api/libraries/{library}/providers/test")
     def test_provider(library: str):
         library_path(library)
-        return remote.test_connection()
+        return remote.with_config(live_vlm.read().openai).test_connection()
 
     @app.post("/api/libraries/{library}/providers/reanalyze", status_code=202)
     def reanalyze(library: str, value: Reanalysis):
         with connect(library_path(library)) as db, write(db):
-            selected = selection(db, provider_defaults)
+            selected = selection(db, provider_defaults())
             kinds = ("tags", "flags") if value.kind == "both" else (value.kind,)
             if (
                 "tags" in kinds
@@ -670,7 +682,7 @@ def create_app(
 
     @app.get("/api/libraries/{library}/jobs")
     def job_progress(library: str):
-        return _get_progress(library_path(library), settings)
+        return _get_progress(library_path(library), settings, provider_defaults())
 
     @app.post("/api/libraries/{library}/assets/{asset_id}/jobs/{stage}", status_code=202)
     def rerun(library: str, asset_id: CatalogId, stage: Stage):
@@ -690,7 +702,7 @@ def create_app(
     @app.get("/api/libraries/{library}/events")
     async def events(library: str):
         return StreamingResponse(
-            _events(library_path(library), settings),
+            _events(library_path(library), settings, provider_defaults),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -705,7 +717,7 @@ def create_app(
     mount_insights(app, settings, library_path)
     mount_archive(app, settings, library_path)
     if settings_store is not None:
-        app.include_router(settings_router(settings_store, settings, remote))
+        app.include_router(settings_router(settings_store, settings, remote, live_vlm))
     app.include_router(browse_router(settings))
     app.include_router(collections_router(settings))
     app.include_router(mount_media(settings, library_path, cache_access))

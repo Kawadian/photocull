@@ -1,0 +1,19 @@
+[Unit]
+Description=Apply Photocull settings through the host service manager
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+Environment=PHOTOCULL_RESTART_DIRECTORY=/var/lib/photocull/settings/restart
+Environment=PHOTOCULL_RESTART_WRAPPER=/usr/local/bin/photocull-compose
+Environment=PHOTOCULL_RESTART_SERVICES=api,worker
+EnvironmentFile=-/etc/photocull/settings-restart.env
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/photocull-settings-restart.py
+TimeoutStartSec=8min
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+# Reset this in a drop-in and add the actual bridge directory if it differs.
+ReadWritePaths=/var/lib/photocull/settings/restart
