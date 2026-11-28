@@ -191,6 +191,8 @@ docker compose restart worker
 
 Open port 80 on the host from an allowed client. Port 8000 is the API upstream on loopback.
 
+The worker has networking disabled by default. For OpenAI-compatible decisions, enable the [worker egress profile](docs/DECISION_PROVIDERS.md#docker-compose-worker-egress) to allow HTTPS through a hostname allowlist.
+
 ### systemd
 
 The example [API unit](deploy/systemd/photocull-api.service) and [worker unit](deploy/systemd/photocull-worker.service) expect a `photocull` service user, checkout and built frontend under `/opt/photocull`, and a Python 3.12 environment at `/opt/photocull/.venv`. Install the worker extra and FFmpeg there. Install the [example YAML](deploy/photocull.example.yaml) as `/etc/photocull/photocull.yaml`. The units accept optional overrides from `/etc/photocull/photocull.env`.

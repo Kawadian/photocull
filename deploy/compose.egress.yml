@@ -1,0 +1,42 @@
+# Use after docker-compose.yml with --profile egress.
+services:
+  worker:
+    network_mode: !reset null
+    networks: !override
+      - worker-egress
+    cap_drop:
+      - NET_RAW
+    environment:
+      HTTPS_PROXY: http://egress-proxy:3128
+      HTTP_PROXY: http://egress-proxy:3128
+      https_proxy: http://egress-proxy:3128
+      http_proxy: http://egress-proxy:3128
+      NO_PROXY: "localhost,127.0.0.1,[::1]"
+      no_proxy: "localhost,127.0.0.1,[::1]"
+
+  egress-proxy:
+    profiles: [egress]
+    build:
+      context: ./deploy/egress
+    environment:
+      PHOTOCULL_EGRESS_ALLOW:
+    networks:
+      - worker-egress
+      - egress-outbound
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+
+networks:
+  worker-egress:
+    driver: bridge
+    internal: true
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+      com.docker.network.bridge.gateway_mode_ipv6: isolated
+  egress-outbound:
+    driver: bridge
+    enable_ipv6: false

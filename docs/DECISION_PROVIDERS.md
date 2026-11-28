@@ -24,7 +24,29 @@ vlm:
 
 - `PHOTOCULL_VLM_BASE_URL` and `PHOTOCULL_VLM_MODEL` override those YAML connection settings. A server root, an API prefix ending in a version such as `/v1`, or the complete Chat Completions path works, with or without a trailing slash. A server with an unversioned completions route can use its complete path. Configure a vision model exposed by your server. This uses the Chat Completions format supported by vision models served through vLLM, Ollama and LM Studio.
 - `PHOTOCULL_VLM_API_KEY` is read only from the API and worker process environments. Supply it through your service environment, for example systemd's `EnvironmentFile`, or through Compose's environment pass-through. A directly launched Photocull process needs the key exported in its environment. Leave it unset for a server that accepts unauthenticated requests. Keep endpoint values and credentials outside the repository. Use HTTPS for authenticated traffic across untrusted networks.
-- **Test connection** sends a synthetic image through the API process to check that the configured model accepts image input and returns JSON. It displays success or failure and the masked endpoint. Both the API and worker need network access to the configured server. The default Compose worker network mode and systemd worker's private network must be adjusted in the deployment when enabling remote analysis.
+- **Test connection** sends a synthetic image through the API process to check that the configured model accepts image input and returns JSON. It displays success or failure and the masked endpoint. In Compose the API keeps host networking so nginx can still reach it on `127.0.0.1:8000`. This probe connects directly from the API. The worker sends production requests over its own network path.
+
+## Docker Compose worker egress
+
+The default deployment uses `network_mode: none` for the worker and starts no egress proxy. The worker and API share SQLite, including the job queue, and the worker uses local mounts for media, derivatives, file watching and model caches. Local decisions work with the network disabled and do not depend on the proxy. If you use optional ML, provision models before starting the isolated worker and enable the appropriate offline settings. See the [ML cache instructions](ML.md#offline-deployment) and [Insights setup](INSIGHTS.md).
+
+For remote decisions, use Linux Docker Engine 28 or newer and Docker Compose v2.24.4 or newer. Add the egress file after your other Compose overrides and enable its profile. Keep the endpoint, model and optional key in your private deployment environment as described above.
+
+```sh
+docker compose -f docker-compose.yml -f deploy/compose.egress.yml --profile egress up -d --build
+```
+
+The egress override replaces the worker's network mode with a single internal bridge shared with the egress proxy. The worker has no default route and the bridge has no host gateway address. Only the proxy joins an outbound bridge, and it publishes no ports. The proxy accepts only CONNECT to port 443 of exact DNS hostnames. It resolves and connects to checked public IPv4 addresses. The worker verifies the destination's TLS certificate inside the tunnel and sends the API key only after TLS succeeds. Redirects are never followed.
+
+An unset or empty `PHOTOCULL_EGRESS_ALLOW` allows only `openrouter.ai`. To change the list, set the variable in your private Compose environment to comma-separated hostnames. Include the default hostname in the list if you still want to use it. Enter only hostnames, with each subdomain listed separately. Recreate the egress proxy with the same Compose files and profile after changing its environment.
+
+Compose configures `HTTPS_PROXY`, `HTTP_PROXY` and loopback exclusions in `NO_PROXY` for the worker. The VLM client reads uppercase `HTTPS_PROXY` and `NO_PROXY`. It supports an HTTP proxy endpoint without credentials, using CONNECT for HTTPS. Ordinary HTTP requests sent to the egress proxy are rejected. Model downloads can use different destinations and redirects, so the default list does not enable them. See the cache instructions above for separate provisioning. The Compose profile does not change the example systemd units.
+
+### Troubleshooting
+
+- If **Test connection** fails, check the API environment, vision model, destination TLS and shared request budget. The status is based on the API's direct route.
+- If the probe succeeds but remote jobs fail, check the worker and proxy logs with the same Compose files and profile. Proxy logs give the approved hostname and port or a rejection reason. They omit headers, request bodies and raw request targets. A `host` or `authority` rejection points to the exact hostname, scheme or port configuration. A `dns`, `non_public_address` or `upstream` entry points to DNS resolution, a blocked address or connection failure. With no proxy log entry, check that the proxy is running, that the worker was recreated with the override, and that the job made a network attempt. A cache hit or exhausted budget may prevent an attempt. Remote failures use the configured `on_failure` policy.
+- To return to the closed deployment, select Local for the decisions you want processed locally, remove the egress service with `docker compose -f docker-compose.yml -f deploy/compose.egress.yml --profile egress rm --stop --force egress-proxy`, and recreate the worker with your normal Compose files and `PHOTOCULL_WORKER_NETWORK_MODE` unset or set to `none`.
 
 ## Privacy, caching and limits
 

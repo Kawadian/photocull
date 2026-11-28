@@ -8,6 +8,9 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ssl import PROTOCOL_TLS_SERVER, SSLContext
+from subprocess import DEVNULL
+from subprocess import run as run_command
 from threading import Event, Thread
 
 import pytest
@@ -383,3 +386,116 @@ def test_budget_outcomes(tmp_path, compatible, policy, provider):
         finally:
             stop.set()
     assert worker.result() == 0
+
+
+def test_https_connect_verifies_destination_and_keeps_credentials_inside_tunnel(
+    tmp_path, monkeypatch, compatible
+):
+    cert = tmp_path / "cert.pem"
+    key = tmp_path / "key.pem"
+    run_command(
+        [
+            "openssl",
+            "req",
+            "-new",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=vision.test",
+            "-addext",
+            "subjectAltName=DNS:vision.test",
+            "-keyout",
+            str(key),
+            "-out",
+            str(cert),
+        ],
+        check=True,
+        stdout=DEVNULL,
+        stderr=DEVNULL,
+    )
+    tls = SSLContext(PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(cert, key)
+    seen = []
+    posts = []
+
+    class Tunnel(BaseHTTPRequestHandler):
+        def do_CONNECT(self):
+            seen.append((self.path, self.headers.get("Authorization")))
+            if self.path == "example.com:443":
+                self.send_error(403)
+                return
+            self.send_response_only(200)
+            self.end_headers()
+            # Emulate an upstream TLS server on the other side of the mock CONNECT.
+            try:
+                secured = tls.wrap_socket(self.request, server_side=True)
+            except OSError:
+                return
+            with secured, secured.makefile("rb") as request:
+                posts.append(request.readline().strip())
+                headers = {}
+                while (line := request.readline()) != b"\r\n":
+                    if not line:
+                        return
+                    name, value = line.split(b":", 1)
+                    headers[name.lower()] = value.strip()
+                posts.append(headers[b"authorization"])
+                request.read(int(headers[b"content-length"]))
+                data = b'{"choices":[{"message":{"content":"ok"}}]}'
+                secured.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: "
+                    + str(len(data)).encode()
+                    + b"\r\n\r\n"
+                    + data
+                )
+
+        def log_message(self, *_):
+            pass
+
+    monkeypatch.setenv("SSL_CERT_FILE", str(cert))
+    monkeypatch.setenv("PHOTOCULL_VLM_API_KEY", "fixture-key")
+    monkeypatch.setenv("NO_PROXY", "")
+    with ThreadingHTTPServer(("127.0.0.1", 0), Tunnel) as server:
+        thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+        thread.start()
+        try:
+            monkeypatch.setenv("HTTPS_PROXY", f"http://127.0.0.1:{server.server_port}")
+            config = OpenAISettings(base_url="https://vision.test", model="vision")
+            provider = OpenAIProvider(tmp_path, config)
+            assert provider._post(endpoint(config), {}) == "ok"
+
+            for destination in ("wrong.test", "example.com"):
+                target = endpoint(OpenAISettings(base_url=f"https://{destination}", model="vision"))
+                with pytest.raises(ProviderError, match="^temporarily_unavailable$"):
+                    provider._post(target, {})
+
+            # Plain HTTP must not send a key on the proxy connection.
+            target = endpoint(OpenAISettings(base_url="http://vision.test", model="vision"))
+            with pytest.raises(ProviderError, match="^invalid_configuration$"):
+                provider._post(target, {})
+
+            monkeypatch.setenv("HTTPS_PROXY", "http://user:fixture-password@127.0.0.1")
+            with pytest.raises(ProviderError, match="^invalid_configuration$"):
+                provider._post(endpoint(config), {})
+
+            # Bypass uses the configured NO_PROXY on the destination.
+            monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+            local = OpenAIProvider(tmp_path, compatible.config())
+            assert local.test_connection()["ok"]
+
+            # The VLM client also ignores implicit proxy settings.
+            monkeypatch.delenv("HTTPS_PROXY")
+            monkeypatch.delenv("NO_PROXY")
+            monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
+            monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:1")
+            assert local.test_connection()["ok"]
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+
+    assert seen == [("vision.test:443", None), ("wrong.test:443", None), ("example.com:443", None)]
+    assert posts == [b"POST /v1/chat/completions HTTP/1.1", b"Bearer fixture-key"]

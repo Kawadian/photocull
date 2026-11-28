@@ -71,3 +71,50 @@ jobs:
             -v "$PWD/tests:/archive-ci/tests:ro" \
             -v "$PWD/scripts/benchmark_archive.py:/archive-ci/benchmark_archive.py:ro" \
             --entrypoint python photocull-worker:ci /archive-ci/benchmark_archive.py --smoke
+      - if: matrix.image == 'worker'
+        name: Check worker egress isolation
+        run: |
+          docker run --rm --network none -v "$PWD/deploy/egress:/src:ro" \
+            -w /src golang:1.26-alpine go test ./...
+
+          fixture="$(mktemp -d)"
+          mkdir "$fixture"/{library,state,models}
+          export PHOTOCULL_LIBRARY_DIR="$fixture/library"
+          export PHOTOCULL_STATE_HOST_DIR="$fixture/state"
+          export PHOTOCULL_MODELS_DIR="$fixture/models"
+          docker compose config --format json | jq -e \
+            '.services.worker.network_mode == "none" and (.services | has("egress-proxy") | not)'
+
+          compose=(docker compose -p egress-ci -f docker-compose.yml -f deploy/compose.egress.yml --profile egress)
+          trap '"${compose[@]}" down' EXIT
+          export PHOTOCULL_WORKER_NETWORK_MODE=bridge
+          "${compose[@]}" config --format json | jq -e '
+            .services.worker | .network_mode == null and (.networks | keys == ["worker-egress"])
+          '
+          docker tag photocull-worker:ci egress-ci-worker
+          "${compose[@]}" up -d --build egress-proxy
+          "${compose[@]}" run --rm -T --no-deps --entrypoint python worker - <<'PY'
+          import http.client
+          import os
+          import time
+          from pathlib import Path
+          from urllib.parse import urlsplit
+
+          routes = Path("/proc/net/route").read_text().splitlines()[1:]
+          assert routes and all(row.split()[1] != "00000000" for row in routes), routes
+          proxy = urlsplit(os.environ["HTTPS_PROXY"])
+          connection = http.client.HTTPConnection(proxy.hostname, proxy.port, timeout=2)
+          for attempt in range(10):
+              try:
+                  connection.connect()
+                  break
+              except ConnectionRefusedError:
+                  if attempt == 9:
+                      raise
+                  time.sleep(0.2)
+          for host in ("example.com", "192.168.1.1"):
+              connection.request("CONNECT", f"{host}:443")
+              with connection.getresponse() as response:
+                  assert response.status == 403, response.status
+              connection.close()
+          PY
