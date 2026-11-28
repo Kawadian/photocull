@@ -3,13 +3,14 @@
 import subprocess
 from multiprocessing import get_context
 from pathlib import Path
+from secrets import token_urlsafe
 from tempfile import TemporaryDirectory
 
 import uvicorn
 from gallery_fixtures import seed_gallery
 from PIL import Image
 
-from photocull.api import create_app
+from photocull.api import TOKEN_HEADER, create_app
 from photocull.config import (
     ArchiveSettings,
     DerivativeSettings,
@@ -21,6 +22,7 @@ from photocull.config import (
     WorkerSettings,
 )
 from photocull.db import connect, initialize, write
+from photocull.settings_store import SettingsStore
 from photocull.worker import run
 from tests.fake_embedding import FakeEmbedding
 from tests.fake_faces import FakeFaces
@@ -70,6 +72,14 @@ def main() -> None:
         root = Path(directory)
         archive_output = root / "archive-output"
         archive_output.mkdir()
+        picker_root = root / "settings-pick"
+        picker_root.mkdir()
+        (picker_root / "nested").mkdir()
+        (picker_root / "places.txt").write_text("browser fixture")
+        token_file = root / "fixture-token"
+        token = token_urlsafe().encode()
+        token_file.write_bytes(token)
+
         galleries = {f"gallery-{year}": year for year in (2024, 2025)}
         for name in galleries:
             (root / name).mkdir()
@@ -89,6 +99,7 @@ def main() -> None:
                 **{name: Library(root=root / name) for name in galleries},
             },
             state_dir=root / "state",
+            token_file=token_file,
             static_dir=Path(__file__).resolve().parents[1] / "dist",
             scoring=ScoringSettings(min_sharpness=0),
             derivatives=DerivativeSettings(prewarm=0, original_download=True),
@@ -136,7 +147,22 @@ def main() -> None:
         )
         worker.start()
         try:
-            uvicorn.run(create_app(settings), host="127.0.0.1", port=18787, proxy_headers=False)
+            store = SettingsStore(
+                settings.model_dump(mode="json"),
+                root / "photocull.yaml",
+                root,
+                {"PHOTOCULL_SETTINGS_ROOTS": str(picker_root)},
+            )
+            app = create_app(settings, settings_store=store)
+
+            async def fixture_proxy(scope, receive, send):
+                # Mimic the deployment's same-origin proxy without hard-coding a token.
+                if scope["type"] == "http":
+                    headers = [*scope["headers"], (TOKEN_HEADER.encode(), token)]
+                    scope = {**scope, "headers": headers}
+                await app(scope, receive, send)
+
+            uvicorn.run(fixture_proxy, host="127.0.0.1", port=18787, proxy_headers=False)
         finally:
             stop.set()
             worker.join(timeout=5)

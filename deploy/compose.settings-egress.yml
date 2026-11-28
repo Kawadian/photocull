@@ -1,0 +1,16 @@
+# Optional, after compose.egress.yml. Create the settings directory as the API UID first.
+services:
+  api:
+    environment:
+      PHOTOCULL_SETTINGS_EGRESS_MANAGED: '1'
+  egress-proxy:
+    user: "${PHOTOCULL_UID:-1000}:${PHOTOCULL_GID:-1000}"
+    environment:
+      PHOTOCULL_EGRESS_SETTINGS: /managed-settings/active.json
+    volumes:
+      - type: bind
+        source: ${PHOTOCULL_STATE_HOST_DIR:-./.photocull/state}/settings
+        target: /managed-settings
+        read_only: true
+        bind:
+          create_host_path: false

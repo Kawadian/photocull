@@ -37,6 +37,10 @@ The base package is the API and CLI (`uv sync --locked --no-dev` or `pip install
 
 Photocull uses local analysis by default. Automatic tags and scores/auto-reject can each use an OpenAI-compatible vision endpoint. See [Decision providers](docs/DECISION_PROVIDERS.md) for configuration, upload privacy and scoped reanalysis.
 
+## Web settings
+
+Open **設定** from Review or the photo browser to edit settings, preview changes, and restore earlier UI revisions. The [Web settings guide](docs/SETTINGS.md) covers administrator access, filesystem mounts, endpoint selection, and restarts.
+
 ## Configure libraries
 
 Environment variables override `.env`, which overrides YAML. Photocull loads `./photocull.yaml` by default, or a file set by `PHOTOCULL_CONFIG`. Relative paths in YAML are resolved against that file's directory. Relative environment paths are resolved from the process working directory. Use the same config and state directory for both processes.

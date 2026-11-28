@@ -1,4 +1,4 @@
-import { Aperture, CalendarDays, CheckSquare, Folder, FolderPlus, Grid2X2, Images, ListFilter, Pencil, RefreshCw, SlidersHorizontal } from 'lucide-react'
+import { Aperture, CalendarDays, CheckSquare, Folder, FolderPlus, Grid2X2, Images, ListFilter, Pencil, RefreshCw, Settings, SlidersHorizontal } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useRemote } from '../api'
 import type { Library } from '../api'
@@ -278,7 +278,14 @@ export default function Browser() {
         <div className="pcb-brand"><Aperture size={23} aria-hidden="true" /><span>Photocull</span></div>
         <nav aria-label="Photocull">
           <span aria-current="page"><Images size={17} aria-hidden="true" />{text.browser}</span>
-          <a href="/"><SlidersHorizontal size={17} aria-hidden="true" />{text.review}</a>
+          <a href="/" aria-label={text.review} title={text.review}>
+            <SlidersHorizontal size={17} aria-hidden="true" /><span>{text.review}</span>
+          </a>
+          <a className="pcb-settings-link" href="/?view=settings"
+            aria-label={location.lang === 'ja' ? '設定' : 'Settings'}
+            title={location.lang === 'ja' ? '設定' : 'Settings'}>
+            <Settings size={17} aria-hidden="true" /><span>{location.lang === 'ja' ? '設定' : 'Settings'}</span>
+          </a>
         </nav>
         <select className="pcb-language" aria-label={text.language} value={location.lang}
           onChange={(event) => navigate({ lang: event.target.value as Language })}>

@@ -5,7 +5,7 @@ import json
 import os
 import sqlite3
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from pathlib import Path
@@ -26,7 +26,8 @@ from photocull.api.browse import browse_router
 from photocull.api.collections import collections_router
 from photocull.api.insights import mount_insights
 from photocull.api.media import CacheAccess, cached_media, mount_media, worker_recipe
-from photocull.config import ProviderSelection, Settings, Stage, host_name, load_settings
+from photocull.api.settings import settings_router
+from photocull.config import ProviderSelection, Settings, Stage, host_name
 from photocull.db import connect, initialize, write
 from photocull.db.browse import photo_details
 from photocull.db.bursts import (
@@ -63,9 +64,11 @@ from photocull.db.search import (
     get_result,
     worker_online,
 )
+from photocull.live_vlm import LiveVLM
 from photocull.media.cache import cache_path
 from photocull.media.derivatives import recipe
 from photocull.media.xmp import XMPConflict, XMPError, export_xmp
+from photocull.settings_store import SettingsStore
 from photocull.vlm import OpenAIProvider, ProviderError, endpoint
 
 TOKEN_HEADER = "x-photocull-token"
@@ -132,12 +135,14 @@ class XMPUpdate(BaseModel):
         return self
 
 
-def _get_progress(path: Path, settings: Settings | None = None) -> dict:
+def _get_progress(
+    path: Path, settings: Settings | None = None, defaults: ProviderSelection | None = None
+) -> dict:
     with connect(path) as db:
         result = progress(db)
         result["worker_online"] = worker_online(db, path, time.time())
         available = settings and tags_available(
-            db, settings.vlm.selection, settings.ml.enabled and settings.ml.tags_enabled
+            db, defaults or settings.vlm.selection, settings.ml.enabled and settings.ml.tags_enabled
         )
     if settings is not None:
         config = settings.ml
@@ -155,11 +160,19 @@ def _get_progress(path: Path, settings: Settings | None = None) -> dict:
     return result
 
 
-async def _events(path: Path, settings: Settings | None = None) -> AsyncIterator[str]:
+async def _events(
+    path: Path,
+    settings: Settings | None = None,
+    defaults: Callable[[], ProviderSelection] | None = None,
+) -> AsyncIterator[str]:
     last = ""
     sent = time.monotonic()
     while True:
-        payload = json.dumps(await asyncio.to_thread(_get_progress, path, settings))
+        payload = json.dumps(
+            await asyncio.to_thread(
+                lambda: _get_progress(path, settings, defaults() if defaults else None)
+            )
+        )
         if payload != last:
             yield f"data: {payload}\n\n"
             last, sent = payload, time.monotonic()
@@ -174,12 +187,17 @@ def _rss_mb() -> float:
     return round(resident_pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024), 1)
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
-    settings = settings or load_settings()
+def create_app(
+    settings: Settings | None = None, *, settings_store: SettingsStore | None = None
+) -> FastAPI:
+    if settings is None:
+        settings_store = settings_store or SettingsStore.from_config()
+        settings = settings_store.read().settings
     token: bytes | None = None
     allowed_hosts = frozenset(settings.server.allowed_hosts)
     cache_access = CacheAccess()
-    provider_defaults = settings.vlm.selection
+    live_vlm = LiveVLM(settings.vlm, settings_store)
+    provider_defaults = live_vlm.selection
     remote = OpenAIProvider(settings.state_dir, settings.vlm.openai)
 
     @asynccontextmanager
@@ -219,7 +237,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, "Text search is disabled")
 
     def automatic_tags(db) -> bool:
-        return tags_available(db, provider_defaults, ml.enabled and ml.tags_enabled)
+        return tags_available(db, provider_defaults(), ml.enabled and ml.tags_enabled)
 
     def require_tag(db, tag: str | None) -> None:
         if tag is not None:
@@ -246,13 +264,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request.headers.get(TOKEN_HEADER, "").encode("latin-1"), token
         ):
             return JSONResponse({"detail": "Photocull token required"}, status_code=401)
+        admin = request.url.path == "/api/settings" or request.url.path.startswith("/api/settings/")
+        if admin and (token is None or settings_store is None):
+            return JSONResponse(
+                {"detail": "設定管理には管理者トークンが必要です。"}, status_code=403
+            )
         if request.method in {"POST", "PATCH", "PUT", "DELETE"}:
             origin = request.headers.get("origin")
             host = request.headers.get("host", "").lower()
             cross_origin = origin and origin.lower() not in {f"http://{host}", f"https://{host}"}
             if cross_origin or request.headers.get("sec-fetch-site") == "cross-site":
                 return JSONResponse({"detail": "Cross-origin request rejected"}, status_code=403)
-        return await call_next(request)
+        response = await call_next(request)
+        if admin:
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/api/health")
     def health():
@@ -260,7 +286,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         api_recipe = recipe(settings.derivatives) if settings.derivatives.enabled else None
         for name in settings.libraries:
             path = library_path(name)
-            current = _get_progress(path, settings)
+            current = _get_progress(path, settings, provider_defaults())
             with connect(path) as db:
                 active_recipe = worker_recipe(db, path)
             current["derivatives"] = {
@@ -283,7 +309,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def providers(library: str):
         with connect(library_path(library)) as db:
             return {
-                "selection": selection(db, provider_defaults),
+                "selection": selection(db, provider_defaults()),
                 "pending": db.execute("SELECT count(*) FROM decision_jobs").fetchone()[0],
             }
 
@@ -305,19 +331,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def reset_providers(library: str):
         with connect(library_path(library)) as db, write(db):
             changed = db.execute("DELETE FROM provider_selection").rowcount
-            if cancel_remote(db, provider_defaults) or changed:
+            if cancel_remote(db, provider_defaults()) or changed:
                 mark_catalog_updated(db)
         return Response(status_code=204)
 
     @app.post("/api/libraries/{library}/providers/test")
     def test_provider(library: str):
         library_path(library)
-        return remote.test_connection()
+        return remote.with_config(live_vlm.read().openai).test_connection()
 
     @app.post("/api/libraries/{library}/providers/reanalyze", status_code=202)
     def reanalyze(library: str, value: Reanalysis):
         with connect(library_path(library)) as db, write(db):
-            selected = selection(db, provider_defaults)
+            selected = selection(db, provider_defaults())
             kinds = ("tags", "flags") if value.kind == "both" else (value.kind,)
             if (
                 "tags" in kinds
@@ -656,7 +682,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/libraries/{library}/jobs")
     def job_progress(library: str):
-        return _get_progress(library_path(library), settings)
+        return _get_progress(library_path(library), settings, provider_defaults())
 
     @app.post("/api/libraries/{library}/assets/{asset_id}/jobs/{stage}", status_code=202)
     def rerun(library: str, asset_id: CatalogId, stage: Stage):
@@ -676,7 +702,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/libraries/{library}/events")
     async def events(library: str):
         return StreamingResponse(
-            _events(library_path(library), settings),
+            _events(library_path(library), settings, provider_defaults),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -690,6 +716,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     mount_insights(app, settings, library_path)
     mount_archive(app, settings, library_path)
+    if settings_store is not None:
+        app.include_router(settings_router(settings_store, settings, remote, live_vlm))
     app.include_router(browse_router(settings))
     app.include_router(collections_router(settings))
     app.include_router(mount_media(settings, library_path, cache_access))

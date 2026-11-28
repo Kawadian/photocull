@@ -10,6 +10,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from hashlib import sha256
@@ -194,25 +195,35 @@ def _connection(target: SplitResult, timeout: float) -> http.client.HTTPConnecti
         raise ProviderError("invalid_configuration") from None
 
 
+@dataclass
+class _RequestState:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    count: int = 0
+    initialized: bool = False
+
+
 class OpenAIProvider:
     def __init__(self, state: Path, config: OpenAISettings, stop: threading.Event | None = None):
         self.config = config
         self.root = state / "vlm"
         self.path = self.root / "requests.db"
         self.stop = stop or threading.Event()
-        self._run_count = 0
-        self._run_lock = threading.Lock()
-        self._initialized = False
+        self._requests = _RequestState()
+
+    def with_config(self, config: OpenAISettings) -> OpenAIProvider:
+        provider = OpenAIProvider(self.root.parent, config, self.stop)
+        provider._requests = self._requests
+        return provider
 
     def _initialize(self) -> None:
-        with self._run_lock:
-            if self._initialized:
+        with self._requests.lock:
+            if self._requests.initialized:
                 return
             self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
             with connect(self.path) as db, write(db):
                 for sql in SCHEMA:
                     db.execute(sql)
-            self._initialized = True
+            self._requests.initialized = True
 
     def _wait(self, seconds: float) -> None:
         if self.stop.wait(seconds):
@@ -235,11 +246,11 @@ class OpenAIProvider:
     def _reserve(self, still_requested: Callable[[], bool] | None) -> None:
         # A transaction reserves an actual HTTP attempt across workers and API probes.
         while not self.stop.is_set() and (still_requested is None or still_requested()):
-            with self._run_lock, connect(self.path) as db, write(db):
+            with self._requests.lock, connect(self.path) as db, write(db):
                 now = time.time()
                 day = datetime.fromtimestamp(now, UTC).date().isoformat()
                 daily = db.execute("SELECT count FROM daily WHERE day = ?", (day,)).fetchone()
-                if self._run_count >= self.config.max_requests_per_run or (
+                if self._requests.count >= self.config.max_requests_per_run or (
                     (daily[0] if daily else 0) >= self.config.max_requests_per_day
                 ):
                     raise ProviderError("budget_exhausted")
@@ -253,41 +264,49 @@ class OpenAIProvider:
                         (day,),
                     )
                     db.execute("INSERT OR REPLACE INTO rate VALUES (1, ?)", (now,))
-                    self._run_count += 1
+                    self._requests.count += 1
                     return
             self._wait(delay)
         raise ProviderError("interrupted")
 
-    def _post(self, target: SplitResult, body: dict) -> str:
+    def _http(self, target: SplitResult, method: str, body: dict | None = None) -> bytes:
         key = os.environ.get("PHOTOCULL_VLM_API_KEY", "")
         if any(not 33 <= ord(char) <= 126 for char in key):
             raise ProviderError("invalid_configuration")
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        headers = {"Accept": "application/json"}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
         if key:
             headers["Authorization"] = f"Bearer {key}"
         connection = _connection(target, self.config.timeout_seconds)
-        # A single HTTP request, with no redirect handling or implicit proxy discovery.
+        # No redirect handling or implicit proxy discovery.
         try:
-            connection.request("POST", target.path, json.dumps(body).encode(), headers)
+            payload = None if body is None else json.dumps(body).encode()
+            connection.request(method, target.path, payload, headers)
             with connection.getresponse() as response:
                 if response.status == 429 or 500 <= response.status <= 599:
                     raise TemporaryFailure(response.getheader("Retry-After"))
                 if response.status != 200:
                     raise ProviderError("request_rejected")
                 chunks = bytearray()
+                limit = MAX_RESPONSE if method == "POST" else 2 * 1024 * 1024
                 deadline = time.monotonic() + self.config.timeout_seconds
-                while len(chunks) <= MAX_RESPONSE:
+                while len(chunks) <= limit:
                     if time.monotonic() >= deadline:
                         raise TemporaryFailure()
-                    if not (part := response.read1(min(8192, MAX_RESPONSE + 1 - len(chunks)))):
+                    if not (part := response.read1(min(8192, limit + 1 - len(chunks)))):
                         break
                     chunks.extend(part)
-                if len(chunks) > MAX_RESPONSE:
+                if len(chunks) > limit:
                     raise ProviderError("invalid_response")
+                return bytes(chunks)
         except (OSError, http.client.HTTPException):
             raise TemporaryFailure() from None
         finally:
             connection.close()
+
+    def _post(self, target: SplitResult, body: dict) -> str:
+        chunks = self._http(target, "POST", body)
         try:
             message = json.loads(chunks)["choices"][0]["message"]
             if message.get("refusal") or not isinstance(message["content"], str):
@@ -382,6 +401,65 @@ class OpenAIProvider:
                 return Decision(**values)
         except (OSError, sqlite3.Error):
             raise ProviderError("storage_unavailable") from None
+
+    def models(self) -> list[dict]:
+        target = endpoint(self.config)
+        target = target._replace(path=target.path.removesuffix("/chat/completions") + "/models")
+        try:
+            self._initialize()
+            slots = tuple(f"request-{slot}.lock" for slot in range(self.config.concurrency))
+            with self._lock(slots):
+                self._reserve(None)
+                items = json.loads(self._http(target, "GET"))["data"]
+            if not isinstance(items, list):
+                raise ValueError
+        except (
+            TemporaryFailure,
+            OSError,
+            sqlite3.Error,
+            ValueError,
+            KeyError,
+            TypeError,
+            RecursionError,
+        ):
+            raise ProviderError("models_unavailable") from None
+
+        results = []
+        seen = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("id")
+            if (
+                not isinstance(name, str)
+                or not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.:_/@+-]{0,255}", name)
+                or name in seen
+            ):
+                continue
+            seen.add(name)
+            architecture = item.get("architecture")
+            modalities = (
+                architecture.get("input_modalities") if isinstance(architecture, dict) else None
+            )
+            pricing = item.get("pricing")
+            prices: dict[str, str] = {}
+            if isinstance(pricing, dict):
+                for kind in ("prompt", "completion", "image", "request"):
+                    value = str(pricing.get(kind, ""))
+                    if re.fullmatch(
+                        r"-?[0-9]{1,10}(?:\.[0-9]{1,20})?(?:[eE][+-]?[0-9]{1,2})?", value
+                    ):
+                        prices[kind] = value
+            results.append(
+                {
+                    "id": name,
+                    "vision": "image" in modalities if isinstance(modalities, list) else None,
+                    "pricing": prices,
+                }
+            )
+            if len(results) >= 2000:
+                break
+        return results
 
     def test_connection(self) -> dict[str, str | bool]:
         masked = "***"

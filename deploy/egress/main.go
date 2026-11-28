@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -177,8 +178,51 @@ func (p proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	<-done
 }
 
+// Only the optional, dedicated settings mount is visible to the proxy.
+func configuredAllowlist(env, path string) (map[string]struct{}, error) {
+	if strings.TrimSpace(env) != "" || path == "" {
+		return allowlist(env)
+	}
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return allowlist("")
+	}
+	if err != nil {
+		return nil, errors.New("cannot read Photocull managed settings")
+	}
+	defer file.Close()
+	const limit = 256 << 10
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil || len(data) > limit {
+		return nil, errors.New("cannot read Photocull managed settings")
+	}
+	var settings struct {
+		Overrides map[string]json.RawMessage `json:"overrides"`
+	}
+	if json.Unmarshal(data, &settings) != nil || settings.Overrides == nil {
+		return nil, errors.New("invalid Photocull managed settings")
+	}
+	raw, ok := settings.Overrides["network.egress_allow"]
+	if !ok {
+		return allowlist("")
+	}
+	var names []string
+	if json.Unmarshal(raw, &names) != nil || names == nil || len(names) > 128 {
+		return nil, errors.New("invalid managed egress allowlist")
+	}
+	hosts := make(map[string]struct{})
+	for _, name := range names {
+		host := hostname(strings.TrimSpace(name))
+		if host == "" {
+			return nil, errors.New("invalid managed egress allowlist")
+		}
+		hosts[host] = struct{}{}
+	}
+	return hosts, nil
+}
+
 func main() {
-	hosts, err := allowlist(os.Getenv("PHOTOCULL_EGRESS_ALLOW"))
+	hosts, err := configuredAllowlist(os.Getenv("PHOTOCULL_EGRESS_ALLOW"), os.Getenv("PHOTOCULL_EGRESS_SETTINGS"))
 	if err != nil {
 		log.Fatal(err)
 	}

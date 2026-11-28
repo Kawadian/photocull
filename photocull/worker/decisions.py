@@ -7,7 +7,7 @@ from dataclasses import asdict
 from functools import partial
 from pathlib import Path
 
-from photocull.config import DecisionKind, Settings
+from photocull.config import DecisionKind, Settings, VLMSettings
 from photocull.db import connect, write
 from photocull.db.catalog import mark_catalog_updated
 from photocull.media.cache import cache_path
@@ -34,7 +34,12 @@ class LibraryDecisions:
         self.settings = settings
         self.ml = ml
         self.remote = remote
+        self.config = settings.vlm
         self.pool = pool
+
+    def configure(self, config: VLMSettings) -> None:
+        self.config = config
+        self.remote = self.remote.with_config(config.openai)
 
     def _local_tags(self, asset_id: int, digest: str, preview: Path) -> list[tuple[str, float]]:
         settings = self.settings.ml
@@ -72,7 +77,7 @@ class LibraryDecisions:
                     tags = [(tag.tag, tag.score) for tag in remote.tags or ()]
                 elif remote.flags:
                     quality = remote.flags.model_dump_json()
-            elif target == "local" or self.settings.vlm.on_failure == "local":
+            elif target == "local" or self.config.on_failure == "local":
                 try:
                     if kind == "tags":
                         tags = self._local_tags(asset_id, digest, preview)
@@ -128,7 +133,7 @@ class LibraryDecisions:
             """SELECT * FROM decision_jobs WHERE asset_id IN (
                    SELECT DISTINCT asset_id FROM decision_jobs ORDER BY asset_id LIMIT ?
                ) ORDER BY asset_id, kind""",
-            (self.settings.vlm.openai.concurrency,),
+            (self.config.openai.concurrency,),
         ).fetchall()
         if not jobs:
             return False

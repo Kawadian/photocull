@@ -499,3 +499,84 @@ def test_https_connect_verifies_destination_and_keeps_credentials_inside_tunnel(
 
     assert seen == [("vision.test:443", None), ("wrong.test:443", None), ("example.com:443", None)]
     assert posts == [b"POST /v1/chat/completions HTTP/1.1", b"Bearer fixture-key"]
+
+
+def test_worker_reloads_policy_and_limits_without_resetting_the_run_budget(tmp_path, compatible):
+    from photocull.settings_store import SettingsStore
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    write_jpeg(root / "first.jpg")
+    store = SettingsStore(
+        {
+            "state_dir": str(tmp_path / "state"),
+            "libraries": {"photos": {"root": str(root)}},
+            "vlm": {
+                "openai": {
+                    "base_url": compatible.base_url,
+                    "model": "test-vision",
+                    "max_requests_per_run": 0,
+                    "requests_per_minute": 600,
+                }
+            },
+        },
+        tmp_path / "photocull.yaml",
+        tmp_path,
+        {},
+    )
+    settings = store.read().settings
+
+    def save(**fields):
+        with store.transaction() as before:
+            next_version = store.evaluate(before.revision, before.overrides | fields)
+            store.commit(before, next_version)
+
+    with TestClient(create_app(settings_store=store)) as client, ThreadPoolExecutor(1) as pool:
+        stop = Event()
+        worker = pool.submit(run, settings, stop, settings_store=store)
+        path = settings.library_state("photos") / "index.db"
+
+        def flags(provider):
+            with connect(path) as db:
+                return db.execute(
+                    "SELECT count(*) FROM assets WHERE vlm_flag_provider = ?", (provider,)
+                ).fetchone()[0]
+
+        try:
+            save(**{"vlm.flags": "openai"})
+            assert client.post(f"{BASE}/scans").status_code == 202
+
+            def unjudged_finished():
+                with connect(path) as db:
+                    return db.execute(
+                        """SELECT EXISTS(SELECT 1 FROM assets WHERE vlm_flag_provider='unjudged')
+                           AND NOT EXISTS(SELECT 1 FROM decision_jobs)"""
+                    ).fetchone()[0]
+
+            until(unjudged_finished)
+            assert not compatible.calls
+            save(**{"vlm.openai.max_requests_per_run": 1, "vlm.openai.concurrency": 4})
+            assert (
+                client.post(f"{BASE}/providers/reanalyze", json={"kind": "flags"}).status_code
+                == 202
+            )
+            until(lambda: flags("openai"))
+            assert len(compatible.calls) == 1
+
+            # A different image cannot reuse the first image's cache entry.
+            Image.new("RGB", (520, 500), "#123456").save(root / "second.jpg")
+            save(**{"vlm.openai.timeout_seconds": 7, "vlm.on_failure": "local"})
+            assert client.post(f"{BASE}/scans").status_code == 202
+
+            def locally_scored():
+                with connect(path) as db:
+                    return db.execute("""
+                        SELECT 1 FROM assets a JOIN asset_scores s ON s.asset_id=a.id
+                        WHERE a.path='second.jpg' AND a.vlm_flag_provider IS NULL
+                    """).fetchone()
+
+            until(locally_scored)
+            assert len(compatible.calls) == 1
+        finally:
+            stop.set()
+            assert worker.result(timeout=15) == 0

@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +36,45 @@ func TestAllowlist(t *testing.T) {
 		if _, err := allowlist(value); err == nil {
 			t.Errorf("accepted invalid entry %q", value)
 		}
+	}
+}
+
+func TestConfiguredAllowlist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "active.json")
+	for _, test := range []struct {
+		label, contents, env, host string
+		count                      int
+		invalid                    bool
+	}{
+		{"missing file", "", "", "openrouter.ai", 1, false},
+		{"missing field", `{"overrides":{"worker.batch_size":8}}`, "", "openrouter.ai", 1, false},
+		{"managed", `{"overrides":{"network.egress_allow":["API.example.com."]}}`, "", "api.example.com", 1, false},
+		{"env wins", `{"overrides":{"network.egress_allow":[]}}`, "env.example.com", "env.example.com", 1, false},
+		{"empty denies all", `{"overrides":{"network.egress_allow":[]}}`, "", "", 0, false},
+		{"reject wildcard", `{"overrides":{"network.egress_allow":["*.example.com"]}}`, "", "", 0, true},
+		{"reject null", `{"overrides":{"network.egress_allow":null}}`, "", "", 0, true},
+		{"reject malformed", `{"overrides":`, "", "", 0, true},
+	} {
+		t.Run(test.label, func(t *testing.T) {
+			if test.contents != "" {
+				if err := os.WriteFile(path, []byte(test.contents), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			hosts, err := configuredAllowlist(test.env, path)
+			if test.invalid {
+				if err == nil {
+					t.Fatal("invalid configuration accepted")
+				}
+				return
+			}
+			if err != nil || len(hosts) != test.count {
+				t.Fatalf("allowlist count %d, error %v", len(hosts), err)
+			}
+			if _, ok := hosts[test.host]; test.host != "" && !ok {
+				t.Fatal("expected hostname absent")
+			}
+		})
 	}
 }
 

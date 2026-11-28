@@ -1,5 +1,10 @@
 # Use after docker-compose.yml with --profile egress.
 services:
+  api:
+    environment:
+      PHOTOCULL_EGRESS_ALLOW:
+      PHOTOCULL_WORKER_PROXY_MODE: egress
+
   worker:
     network_mode: !reset null
     networks: !override
