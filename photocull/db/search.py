@@ -57,6 +57,7 @@ def enqueue(
     asset_id: int | None,
     tag: str | None,
     limit: int,
+    allow_remote_tags: bool = False,
 ) -> str:
     key = settings.model_key
     request_id = uuid4().hex
@@ -75,7 +76,9 @@ def enqueue(
                 raise QueueUnavailable("Text search is disabled on the worker")
             if state["text_error"]:
                 raise QueueUnavailable(state["text_error"])
-        if tag and (not state["tags_enabled"] or state["tag_key"] != settings.tag_key):
+        if tag and (
+            not (state["tags_enabled"] or allow_remote_tags) or state["tag_key"] != settings.tag_key
+        ):
             raise QueueUnavailable("Waiting for the worker to configure tags")
         if asset_id is not None:
             row = db.execute(

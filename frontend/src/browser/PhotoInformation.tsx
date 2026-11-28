@@ -1,7 +1,7 @@
 import { Heart, Plus, ScanFace, Star, X } from 'lucide-react'
 import { useState } from 'react'
 import type { ReactNode } from 'react'
-import { useRemote } from '../api'
+import { providerLabel, useRemote } from '../api'
 import { collectionText } from './collections'
 import type { Album, AssetRef } from './collections'
 import type { FilterValues } from './filterValues'
@@ -85,14 +85,17 @@ export function PhotoInformation({ asset, loading, error, retry, text, lang, box
         <Fact label="ISO">{asset.iso ? number.format(asset.iso) : null}</Fact>
         <Fact label="GPS">{asset.latitude != null && asset.longitude != null
           ? asset.latitude.toFixed(5) + ', ' + asset.longitude.toFixed(5) : null}</Fact>
+        <Fact label={text.flagProvider}>{asset.flag_provider &&
+          providerLabel(asset.flag_provider, text.localProvider, text.unjudgedProvider)}</Fact>
         <Fact label={text.sharpness}>{asset.sharpness != null ? percent.format(asset.sharpness) : null}</Fact>
         <Fact label={text.aesthetic}>{asset.insights?.aesthetic?.score != null
           ? percent.format(asset.insights.aesthetic.score) : null}</Fact>
       </dl>
       {loading && <p className="pcb-information-status" role="status">{text.preparingMetadata}</p>}
-      {!!asset.tags?.length && <section>
-        <h3>{text.automaticTags}</h3>
-        <ul className="pcb-information-chips">{asset.tags.map((tag) =>
+      {(asset.tag_provider || !!asset.tags?.length) && <section>
+        <h3>{text.automaticTags}{asset.tag_provider &&
+          ` · ${providerLabel(asset.tag_provider, text.localProvider, text.unjudgedProvider)}`}</h3>
+        <ul className="pcb-information-chips">{asset.tags?.map((tag) =>
           <li key={tag.tag}><button type="button" onClick={() => filterBy({ tag: 'auto:' + tag.tag })}>
             {tag.label}
           </button></li>)}</ul>

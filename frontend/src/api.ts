@@ -23,6 +23,13 @@ export type InsightScore = {
   error: string | null
   factors?: { feature: string; contribution: number }[] | null
 }
+export type DecisionProvider = 'local' | 'openai' | 'unjudged'
+
+export function providerLabel(provider: DecisionProvider, local = 'Local', unjudged = 'Unjudged') {
+  if (provider === 'openai') return 'OpenAI'
+  return provider === 'local' ? local : unjudged
+}
+
 export type Asset = Rating & {
   id: number
   path: string
@@ -44,6 +51,8 @@ export type Asset = Rating & {
   embedding_error: string | null
   similarity?: number
   tags?: PhotoTag[]
+  tag_provider?: DecisionProvider | null
+  flag_provider?: DecisionProvider | null
   sharpness: number | null
   exposure: number | null
   clipped_highlights: number | null
@@ -123,7 +132,7 @@ export async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T
 }
 
-export function json(method: 'POST' | 'PATCH', body: object): RequestInit {
+export function json(method: 'POST' | 'PATCH' | 'PUT', body: object): RequestInit {
   return { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
 }
 

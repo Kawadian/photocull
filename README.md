@@ -19,7 +19,7 @@ npm --prefix frontend run build
 cp .env.example .env
 ```
 
-Set `PHOTOCULL_LIBRARY_ROOT` in `.env` to your photo directory. In two terminals from the repo root, run:
+Uncomment `PHOTOCULL_LIBRARY_ROOT` in `.env` and set it to your photo directory. In two terminals from the repo root, run:
 
 ```sh
 .venv/bin/photocull-api
@@ -32,6 +32,10 @@ Set `PHOTOCULL_LIBRARY_ROOT` in `.env` to your photo directory. In two terminals
 Open `http://127.0.0.1:8000` and choose **Scan library**. You can also queue a scan with `.venv/bin/photocull scan photos` and check it with `.venv/bin/photocull status photos`. The API serves `frontend/dist` at the same origin. For frontend development, `npm --prefix frontend run dev` starts Vite on loopback and proxies `/api` to port 8000.
 
 The base package is the API and CLI (`uv sync --locked --no-dev` or `pip install .`). The worker extra installs media decoders, Pillow and NumPy. Scoring runs on the CPU without model weights. The optional `ml` extra includes the worker extra plus CPU inference and neighbor search.
+
+## Automatic decision providers
+
+Photocull uses local analysis by default. Automatic tags and scores/auto-reject can each use an OpenAI-compatible vision endpoint. See [Decision providers](docs/DECISION_PROVIDERS.md) for configuration, upload privacy and scoped reanalysis.
 
 ## Configure libraries
 

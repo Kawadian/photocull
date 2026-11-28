@@ -6,10 +6,24 @@ from dataclasses import dataclass
 
 from photocull.db import write
 
+FLAG_PROVIDER = "coalesce(a.vlm_flag_provider, CASE WHEN s.asset_id IS NOT NULL THEN 'local' END)"
 AUTO_REJECT_REASON = """
     CASE WHEN a.burst_reject_token IS NOT NULL THEN 'burst_remaining'
-         WHEN a.auto_reject_dismissed = 0 THEN s.suggested_reject_reason END
+         WHEN a.auto_reject_dismissed = 0 THEN
+             CASE WHEN a.vlm_flag_provider = 'openai' THEN json_extract(a.vlm_quality, '$.reason')
+                  WHEN a.vlm_flag_provider IS NULL THEN s.suggested_reject_reason
+             END
+    END
 """
+
+
+def quality_score(field: str, asset_alias: str = "a") -> str:
+    return (
+        f"(CASE WHEN {asset_alias}.vlm_flag_provider = 'openai' "
+        f"THEN json_extract({asset_alias}.vlm_quality, '$.{field}') "
+        f"WHEN {asset_alias}.vlm_flag_provider IS NULL THEN s.{field} END)"
+    )
+
 
 ASSET_COLUMNS = f"""
     a.id, a.path, a.folder, a.kind, a.size, a.day, a.content_hash, a.captured_at,
@@ -19,7 +33,10 @@ ASSET_COLUMNS = f"""
     e.status AS exif_status, e.error AS exif_error,
     q.status AS score_status, q.error AS score_error,
     v.status AS embedding_status, v.error AS embedding_error,
-    s.sharpness, s.exposure, s.clipped_highlights, s.clipped_shadows,
+    {quality_score("sharpness")} AS sharpness, {quality_score("exposure")} AS exposure,
+    {quality_score("clipped_highlights")} AS clipped_highlights,
+    {quality_score("clipped_shadows")} AS clipped_shadows,
+    {FLAG_PROVIDER} AS flag_provider,
     ({AUTO_REJECT_REASON}) AS auto_reject_reason, m.burst_id
 """
 ASSET_JOINS = """
@@ -43,9 +60,9 @@ class ScoreFilters:
     def clauses(self) -> tuple[list[str], list[float]]:
         clauses, params = [], []
         for condition, value in (
-            ("s.sharpness >= ?", self.min_sharpness),
-            ("s.exposure >= ?", self.min_exposure),
-            ("s.exposure <= ?", self.max_exposure),
+            (f"{quality_score('sharpness')} >= ?", self.min_sharpness),
+            (f"{quality_score('exposure')} >= ?", self.min_exposure),
+            (f"{quality_score('exposure')} <= ?", self.max_exposure),
         ):
             if value is not None:
                 clauses.append(condition)
@@ -122,9 +139,10 @@ def asset_page_query(
             filters.append(condition)
             params.append(value)
     if tag is not None:
-        joins += """ JOIN asset_tags AS t ON t.asset_id = a.id
-                     JOIN asset_embeddings AS te ON te.asset_id = a.id"""
-        filters.extend(("t.tag = ?", "te.tag_key = ?"))
+        joins += (
+            " JOIN effective_tags AS t ON t.asset_id = a.id AND t.content_hash = a.content_hash"
+        )
+        filters.extend(("t.tag = ?", "t.tag_key = ?"))
         params.extend((tag, tag_key or ""))
         if not sort_score:
             filters.append("t.asset_id > ?")
@@ -166,13 +184,23 @@ def attach_tags(db: sqlite3.Connection, assets: list[dict], tag_key: str, vocabu
     by_id = {asset["id"]: asset for asset in assets}
     for asset in assets:
         asset["tags"] = []
+    ids = json.dumps(list(by_id))
+    for asset_id, provider in db.execute(
+        """SELECT a.id, coalesce(d.provider, CASE WHEN e.tag_key = ? THEN 'local' END)
+            FROM assets AS a
+            LEFT JOIN decision_tag_results AS d ON d.asset_id = a.id
+                AND d.content_hash = a.content_hash AND d.tag_key = ?
+            LEFT JOIN asset_embeddings AS e ON e.asset_id = a.id AND e.content_hash = a.content_hash
+            WHERE a.id IN (SELECT value FROM json_each(?))""",
+        (tag_key, tag_key, ids),
+    ):
+        by_id[asset_id]["tag_provider"] = provider
     for asset_id, tag, score in db.execute(
-        """SELECT t.asset_id, t.tag, t.score FROM asset_tags AS t
-            JOIN asset_embeddings AS e ON e.asset_id = t.asset_id
-            JOIN assets AS a ON a.id = t.asset_id AND a.content_hash = e.content_hash
-            WHERE t.asset_id IN (SELECT value FROM json_each(?)) AND e.tag_key = ?
+        """SELECT t.asset_id, t.tag, t.score FROM effective_tags AS t
+            JOIN assets AS a ON a.id = t.asset_id AND a.content_hash = t.content_hash
+            WHERE t.asset_id IN (SELECT value FROM json_each(?)) AND t.tag_key = ?
             ORDER BY t.asset_id, t.score DESC, t.tag""",
-        (json.dumps(list(by_id)), tag_key),
+        (ids, tag_key),
     ):
         if tag in vocabulary:
             by_id[asset_id]["tags"].append(

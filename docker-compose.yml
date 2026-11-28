@@ -21,7 +21,10 @@ x-photocull-library: &library
   bind:
     create_host_path: false
 
-x-photocull-derivatives-env: &derivatives-env
+x-photocull-env: &photocull-env
+  PHOTOCULL_VLM_BASE_URL:
+  PHOTOCULL_VLM_MODEL:
+  PHOTOCULL_VLM_API_KEY:
   PHOTOCULL_DERIVATIVES_ENABLED:
   PHOTOCULL_DERIVATIVES_HOT_DIR:
   PHOTOCULL_DERIVATIVES_LARGE_DIR:
@@ -45,7 +48,7 @@ services:
     restart: unless-stopped
     mem_limit: 500m
     environment:
-      <<: *derivatives-env
+      <<: *photocull-env
       PHOTOCULL_CONFIG: /etc/photocull/photocull.yaml
       PHOTOCULL_BROWSER_STRIP_LOCATION:
       PHOTOCULL_ALLOWED_HOSTS:
@@ -72,7 +75,7 @@ services:
     cpus: ${PHOTOCULL_WORKER_CPUS:-2.0}
     mem_limit: ${PHOTOCULL_WORKER_MEM_LIMIT:-2g}
     environment:
-      <<: *derivatives-env
+      <<: *photocull-env
       PHOTOCULL_CONFIG: /etc/photocull/photocull.yaml
       PHOTOCULL_BROWSER_STRIP_LOCATION:
       PHOTOCULL_MODEL_DIR: /models

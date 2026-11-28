@@ -100,7 +100,9 @@ export function PhotoTools({ base, progress, tag, selectTag, onSearch, inputRef,
   const offline = ml?.enabled && !progress?.worker_online
   const disabled = !ml?.search_enabled || ml.waiting || !!offline || !!error
   const status = !ml ? 'Checking search availability…'
-    : !ml.enabled ? 'Photo search, similarity and tags are disabled.'
+    : !ml.enabled ? (ml.tags_enabled
+      ? 'Photo search and similarity are disabled.'
+      : 'Photo search, similarity and tags are disabled.')
     : offline ? 'The indexing worker is offline. Start it to search.'
     : ml.waiting ? 'Waiting for the worker to configure embeddings.'
     : !ml.search_enabled ? 'Text search is disabled.' : error || ''

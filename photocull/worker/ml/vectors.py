@@ -16,9 +16,10 @@ VECTOR_PAGE = """
     ORDER BY e.asset_id LIMIT ?
 """
 TAGGED_VECTOR_PAGE = """
-    SELECT t.asset_id, e.vector FROM asset_tags AS t
+    SELECT t.asset_id, e.vector FROM effective_tags AS t
     JOIN asset_embeddings AS e USING (asset_id)
-    WHERE t.tag = ? AND t.asset_id > ? AND e.model_key = ? AND e.tag_key = ?
+    WHERE t.tag = ? AND t.asset_id > ? AND e.model_key = ?
+      AND t.tag_key = ? AND t.content_hash = e.content_hash
     ORDER BY t.asset_id LIMIT ?
 """
 

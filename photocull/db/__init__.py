@@ -37,6 +37,7 @@ MIGRATIONS = (
     "0027_score_detail.sql",
     "0028_unassigned_faces.sql",
     "0029_export_skips.sql",
+    "0030_decision_providers.sql",
 )
 BUSY_TIMEOUT_MS = 10_000
 

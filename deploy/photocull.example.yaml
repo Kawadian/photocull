@@ -62,6 +62,18 @@ worker:
 #     bicycle: [Bicycle, 自転車]
 # With ML enabled, set worker.memory_mb: 6144 and raise the service memory limit.
 #
+# vlm:
+#   tags: local                 # Or openai for vision-based automatic tags.
+#   flags: local                # Or openai for vision-based scores and auto-reject.
+#   on_failure: unjudged        # Or local to fall back to the local provider.
+#   openai:
+#     timeout_seconds: 20
+#     concurrency: 2
+#     requests_per_minute: 30
+#     max_requests_per_run: 100
+#     max_requests_per_day: 500
+# Supply PHOTOCULL_VLM_BASE_URL, PHOTOCULL_VLM_MODEL and PHOTOCULL_VLM_API_KEY outside Git.
+#
 # insights:
 #   aesthetic: true          # Also enable ml.enabled.
 #   taste: true
