@@ -5,7 +5,7 @@ import os
 import re
 import stat
 from collections.abc import Collection
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from photocull.config import Settings
@@ -63,17 +63,14 @@ class PathBrowser:
 
     @staticmethod
     def _roots(paths) -> tuple[Path, ...]:
-        return tuple(
-            sorted(
-                {
-                    canonical
-                    for path in paths
-                    if path.is_absolute()
-                    and (canonical := path.resolve()) != Path("/")
-                    and canonical.is_dir()
-                }
-            )
-        )
+        roots = set()
+        for path in paths:
+            if path.is_absolute():
+                with suppress(OSError, RuntimeError):
+                    canonical = path.resolve()
+                    if canonical != Path("/") and canonical.is_dir():
+                        roots.add(canonical)
+        return tuple(sorted(roots))
 
     def available(self, field: str) -> tuple[Path, ...]:
         if field not in PATH_FIELDS:
@@ -138,6 +135,10 @@ class PathBrowser:
             kind = os.fstat(fd).st_mode
             if mode == "file" and not stat.S_ISREG(kind):
                 raise SettingsError("通常のファイルを指定してください。")
+            if (mode.startswith("write") or field == "static_dir") and _overlaps(
+                target, self.media
+            ):
+                raise SettingsError("この項目にはライブラリの外のパスを指定してください。")
             proc = f"/proc/self/fd/{fd}"
             required = os.R_OK | (os.X_OK if mode != "file" else 0)
             if not os.access(proc, required, effective_ids=True):

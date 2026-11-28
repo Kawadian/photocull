@@ -377,8 +377,9 @@
 }
 @media (max-width: 450px) {
   .pcb-header nav > * { padding-inline: 6px; gap: 4px; font-size: 12px; }
-  .pcb-header nav svg, .pcb-settings-link span { display: none; }
-  .pcb-header nav .pcb-settings-link svg { display: block; }
+  .pcb-header-inner { flex-wrap: wrap; }
+  .pcb-header nav > span svg, .pcb-header nav a span { display: none; }
+  .pcb-header nav a { justify-content: center; min-width: 32px; }
   .pcb-brand { gap: 4px; font-size: 17px; }
   .pcb-brand svg { width: 20px; }
   .pcb-language { max-width: 62px; padding-inline: 4px 1px; }

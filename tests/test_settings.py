@@ -141,6 +141,31 @@ def test_validation_save_history_and_restore(tmp_path):
         )
 
 
+def test_interrupted_save_retains_the_committed_history(tmp_path, monkeypatch):
+    store, headers, *_ = deployment(tmp_path)
+    atomic = store._atomic
+
+    def fail_active(path, content):
+        if path == store.active:
+            raise OSError("simulated failure")
+        atomic(path, content)
+
+    with TestClient(create_app(settings_store=store), headers=headers) as client:
+        saved = change(client, {"worker.batch_size": 12}).json()
+        revision = saved["revision"]
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "_atomic", fail_active)
+            assert change(client, {"worker.batch_size": 16}, revision).status_code == 503
+
+        current = client.get(URL).json()
+        assert current["revision"] == revision
+        assert current["history"] == saved["history"]
+        assert current["fields"]["worker.batch_size"]["value"] == 12
+        retried = change(client, {"worker.batch_size": 16}, revision).json()
+        assert len(retried["history"]) == 2
+        assert retried["fields"]["worker.batch_size"]["value"] == 16
+
+
 def test_parallel_save_accepts_one_revision(tmp_path):
     store, headers, *_ = deployment(tmp_path)
     gate = Barrier(2)

@@ -92,6 +92,9 @@ jobs:
             .services.worker | .network_mode == null and (.networks | keys == ["worker-egress"])
           '
           docker tag photocull-worker:ci egress-ci-worker
+          mkdir -m 0755 "$fixture/state/settings"
+          printf '%s\n' '{"overrides":{"network.egress_allow":[]}}' > "$fixture/state/settings/active.json"
+          compose+=(-f deploy/compose.settings-egress.yml)
           "${compose[@]}" up -d --build egress-proxy
           "${compose[@]}" run --rm -T --no-deps --entrypoint python worker - <<'PY'
           import http.client
@@ -112,7 +115,7 @@ jobs:
                   if attempt == 9:
                       raise
                   time.sleep(0.2)
-          for host in ("example.com", "192.168.1.1"):
+          for host in ("example.com", "192.168.1.1", "openrouter.ai"):
               connection.request("CONNECT", f"{host}:443")
               with connection.getresponse() as response:
                   assert response.status == 403, response.status

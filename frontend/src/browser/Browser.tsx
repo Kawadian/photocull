@@ -278,9 +278,12 @@ export default function Browser() {
         <div className="pcb-brand"><Aperture size={23} aria-hidden="true" /><span>Photocull</span></div>
         <nav aria-label="Photocull">
           <span aria-current="page"><Images size={17} aria-hidden="true" />{text.browser}</span>
-          <a href="/"><SlidersHorizontal size={17} aria-hidden="true" />{text.review}</a>
+          <a href="/" aria-label={text.review} title={text.review}>
+            <SlidersHorizontal size={17} aria-hidden="true" /><span>{text.review}</span>
+          </a>
           <a className="pcb-settings-link" href="/?view=settings"
-            aria-label={location.lang === 'ja' ? '設定' : 'Settings'}>
+            aria-label={location.lang === 'ja' ? '設定' : 'Settings'}
+            title={location.lang === 'ja' ? '設定' : 'Settings'}>
             <Settings size={17} aria-hidden="true" /><span>{location.lang === 'ja' ? '設定' : 'Settings'}</span>
           </a>
         </nav>
