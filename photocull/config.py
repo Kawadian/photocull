@@ -14,7 +14,9 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     StringConstraints,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -153,6 +155,38 @@ class MLSettings(BaseModel):
         return _fingerprint((self.model_key, self.vocabulary, self.tag_top_k, 1))
 
 
+DecisionProvider = Literal["local", "openai"]
+DecisionKind = Literal["tags", "flags"]
+
+
+class ProviderSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    tags: DecisionProvider = "local"
+    flags: DecisionProvider = "local"
+
+
+class OpenAISettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    base_url: SecretStr = Field(default=SecretStr(""), repr=False, exclude=True)
+    model: str = Field(default="", max_length=256, repr=False, exclude=True)
+    timeout_seconds: float = Field(default=20, ge=0.1, le=60)
+    concurrency: int = Field(default=2, ge=1, le=8)
+    requests_per_minute: int = Field(default=30, ge=1, le=600)
+    max_requests_per_run: int = Field(default=100, ge=0, le=100_000)
+    max_requests_per_day: int = Field(default=500, ge=0, le=100_000)
+
+
+class VLMSettings(ProviderSelection):
+    openai: OpenAISettings = Field(default_factory=OpenAISettings)
+    on_failure: Literal["local", "unjudged"] = "unjudged"
+
+    @property
+    def selection(self) -> ProviderSelection:
+        return ProviderSelection(tags=self.tags, flags=self.flags)
+
+
 class InsightSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -278,7 +312,7 @@ class BrowserSettings(BaseModel):
 
 
 class Settings(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     libraries: dict[LibraryName, Library] = Field(default_factory=dict)
     state_dir: Path = Field(default=Path(".photocull"), validate_default=True)
@@ -291,6 +325,7 @@ class Settings(BaseModel):
     scoring: ScoringSettings = Field(default_factory=ScoringSettings)
     burst: BurstSettings = Field(default_factory=BurstSettings)
     ml: MLSettings = Field(default_factory=MLSettings)
+    vlm: VLMSettings = Field(default_factory=VLMSettings)
     insights: InsightSettings = Field(default_factory=InsightSettings)
     archive: ArchiveSettings = Field(default_factory=ArchiveSettings)
     derivatives: DerivativeSettings = Field(default_factory=DerivativeSettings)
@@ -395,8 +430,11 @@ def load_settings() -> Settings:
     config = Path(env.get("PHOTOCULL_CONFIG") or "photocull.yaml").expanduser().absolute()
     values: dict = {}
     if config.exists() or env.get("PHOTOCULL_CONFIG"):
-        with config.open(encoding="utf-8") as handle:
-            values = yaml.safe_load(handle) or {}
+        try:
+            with config.open(encoding="utf-8") as handle:
+                values = yaml.safe_load(handle) or {}
+        except yaml.YAMLError:
+            raise ValueError("Photocull configuration contains invalid YAML") from None
         if not isinstance(values, dict):
             raise ValueError("Photocull configuration must be a YAML mapping")
 
@@ -408,6 +446,19 @@ def load_settings() -> Settings:
                 (config.parent / Path(root).expanduser()).absolute()
                 for root in library["allowed_roots"]
             ]
+
+    vlm = values.setdefault("vlm", {})
+    if isinstance(vlm, dict):
+        openai = vlm.setdefault("openai", {})
+        if isinstance(openai, dict):
+            for field in ("base_url", "model"):
+                if setting := env.get(f"PHOTOCULL_VLM_{field.upper()}"):
+                    openai[field] = setting
+
+    try:
+        values["vlm"] = VLMSettings.model_validate(vlm)
+    except ValidationError:
+        raise ValueError("Invalid VLM settings in Photocull configuration") from None
 
     insights = values.setdefault("insights", {})
     _paths(insights, ("story_geonames",), config.parent)

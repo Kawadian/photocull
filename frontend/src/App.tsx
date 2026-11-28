@@ -1,4 +1,4 @@
-import { Aperture, Images, Keyboard } from 'lucide-react'
+import { Aperture, Images, Keyboard, Settings2 } from 'lucide-react'
 import { useRef, useState } from 'react'
 import { ApiError, assetName, json, message, request, useProgress, useRemote } from './api'
 import type { Asset, Burst, GroupBy, Library, Rating } from './api'
@@ -8,11 +8,12 @@ import { InsightsScreen, views } from './Insights'
 import type { InsightCapabilities, View } from './Insights'
 import { LibraryNav } from './LibraryNav'
 import type { Lookup } from './ML'
+import { Providers } from './Providers'
 import { Review } from './Review'
 import { useShortcuts } from './shortcuts'
 
-function Header({ connected, online, onHelp }: {
-  connected?: boolean; online?: boolean; onHelp?: () => void
+function Header({ connected, online, onHelp, onProviders }: {
+  connected?: boolean; online?: boolean; onHelp?: () => void; onProviders?: () => void
 }) {
   return (
     <header className="app-header">
@@ -27,6 +28,8 @@ function Header({ connected, online, onHelp }: {
             {!connected ? 'Connecting to API' : online ? 'Worker online' : 'Worker offline'}
           </div>
         )}
+        {onProviders && <button className="icon-button" aria-label="Decision providers"
+          title="Decision providers" onClick={onProviders}><Settings2 size={17} /></button>}
         {onHelp && <button className="icon-button" aria-label="Keyboard shortcuts"
           aria-keyshortcuts="?" title="Keyboard shortcuts (?)" onClick={onHelp}><Keyboard size={17} /></button>}
       </div>
@@ -58,6 +61,7 @@ function Workspace({ libraries, library, selectLibrary, archiveSeed }: {
   const [burstUndo, setBurstUndo] = useState<{ token: string; count: number }>()
   const [notice, setNotice] = useState<string>()
   const [help, setHelp] = useState(false)
+  const [showProviders, setShowProviders] = useState(false)
   const inFlight = useRef(false)
   const searchInput = useRef<HTMLInputElement>(null)
   const focusBeforeSearch = useRef<HTMLElement>(null)
@@ -203,6 +207,7 @@ function Workspace({ libraries, library, selectLibrary, archiveSeed }: {
   }
 
   useShortcuts((key, event) => {
+    if (showProviders) return
     if (event.ctrlKey || event.metaKey || event.altKey || event.repeat) return
     if (key === 'escape' && view !== 'review') {
       event.preventDefault()
@@ -238,7 +243,10 @@ function Workspace({ libraries, library, selectLibrary, archiveSeed }: {
 
   return (
     <div className="app">
-      <Header connected={connected} online={connected && progress?.worker_online} onHelp={() => setHelp(true)} />
+      <Header connected={connected} online={connected && progress?.worker_online}
+        onHelp={() => setHelp(true)} onProviders={() => setShowProviders(true)} />
+      {showProviders && <Providers base={base} library={library} version={progress?.catalog_revision}
+        onClose={() => setShowProviders(false)} />}
       {help && <ShortcutHelp onClose={() => setHelp(false)} />}
       {error && (
         <div className="status-banner" role="alert">

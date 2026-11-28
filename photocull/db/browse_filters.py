@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 from photocull.config import Settings
 from photocull.db import connect, write
-from photocull.db.catalog import AUTO_REJECT_REASON, mark_catalog_updated
+from photocull.db.catalog import AUTO_REJECT_REASON, mark_catalog_updated, quality_score
+from photocull.db.decisions import tags_available
 from photocull.db.insights import public_keys
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=160)]
@@ -139,8 +140,9 @@ def clauses(db: sqlite3.Connection, library: str, filters: Filters, settings: Se
         conditions.append("a.rejected = 1")
     elif filters.flag:
         automatic = f"""EXISTS (SELECT 1 FROM assets AS x
-            LEFT JOIN asset_scores AS s ON s.asset_id = x.id WHERE x.id = a.id
-            AND ({AUTO_REJECT_REASON}) IS NOT NULL)"""
+            LEFT JOIN asset_scores AS s ON s.asset_id = x.id
+            WHERE x.id = a.id
+            AND ({AUTO_REJECT_REASON.replace("a.", "x.")}) IS NOT NULL)"""
         if filters.flag == "automatic":
             conditions.append(automatic)
         else:
@@ -162,10 +164,11 @@ def clauses(db: sqlite3.Connection, library: str, filters: Filters, settings: Se
             conditions.append("""EXISTS (SELECT 1 FROM browser_tags AS t
                 WHERE t.asset_id = a.id AND t.name_key = ?)""")
             params.append(tag_key(value))
-        elif model.enabled and model.tags_enabled and value in model.vocabulary:
-            conditions.append("""EXISTS (SELECT 1 FROM asset_tags AS t
-                JOIN asset_embeddings AS e ON e.asset_id = t.asset_id WHERE t.asset_id = a.id
-                AND t.tag = ? AND e.tag_key = ? AND e.content_hash = a.content_hash)""")
+        elif value in model.vocabulary and tags_available(
+            db, settings.vlm.selection, model.enabled and model.tags_enabled
+        ):
+            conditions.append("""EXISTS (SELECT 1 FROM effective_tags AS t WHERE t.asset_id = a.id
+                AND t.tag = ? AND t.tag_key = ? AND t.content_hash = a.content_hash)""")
             params.extend((value, model.tag_key))
         else:
             conditions.append("0")
@@ -195,32 +198,33 @@ def clauses(db: sqlite3.Connection, library: str, filters: Filters, settings: Se
                 AND ((t.started IS NULL AND a.captured_at IS NULL)
                      OR a.captured_at BETWEEN t.started AND t.ended))""")
         params.append(filters.place)
-    for score, relation, lower, upper, key in (
-        ("s.sharpness", "asset_scores", filters.min_sharpness, filters.max_sharpness, None),
-        (
-            "s.score",
-            "insight_results",
-            filters.min_aesthetic,
-            filters.max_aesthetic,
-            keys.get("aesthetic"),
-        ),
-    ):
-        if lower is None and upper is None:
-            continue
-        if relation == "insight_results" and key is None:
-            conditions.append("0")
-            continue
-        checks = ["s.asset_id = a.id"]
-        if key is not None:
-            checks += ["s.stage = 'aesthetic'", "s.key = ?", "s.content_hash = a.content_hash"]
+    if filters.min_sharpness is not None or filters.max_sharpness is not None:
+        bounds = []
+        for operator, value in ((">=", filters.min_sharpness), ("<=", filters.max_sharpness)):
+            if value is not None:
+                bounds.append(f"{quality_score('sharpness', 'x')} {operator} ?")
+                params.append(value)
+        conditions.append(f"""EXISTS (SELECT 1 FROM assets AS x
+            LEFT JOIN asset_scores AS s ON s.asset_id = x.id
+            WHERE x.id = a.id AND {" AND ".join(bounds)})""")
+    if filters.min_aesthetic is not None or filters.max_aesthetic is not None:
+        if key := keys.get("aesthetic"):
+            checks = [
+                "s.asset_id = a.id",
+                "s.stage = 'aesthetic'",
+                "s.key = ?",
+                "s.content_hash = a.content_hash",
+            ]
             params.append(key)
-        if lower is not None:
-            checks.append(f"{score} >= ?")
-            params.append(lower)
-        if upper is not None:
-            checks.append(f"{score} <= ?")
-            params.append(upper)
-        conditions.append(f"EXISTS (SELECT 1 FROM {relation} AS s WHERE {' AND '.join(checks)})")
+            for operator, value in ((">=", filters.min_aesthetic), ("<=", filters.max_aesthetic)):
+                if value is not None:
+                    checks.append(f"s.score {operator} ?")
+                    params.append(value)
+            conditions.append(
+                f"EXISTS (SELECT 1 FROM insight_results AS s WHERE {' AND '.join(checks)})"
+            )
+        else:
+            conditions.append("0")
     return conditions, params
 
 
@@ -252,14 +256,13 @@ def facets(libraries: Mapping[str, Path], settings: Settings) -> dict[str, list[
                 # Use the first catalog's spelling while merging normalized names.
                 add("tags", "user:" + label, label, count, "user", "user:" + normalized)
             model = settings.ml
-            if model.enabled and model.tags_enabled:
+            if tags_available(db, settings.vlm.selection, model.enabled and model.tags_enabled):
                 vocabulary = model.vocabulary
                 for tag, count in db.execute(
                     """
-                    SELECT t.tag, count(*) FROM asset_tags AS t
-                    JOIN asset_embeddings AS e ON e.asset_id = t.asset_id
+                    SELECT t.tag, count(*) FROM effective_tags AS t
                     JOIN assets AS a ON a.id = t.asset_id
-                    WHERE a.active = 1 AND e.tag_key = ? AND e.content_hash = a.content_hash
+                    WHERE a.active = 1 AND t.tag_key = ? AND t.content_hash = a.content_hash
                     GROUP BY t.tag
                 """,
                     (model.tag_key,),

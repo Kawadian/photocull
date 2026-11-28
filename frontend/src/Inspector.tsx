@@ -1,3 +1,4 @@
+import { providerLabel } from './api'
 import { Check, FileOutput, Scan, Star, Undo2, X } from 'lucide-react'
 import { useState } from 'react'
 import type { Ref } from 'react'
@@ -159,7 +160,9 @@ export function Inspector({ base, asset, busy, undoAvailable, onRating, onUndo, 
       </div>
       {asset && (
         <>
-          {ml?.enabled && asset.kind !== 'video' && <div className="inspector-section photo-analysis">
+          {(ml?.enabled || ml?.tags_enabled || asset.tag_provider) && asset.kind !== 'video' &&
+            <div className="inspector-section photo-analysis">
+            {ml?.enabled && <>
             <button className="button secondary" ref={similarRef}
               disabled={asset.embedding_status !== 'done' || ml.waiting || !workerOnline}
               onClick={() => onSimilar(asset)}><Scan size={15} /> Find similar photos</button>
@@ -167,21 +170,26 @@ export function Inspector({ base, asset, busy, undoAvailable, onRating, onUndo, 
               {asset.embedding_error ?? (asset.embedding_status === 'running'
                 ? 'Embedding in progress' : 'Awaiting photo embedding')}
             </p>}
-            {ml.tags_enabled && (
+            </>}
+            {(ml?.tags_enabled || asset.tag_provider) && (
               <>
                 <div className="section-heading">Photo tags</div>
+                {asset.tag_provider && <p className="score-state">{providerLabel(asset.tag_provider)}</p>}
                 {asset.tags?.length ? <div className="photo-tags">
                   {asset.tags.map(({ tag, label, score }) => (
                     <button key={tag} className="button secondary" aria-pressed={tag === activeTag}
-                      title={`Cosine similarity ${score.toFixed(2)}`}
+                      title={`${asset.tag_provider === "openai" ? "Confidence" : "Cosine similarity"} ${score.toFixed(2)}`}
                       onClick={() => onTag(tag === activeTag ? '' : tag)}>{label}</button>
                   ))}
-                </div> : <p className="score-state">{ml.tag_error ? 'Tags unavailable' : 'Awaiting tags'}</p>}
+                </div> : <p className="score-state">{ml?.tag_error ? 'Tags unavailable' : asset.tag_provider
+                  ? asset.tag_provider === 'unjudged' ? 'No tag decision' : 'No matching tags'
+                  : 'Awaiting tags'}</p>}
               </>
             )}
           </div>}
           <div className="inspector-section">
             <div className="section-heading">Scores</div>
+            {asset.flag_provider && <p className="score-state">{providerLabel(asset.flag_provider)}</p>}
             {asset.insights?.aesthetic?.score != null && <p className="score-state">
               Aesthetic score {Math.round(asset.insights.aesthetic.score * 100)}%
             </p>}
@@ -192,7 +200,7 @@ export function Inspector({ base, asset, busy, undoAvailable, onRating, onUndo, 
               <button className="button secondary" onClick={() => onVideo(asset)}>Open video analysis</button>}
             {(asset.sharpness !== null || asset.auto_reject) && <ScoreBadges asset={asset} />}
             {asset.kind === 'video' ? <p className="score-state">Scores apply to still images.</p>
-              : (asset.sharpness === null || (asset.score_status && asset.score_status !== 'done')) && (
+              : !asset.flag_provider && (asset.sharpness === null || (asset.score_status && asset.score_status !== 'done')) && (
                 <p className={asset.score_status === 'error' ? 'inline-error' : 'score-state'} role="status">
                   {asset.score_status ? scoreStates[asset.score_status] : 'Awaiting scores'}
                   {asset.score_error && <> · {asset.score_error}</>}

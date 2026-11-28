@@ -8,6 +8,7 @@ from pathlib import Path
 
 from photocull.db import search, write
 from photocull.db.catalog import mark_catalog_updated
+from photocull.db.decisions import tags_available
 from photocull.db.jobs import (
     DISABLED,
     MODEL_FAILURE,
@@ -174,7 +175,14 @@ class LibraryML:
                 raise ValueError("The embedding model changed. Submit the search again.")
             if row["query"] is not None and not self.settings.search_enabled:
                 raise ValueError("Text search is disabled")
-            if row["tag"] and (not self.settings.tags_enabled or row["tag_key"] != self.tag_key):
+            if row["tag"] and (
+                row["tag_key"] != self.tag_key
+                or not tags_available(
+                    self.db,
+                    self.inference.settings.vlm.selection,
+                    self.settings.tags_enabled,
+                )
+            ):
                 raise ValueError("This tag is unavailable")
             results = []
             if self._has_vectors():

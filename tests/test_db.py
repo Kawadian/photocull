@@ -2,7 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from importlib.resources import files
 
 from photocull.db import BUSY_TIMEOUT_MS, MIGRATIONS, connect, initialize, write
-from photocull.db.bursts import choose_best, get_burst, reject_burst_rest, undo_burst_reject
+from photocull.db.bursts import choose_best, get_burst, undo_burst_reject
 from photocull.db.catalog import set_rating
 
 
@@ -108,7 +108,8 @@ def test_incremental_migration_preserves_existing_burst_decisions(tmp_path):
         db.execute("INSERT INTO bursts VALUES (1, 1, ?)", (key,))
         db.executemany("INSERT INTO burst_members VALUES (?, 1)", [(1,), (2,)])
         original = choose_best(db, 1, 2, key)
-        token = reject_burst_rest(db, 1, 2, key)["undo_token"]
+        token = "a" * 32
+        db.execute("UPDATE assets SET burst_reject_token = ? WHERE id = 1", (token,))
 
     initialize(path)
     with connect(path) as db:

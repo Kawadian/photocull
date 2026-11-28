@@ -18,6 +18,7 @@ from threading import Event, Lock
 from photocull.config import STAGES, Library, Settings, load_settings
 from photocull.db import connect, initialize, write
 from photocull.db.catalog import mark_catalog_updated
+from photocull.db.decisions import cancel_remote, enqueue_preview, selection
 from photocull.db.jobs import (
     DISABLED,
     NO_EMBEDDING_PREVIEW,
@@ -32,7 +33,9 @@ from photocull.db.jobs import (
 from photocull.media.artifacts import prune_artifacts, unlink_artifact
 from photocull.media.cache import cache_path
 from photocull.media.walk import MediaJail, SourceChanged, source_key
+from photocull.vlm import OpenAIProvider
 from photocull.worker.bursts import refresh_bursts
+from photocull.worker.decisions import LibraryDecisions
 from photocull.worker.insights import Insights
 from photocull.worker.insights.story import Stories
 from photocull.worker.insights.transfers import Transfers
@@ -70,6 +73,7 @@ class LibraryWorker:
     stories: Stories | None = None
     watch: Watch | None = None
     transfers: Transfers | None = None
+    decisions: LibraryDecisions | None = None
     archive_gate: Lock = field(default_factory=Lock)
 
     def beat(self) -> None:
@@ -269,6 +273,14 @@ class LibraryWorker:
                          AND error = ?""",
                     (job.asset_id, NO_PREVIEW),
                 )
+            if not error and job.stage == "preview" and job.kind != "video" and self.decisions:
+                enqueue_preview(
+                    self.db,
+                    job.asset_id,
+                    job.content_hash,
+                    selection(self.db, self.settings.vlm.selection),
+                    self.decisions.ml.tag_key,
+                )
             if not error and job.stage == "preview" and self.settings.ml.enabled:
                 self.db.execute(
                     """UPDATE jobs SET status = 'pending', error = NULL
@@ -364,8 +376,13 @@ class LibraryWorker:
             return True
         embedded = ml.process_images() if ml else False
         between_work()
-        tagged = ml.process_tags() if ml else False
-        busy = bool(scanned or embedded or tagged)
+        tagged = (
+            ml.process_tags()
+            if ml and selection(self.db, self.settings.vlm.selection).tags == "local"
+            else False
+        )
+        decided = self.decisions.step(between_work) if self.decisions else False
+        busy = bool(scanned or embedded or tagged or decided)
         if self.insights and self.insights.clean_video():
             return True
         if not busy and self.transfers and self.transfers.step(between_work):
@@ -405,6 +422,10 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=N
         with ExitStack() as stack:
             workers: list[LibraryWorker] = []
             inference = InferenceProcess(settings, model_factory)
+            remote = OpenAIProvider(settings.state_dir, settings.vlm.openai, stop)
+            vlm_pool = stack.enter_context(
+                ThreadPoolExecutor(max_workers=settings.vlm.openai.concurrency)
+            )
             ready = False
             search_cursor = 0
             next_search_probe = 0.0
@@ -453,6 +474,9 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=N
                     )
                 )
             for worker in workers:
+                worker.decisions = LibraryDecisions(
+                    worker.db, worker.state, settings, worker.ml, remote, vlm_pool
+                )
                 worker.insights = Insights(worker, face_factory)
                 worker.stories = Stories(worker)
                 worker.transfers = Transfers(worker)
@@ -461,6 +485,9 @@ def run(settings: Settings, stop: Event, *, model_factory=Siglip, face_factory=N
                 worker.watch.start()
                 stack.callback(worker.watch.close)
                 recover(worker.db)
+                with write(worker.db):
+                    if cancel_remote(worker.db, selection(worker.db, settings.vlm.selection)):
+                        mark_catalog_updated(worker.db)
                 worker.configure()
             config = settings.worker
             pool = stack.enter_context(ThreadPoolExecutor(max_workers=config.parallelism))

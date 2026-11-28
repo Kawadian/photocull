@@ -522,7 +522,7 @@ def test_read_only_rename_and_keeper_skip_reports(tmp_path):
 
 def test_skip_migration_preserves_completed_transfers(tmp_path):
     path = tmp_path / "index.db"
-    initialize(path, MIGRATIONS[:-1])
+    initialize(path, MIGRATIONS[:28])
     with connect(path) as db:
         db.execute(
             "INSERT INTO transfers(id,kind,status,request,created_at,finished_at) "

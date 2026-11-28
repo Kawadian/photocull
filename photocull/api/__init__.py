@@ -15,6 +15,8 @@ from typing import Annotated, Literal
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi import Path as RoutePath
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StringConstraints, model_validator
@@ -24,8 +26,8 @@ from photocull.api.browse import browse_router
 from photocull.api.collections import collections_router
 from photocull.api.insights import mount_insights
 from photocull.api.media import CacheAccess, cached_media, mount_media, worker_recipe
-from photocull.config import MLSettings, Settings, Stage, host_name, load_settings
-from photocull.db import connect, initialize
+from photocull.config import ProviderSelection, Settings, Stage, host_name, load_settings
+from photocull.db import connect, initialize, write
 from photocull.db.browse import photo_details
 from photocull.db.bursts import (
     BurstConflict,
@@ -43,9 +45,13 @@ from photocull.db.catalog import (
     attach_tags,
     clear_auto_reject,
     get_asset,
+    mark_catalog_updated,
 )
 from photocull.db.catalog import set_rating as save_rating
 from photocull.db.collections import MIGRATIONS as COLLECTION_MIGRATIONS
+from photocull.db.decisions import Reanalysis, cancel_remote, selection, tags_available
+from photocull.db.decisions import enqueue as enqueue_decisions
+from photocull.db.decisions import select as save_providers
 from photocull.db.insights import asset_insights, public_keys
 from photocull.db.jobs import progress, request_scan, retry_job, scan_error_page
 from photocull.db.search import (
@@ -60,6 +66,7 @@ from photocull.db.search import (
 from photocull.media.cache import cache_path
 from photocull.media.derivatives import recipe
 from photocull.media.xmp import XMPConflict, XMPError, export_xmp
+from photocull.vlm import OpenAIProvider, ProviderError, endpoint
 
 TOKEN_HEADER = "x-photocull-token"
 VARIANTS = {"thumb": "thumbs", "preview": "previews", "detail": "details"}
@@ -125,18 +132,22 @@ class XMPUpdate(BaseModel):
         return self
 
 
-def _get_progress(path: Path, settings: MLSettings | None = None) -> dict:
+def _get_progress(path: Path, settings: Settings | None = None) -> dict:
     with connect(path) as db:
         result = progress(db)
         result["worker_online"] = worker_online(db, path, time.time())
+        available = settings and tags_available(
+            db, settings.vlm.selection, settings.ml.enabled and settings.ml.tags_enabled
+        )
     if settings is not None:
+        config = settings.ml
         ml = result["ml"]
-        configured = ml["enabled"] and ml["model_key"] == settings.model_key
-        ml["waiting"] = settings.enabled and not configured
-        ml["enabled"] = settings.enabled
-        ml["search_enabled"] = settings.enabled and settings.search_enabled
-        ml["tags_enabled"] = settings.enabled and settings.tags_enabled
-        if not (settings.enabled and configured):
+        configured = ml["enabled"] and ml["model_key"] == config.model_key
+        ml["waiting"] = config.enabled and not configured
+        ml["enabled"] = config.enabled
+        ml["search_enabled"] = config.enabled and config.search_enabled
+        ml["tags_enabled"] = bool(available)
+        if not (config.enabled and configured):
             for field in ("image_error", "text_error", "tag_error", "group_error"):
                 ml[field] = None
             ml["grouping"] = False
@@ -144,7 +155,7 @@ def _get_progress(path: Path, settings: MLSettings | None = None) -> dict:
     return result
 
 
-async def _events(path: Path, settings: MLSettings | None = None) -> AsyncIterator[str]:
+async def _events(path: Path, settings: Settings | None = None) -> AsyncIterator[str]:
     last = ""
     sent = time.monotonic()
     while True:
@@ -168,6 +179,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     token: bytes | None = None
     allowed_hosts = frozenset(settings.server.allowed_hosts)
     cache_access = CacheAccess()
+    provider_defaults = settings.vlm.selection
+    remote = OpenAIProvider(settings.state_dir, settings.vlm.openai)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -205,17 +218,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if text and not ml.search_enabled:
             raise HTTPException(409, "Text search is disabled")
 
-    def require_tag(tag: str | None) -> None:
+    def automatic_tags(db) -> bool:
+        return tags_available(db, provider_defaults, ml.enabled and ml.tags_enabled)
+
+    def require_tag(db, tag: str | None) -> None:
         if tag is not None:
-            require_ml()
-            if not ml.tags_enabled:
+            if not automatic_tags(db):
                 raise HTTPException(409, "Photo tags are disabled")
             if tag not in vocabulary:
                 raise HTTPException(422, "Unknown photo tag")
 
     def add_tags(db, items: list[dict]) -> None:
-        if ml.enabled and ml.tags_enabled:
+        if automatic_tags(db):
             attach_tags(db, items, tag_key, vocabulary)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, error: RequestValidationError):
+        if request.url.path.endswith(("/providers", "/providers/reanalyze")):
+            return JSONResponse({"detail": "Invalid provider settings or scope"}, status_code=422)
+        return await request_validation_exception_handler(request, error)
 
     @app.middleware("http")
     async def access(request: Request, call_next):
@@ -239,7 +260,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         api_recipe = recipe(settings.derivatives) if settings.derivatives.enabled else None
         for name in settings.libraries:
             path = library_path(name)
-            current = _get_progress(path, ml)
+            current = _get_progress(path, settings)
             with connect(path) as db:
                 active_recipe = worker_recipe(db, path)
             current["derivatives"] = {
@@ -257,6 +278,58 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/libraries")
     def libraries():
         return {"items": [{"name": name} for name in settings.libraries]}
+
+    @app.get("/api/libraries/{library}/providers")
+    def providers(library: str):
+        with connect(library_path(library)) as db:
+            return {
+                "selection": selection(db, provider_defaults),
+                "pending": db.execute("SELECT count(*) FROM decision_jobs").fetchone()[0],
+            }
+
+    @app.put("/api/libraries/{library}/providers")
+    def update_providers(library: str, value: ProviderSelection):
+        path = library_path(library)
+        if "openai" in (value.tags, value.flags):
+            try:
+                endpoint(settings.vlm.openai)
+            except ProviderError:
+                raise HTTPException(
+                    409, "Configure the OpenAI-compatible endpoint and model"
+                ) from None
+        with connect(path) as db, write(db):
+            save_providers(db, value)
+        return {"selection": value}
+
+    @app.delete("/api/libraries/{library}/providers", status_code=204)
+    def reset_providers(library: str):
+        with connect(library_path(library)) as db, write(db):
+            changed = db.execute("DELETE FROM provider_selection").rowcount
+            if cancel_remote(db, provider_defaults) or changed:
+                mark_catalog_updated(db)
+        return Response(status_code=204)
+
+    @app.post("/api/libraries/{library}/providers/test")
+    def test_provider(library: str):
+        library_path(library)
+        return remote.test_connection()
+
+    @app.post("/api/libraries/{library}/providers/reanalyze", status_code=202)
+    def reanalyze(library: str, value: Reanalysis):
+        with connect(library_path(library)) as db, write(db):
+            selected = selection(db, provider_defaults)
+            kinds = ("tags", "flags") if value.kind == "both" else (value.kind,)
+            if (
+                "tags" in kinds
+                and selected.tags == "local"
+                and not (ml.enabled and ml.tags_enabled)
+            ):
+                raise HTTPException(409, "Local photo tags are disabled")
+            queued = sum(
+                enqueue_decisions(db, value.model_copy(update={"kind": kind}), selected, tag_key)
+                for kind in kinds
+            )
+        return {"queued": queued}
 
     @app.get("/api/libraries/{library}/groups")
     def groups(
@@ -295,11 +368,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         sort: Literal["id", "aesthetic", "taste"] = "id",
     ):
         path = library_path(library)
-        require_tag(tag)
         if similar_group_id is not None:
             require_ml()
         with connect(path) as db:
             db.execute("BEGIN")
+            require_tag(db, tag)
             keys = public_keys(db, settings)
             if person_id is not None and "faces" not in keys:
                 raise HTTPException(409, "Face grouping is disabled")
@@ -377,23 +450,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/libraries/{library}/tags")
     def tags(library: str):
-        library_path(library)
-        return {
-            "items": [
-                {"tag": tag, "label": " / ".join(vocabulary[tag])} for tag in sorted(vocabulary)
-            ]
-            if ml.enabled and ml.tags_enabled
-            else [],
-        }
+        with connect(library_path(library)) as db:
+            return {
+                "items": [
+                    {"tag": tag, "label": " / ".join(vocabulary[tag])} for tag in sorted(vocabulary)
+                ]
+                if automatic_tags(db)
+                else [],
+            }
 
     def submit_search(library: str, params: SearchParameters, *, query=None, asset_id=None):
         path = library_path(library)
         require_ml(text=query is not None)
-        require_tag(params.tag)
         with connect(path, timeout_ms=500) as db:
+            require_tag(db, params.tag)
             try:
                 search_id = enqueue(
-                    db, path, ml, query=query, asset_id=asset_id, tag=params.tag, limit=params.limit
+                    db,
+                    path,
+                    ml,
+                    query=query,
+                    asset_id=asset_id,
+                    tag=params.tag,
+                    limit=params.limit,
+                    allow_remote_tags=bool(params.tag) and not ml.tags_enabled,
                 )
             except QueueUnavailable as error:
                 raise HTTPException(503, str(error)) from error
@@ -423,7 +503,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             db.execute("BEGIN")
             try:
                 result = get_result(
-                    db, path, search_id, model_key, tag_key if ml.tags_enabled else None
+                    db, path, search_id, model_key, tag_key if automatic_tags(db) else None
                 )
             except QueueUnavailable as error:
                 raise HTTPException(503, str(error)) from error
@@ -576,7 +656,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/libraries/{library}/jobs")
     def job_progress(library: str):
-        return _get_progress(library_path(library), ml)
+        return _get_progress(library_path(library), settings)
 
     @app.post("/api/libraries/{library}/assets/{asset_id}/jobs/{stage}", status_code=202)
     def rerun(library: str, asset_id: CatalogId, stage: Stage):
@@ -596,7 +676,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/libraries/{library}/events")
     async def events(library: str):
         return StreamingResponse(
-            _events(library_path(library), ml),
+            _events(library_path(library), settings),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
