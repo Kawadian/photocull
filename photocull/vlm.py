@@ -16,6 +16,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import SplitResult, urlsplit
+from urllib.request import proxy_bypass_environment
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -157,6 +158,42 @@ def endpoint(config: OpenAISettings) -> SplitResult:
         raise ProviderError("invalid_configuration") from None
 
 
+def _connection(target: SplitResult, timeout: float) -> http.client.HTTPConnection:
+    host = target.hostname
+    assert host is not None
+    proxy_url = os.environ.get("HTTPS_PROXY", "")
+    if not proxy_url or proxy_bypass_environment(
+        target.netloc, {"no": os.environ.get("NO_PROXY", "")}
+    ):
+        transport = (
+            http.client.HTTPSConnection if target.scheme == "https" else http.client.HTTPConnection
+        )
+        return transport(host, target.port, timeout=timeout)
+
+    try:
+        proxy = urlsplit(proxy_url)
+        if (
+            target.scheme != "https"
+            or proxy.scheme != "http"
+            or not proxy.hostname
+            or proxy.username is not None
+            or proxy.password is not None
+            or proxy.path not in {"", "/"}
+            or proxy.query
+            or proxy.fragment
+            or proxy.port == 0
+            or any(not 33 <= ord(char) <= 126 for char in proxy_url)
+        ):
+            raise ValueError
+        connection = http.client.HTTPSConnection(proxy.hostname, proxy.port or 80, timeout=timeout)
+        # CONNECT carries only the authority. HTTPSConnection verifies TLS against the
+        # destination inside the tunnel before sending the POST and its credentials.
+        connection.set_tunnel(host, target.port if target.port is not None else 443)
+        return connection
+    except ValueError:
+        raise ProviderError("invalid_configuration") from None
+
+
 class OpenAIProvider:
     def __init__(self, state: Path, config: OpenAISettings, stop: threading.Event | None = None):
         self.config = config
@@ -228,11 +265,8 @@ class OpenAIProvider:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        transport = (
-            http.client.HTTPSConnection if target.scheme == "https" else http.client.HTTPConnection
-        )
-        connection = transport(target.hostname, target.port, timeout=self.config.timeout_seconds)
-        # Direct connection. Never follow redirects or pass credentials through environment proxies.
+        connection = _connection(target, self.config.timeout_seconds)
+        # A single HTTP request, with no redirect handling or implicit proxy discovery.
         try:
             connection.request("POST", target.path, json.dumps(body).encode(), headers)
             with connection.getresponse() as response:

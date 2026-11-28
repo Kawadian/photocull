@@ -54,6 +54,8 @@ services:
       PHOTOCULL_ALLOWED_HOSTS:
       PHOTOCULL_BIND_HOST: 127.0.0.1
       PHOTOCULL_BIND_PORT: '8000'
+      # Keep the connection test on the API's host network.
+      HTTPS_PROXY: ""
     volumes:
       - *config
       - *state
@@ -69,6 +71,7 @@ services:
       context: .
       dockerfile: deploy/docker/Dockerfile.worker
     user: "${PHOTOCULL_UID:-1000}:${PHOTOCULL_GID:-1000}"
+    # Use deploy/compose.egress.yml for isolated remote decision traffic.
     network_mode: "${PHOTOCULL_WORKER_NETWORK_MODE:-none}"
     restart: unless-stopped
     stop_grace_period: 90s
@@ -79,6 +82,7 @@ services:
       PHOTOCULL_CONFIG: /etc/photocull/photocull.yaml
       PHOTOCULL_BROWSER_STRIP_LOCATION:
       PHOTOCULL_MODEL_DIR: /models
+      HTTPS_PROXY: ""
     volumes:
       - *config
       - *state
