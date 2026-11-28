@@ -89,11 +89,11 @@ class RestartRequest:
 
 def read_record(fd: int, name: str, owner: int) -> dict | None:
     try:
-        source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        source = os.open(name, os.O_PATH | os.O_NOFOLLOW, dir_fd=fd)
     except FileNotFoundError:
         return None
-    with os.fdopen(source, "rb") as handle:
-        info = os.fstat(handle.fileno())
+    try:
+        info = os.fstat(source)
         if (
             not stat.S_ISREG(info.st_mode)
             or info.st_uid != owner
@@ -102,11 +102,15 @@ def read_record(fd: int, name: str, owner: int) -> dict | None:
             or info.st_size > MAX_BYTES
         ):
             raise RestartError("Untrusted restart record")
-        try:
+        # The host must inspect the type before opening an API-controlled inode for I/O.
+        with open(f"/proc/self/fd/{source}", "rb") as handle:
             data = handle.read(MAX_BYTES + 1)
+        try:
             value = json.loads(data)
         except (ValueError, RecursionError):
             raise RestartError("Invalid restart record") from None
+    finally:
+        os.close(source)
     if len(data) > MAX_BYTES or not isinstance(value, dict):
         raise RestartError("Invalid restart record")
     return value

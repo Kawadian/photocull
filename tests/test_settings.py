@@ -472,6 +472,10 @@ def test_host_handoff_rejects_unlisted_stale_and_symlink_requests(tmp_path, monk
     restart.run_host(directory, wrapper, ("worker",))
     assert not pending.is_symlink() and outside.exists()
 
+    os.mkfifo(pending)
+    restart.run_host(directory, wrapper, ("worker",))
+    assert not pending.exists()
+
 
 def test_live_vlm_api_and_restart_only_endpoint(tmp_path):
     store, headers, *_ = deployment(tmp_path)
