@@ -1,4 +1,4 @@
-import { Aperture, Images, Keyboard, Settings2 } from 'lucide-react'
+import { Aperture, Images, Keyboard, Settings, Settings2 } from 'lucide-react'
 import { useRef, useState } from 'react'
 import { ApiError, assetName, json, message, request, useProgress, useRemote } from './api'
 import type { Asset, Burst, GroupBy, Library, Rating } from './api'
@@ -22,10 +22,13 @@ function Header({ connected, online, onHelp, onProviders }: {
         <a className="button secondary browser-entry" href="/?view=browser" aria-label="Photo browser" title="Photo browser">
           <Images size={15} aria-hidden="true" /><span>Photo browser</span>
         </a>
+        <a className="button secondary browser-entry settings-entry" href="/?view=settings" aria-label="設定" title="設定">
+          <Settings size={15} aria-hidden="true" /><span>設定</span>
+        </a>
         {connected !== undefined && (
           <div className="worker-indicator" role="status">
             <span className={online ? 'online' : undefined} />
-            {!connected ? 'Connecting to API' : online ? 'Worker online' : 'Worker offline'}
+            <span className="worker-status-text">{!connected ? 'Connecting to API' : online ? 'Worker online' : 'Worker offline'}</span>
           </div>
         )}
         {onProviders && <button className="icon-button" aria-label="Decision providers"

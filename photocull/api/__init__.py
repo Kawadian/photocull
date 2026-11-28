@@ -26,7 +26,8 @@ from photocull.api.browse import browse_router
 from photocull.api.collections import collections_router
 from photocull.api.insights import mount_insights
 from photocull.api.media import CacheAccess, cached_media, mount_media, worker_recipe
-from photocull.config import ProviderSelection, Settings, Stage, host_name, load_settings
+from photocull.api.settings import settings_router
+from photocull.config import ProviderSelection, Settings, Stage, host_name
 from photocull.db import connect, initialize, write
 from photocull.db.browse import photo_details
 from photocull.db.bursts import (
@@ -66,6 +67,7 @@ from photocull.db.search import (
 from photocull.media.cache import cache_path
 from photocull.media.derivatives import recipe
 from photocull.media.xmp import XMPConflict, XMPError, export_xmp
+from photocull.settings_store import SettingsStore
 from photocull.vlm import OpenAIProvider, ProviderError, endpoint
 
 TOKEN_HEADER = "x-photocull-token"
@@ -174,8 +176,12 @@ def _rss_mb() -> float:
     return round(resident_pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024), 1)
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
-    settings = settings or load_settings()
+def create_app(
+    settings: Settings | None = None, *, settings_store: SettingsStore | None = None
+) -> FastAPI:
+    if settings is None:
+        settings_store = settings_store or SettingsStore.from_config()
+        settings = settings_store.read().settings
     token: bytes | None = None
     allowed_hosts = frozenset(settings.server.allowed_hosts)
     cache_access = CacheAccess()
@@ -246,13 +252,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request.headers.get(TOKEN_HEADER, "").encode("latin-1"), token
         ):
             return JSONResponse({"detail": "Photocull token required"}, status_code=401)
+        admin = request.url.path == "/api/settings" or request.url.path.startswith("/api/settings/")
+        if admin and (token is None or settings_store is None):
+            return JSONResponse(
+                {"detail": "設定管理には管理者トークンが必要です。"}, status_code=403
+            )
         if request.method in {"POST", "PATCH", "PUT", "DELETE"}:
             origin = request.headers.get("origin")
             host = request.headers.get("host", "").lower()
             cross_origin = origin and origin.lower() not in {f"http://{host}", f"https://{host}"}
             if cross_origin or request.headers.get("sec-fetch-site") == "cross-site":
                 return JSONResponse({"detail": "Cross-origin request rejected"}, status_code=403)
-        return await call_next(request)
+        response = await call_next(request)
+        if admin:
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/api/health")
     def health():
@@ -690,6 +704,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     mount_insights(app, settings, library_path)
     mount_archive(app, settings, library_path)
+    if settings_store is not None:
+        app.include_router(settings_router(settings_store, settings, remote))
     app.include_router(browse_router(settings))
     app.include_router(collections_router(settings))
     app.include_router(mount_media(settings, library_path, cache_access))

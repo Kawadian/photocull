@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from copy import deepcopy
 from hashlib import sha256
 from ipaddress import IPv6Address
 from json import dumps
@@ -424,7 +425,7 @@ def _paths(values: dict, keys: tuple[str, ...], base: Path) -> None:
             values[key] = (base / Path(values[key]).expanduser()).absolute()
 
 
-def load_settings() -> Settings:
+def configuration() -> tuple[dict, Path, Path, dict]:
     cwd = Path.cwd()
     env = {**dotenv_values(cwd / ".env"), **os.environ}
     config = Path(env.get("PHOTOCULL_CONFIG") or "photocull.yaml").expanduser().absolute()
@@ -437,6 +438,18 @@ def load_settings() -> Settings:
             raise ValueError("Photocull configuration contains invalid YAML") from None
         if not isinstance(values, dict):
             raise ValueError("Photocull configuration must be a YAML mapping")
+
+    return values, config, cwd, env
+
+
+def resolve_settings(
+    values: dict, config: Path, cwd: Path, env: dict, overridden: dict | None = None
+) -> Settings:
+    values = deepcopy(values)
+
+    def override(path: str, name: str) -> None:
+        if overridden is not None:
+            overridden[path] = name
 
     _paths(values, ("state_dir", "token_file", "static_dir", "model_dir"), config.parent)
     for library in values.get("libraries", {}).values():
@@ -454,6 +467,7 @@ def load_settings() -> Settings:
             for field in ("base_url", "model"):
                 if setting := env.get(f"PHOTOCULL_VLM_{field.upper()}"):
                     openai[field] = setting
+                    override(f"vlm.openai.{field}", f"PHOTOCULL_VLM_{field.upper()}")
 
     try:
         values["vlm"] = VLMSettings.model_validate(vlm)
@@ -463,6 +477,7 @@ def load_settings() -> Settings:
     insights = values.setdefault("insights", {})
     _paths(insights, ("story_geonames",), config.parent)
     if places := env.get("PHOTOCULL_INSIGHTS_STORY_GEONAMES"):
+        override("insights.story_geonames", "PHOTOCULL_INSIGHTS_STORY_GEONAMES")
         insights["story_geonames"] = (cwd / Path(places).expanduser()).absolute()
     if roots := insights.get("export_roots"):
         _paths(roots, tuple(roots), config.parent)
@@ -472,10 +487,12 @@ def load_settings() -> Settings:
     for field in ("hot_dir", "large_dir"):
         if setting := env.get(f"PHOTOCULL_DERIVATIVES_{field.upper()}"):
             derivatives[field] = (cwd / Path(setting).expanduser()).absolute()
+            override(f"derivatives.{field}", f"PHOTOCULL_DERIVATIVES_{field.upper()}")
     for mapping in ("export_roots", "trash_roots"):
         if roots := archive.get(mapping):
             _paths(roots, tuple(roots), config.parent)
     if (roots := env.get("PHOTOCULL_WRITE_ROOTS")) is not None:
+        override("archive.write_roots", "PHOTOCULL_WRITE_ROOTS")
         archive["write_roots"] = [
             Path(root).expanduser() for root in roots.split(os.pathsep) if root
         ]
@@ -500,10 +517,13 @@ def load_settings() -> Settings:
         env_values["token_file"] = None
     _paths(env_values, ("state_dir", "token_file", "static_dir", "model_dir"), cwd)
     values.update(env_values)
+    for field in env_values:
+        override(field, f"PHOTOCULL_{field.upper()}")
 
     if root := env.get("PHOTOCULL_LIBRARY_ROOT"):
         name = env.get("PHOTOCULL_LIBRARY_NAME") or "photos"
         allowed = env.get("PHOTOCULL_ALLOWED_ROOTS") or ""
+        override(f"libraries.{name}", "PHOTOCULL_LIBRARY_ROOT")
         values.setdefault("libraries", {})[name] = {
             "root": (cwd / Path(root).expanduser()).absolute(),
             "allowed_roots": [
@@ -526,7 +546,9 @@ def load_settings() -> Settings:
     ):
         if (setting := env.get(f"PHOTOCULL_WORKER_{field.upper()}")) is not None:
             worker[field] = setting
+            override(f"worker.{field}", f"PHOTOCULL_WORKER_{field.upper()}")
     if (stages := env.get("PHOTOCULL_WORKER_STAGES")) is not None:
+        override("worker.stages", "PHOTOCULL_WORKER_STAGES")
         worker["stages"] = [stage.strip() for stage in stages.split(",") if stage.strip()]
 
     for section, model in (
@@ -550,10 +572,18 @@ def load_settings() -> Settings:
         }:
             if (value := env.get(f"PHOTOCULL_{section.upper()}_{field.upper()}")) is not None:
                 settings[field] = value
+                override(f"{section}.{field}", f"PHOTOCULL_{section.upper()}_{field.upper()}")
 
     if (hosts := env.get("PHOTOCULL_ALLOWED_HOSTS")) is not None:
+        override("server.allowed_hosts", "PHOTOCULL_ALLOWED_HOSTS")
         values.setdefault("server", {})["allowed_hosts"] = [
             host.strip() for host in hosts.split(",") if host.strip()
         ]
 
     return Settings.model_validate(values)
+
+
+def load_settings() -> Settings:
+    from photocull.settings_store import SettingsStore
+
+    return SettingsStore.from_config().read().settings

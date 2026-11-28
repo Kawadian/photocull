@@ -63,7 +63,7 @@ kbd {
   font-size: 12px;
   gap: 8px;
 }
-.worker-indicator > span {
+.worker-indicator > span:first-child {
   background: #818687;
   border-radius: 50%;
   height: 7px;
@@ -481,6 +481,9 @@ dialog.modal { max-height: 88dvh; overflow-y: auto; }
 
 @media (max-width: 420px) {
   .app-header { padding-inline: 12px; }
+  .app .header-actions { gap: 5px; }
+  .app .header-actions .settings-entry { min-width: 34px; padding-inline: 6px; }
+  .app .worker-status-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
   .review:has(.comparison) { grid-template-rows: auto minmax(440px, 72dvh) auto; }
   .comparison { grid-template-columns: minmax(0, 1fr); grid-template-rows: repeat(2, minmax(0, 1fr)); }
   .comparison-frame + .comparison-frame { border-left: 0; border-top: 1px solid var(--line); }
