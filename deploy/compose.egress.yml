@@ -2,7 +2,7 @@
 services:
   worker:
     network_mode: !reset null
-    networks:
+    networks: !override
       - worker-egress
     cap_drop:
       - NET_RAW
